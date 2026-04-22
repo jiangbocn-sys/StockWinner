@@ -1,0 +1,13 @@
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+pydantic==2.5.3
+pydantic-settings==2.1.0
+sqlalchemy==2.0.25
+aiofiles==23.2.1
+python-multipart==0.0.6
+requests==2.31.0
+psutil==5.9.7
+aiosqlite==0.19.0
+
+# 银河 SDK (真实交易环境需要安装)
+# tgw==2.0.0  # 中国银河证券交易网关

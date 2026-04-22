@@ -1,0 +1,21 @@
+[Unit]
+Description=StockWinner Backend Service
+After=network.target
+
+[Service]
+Type=simple
+User=bobo
+WorkingDirectory=/home/bobo/StockWinner
+ExecStart=/home/bobo/StockWinner/venv/bin/python -m uvicorn services.main:app --host 0.0.0.0 --port 8080
+Restart=always
+RestartSec=5
+StandardOutput=append:/home/bobo/StockWinner/logs/backend.log
+StandardError=append:/home/bobo/StockWinner/logs/backend.log
+PIDFile=/home/bobo/StockWinner/logs/backend.pid
+
+# 环境变量
+Environment="PATH=/home/bobo/StockWinner/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Environment="PYTHONUNBUFFERED=1"
+
+[Install]
+WantedBy=multi-user.target

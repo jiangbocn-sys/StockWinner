@@ -1,0 +1,22 @@
+{
+    "_comment": "LLM 策略生成服务配置文件",
+    "_docs": "支持任意兼容 OpenAI 格式的 LLM API（Claude、GPT、DeepSeek、通义千问等）",
+
+    "provider": "anthropic",
+    "api_key": "sk-ant-api03-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "base_url": "",
+    "model": "",
+
+    "_note": "说明:",
+    "_provider_options": {
+        "anthropic": {"default_model": "claude-sonnet-4-20250514", "base_url": "https://api.anthropic.com/v1/messages"},
+        "openai": {"default_model": "gpt-4o", "base_url": "https://api.openai.com/v1/chat/completions"},
+        "deepseek": {"default_model": "deepseek-chat", "base_url": "https://api.deepseek.com/v1/chat/completions"},
+        "aliyun": {"default_model": "qwen-plus", "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"},
+        "moonshot": {"default_model": "moonshot-v1-8k", "base_url": "https://api.moonshot.cn/v1/chat/completions"},
+        "zhipu": {"default_model": "glm-4", "base_url": "https://open.bigmodel.cn/api/paas/v4/chat/completions"},
+        "custom": {"default_model": "", "base_url": ""}
+    },
+
+    "_usage": "使用方法：将 provider 设置为你需要的服务商，填入对应的 api_key，可选配置 base_url 和 model"
+}

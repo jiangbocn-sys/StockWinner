@@ -1,0 +1,136 @@
+{
+  "templates": [
+    {
+      "id": "small_cap_value",
+      "name": "小市值低估值",
+      "description": "筛选市值小于 50 亿且 PE 倒数大于 0.05（PE<20）的股票",
+      "category": "价值选股",
+      "filters": [
+        {
+          "field": "circ_market_cap",
+          "operator": "lt",
+          "value": 5000000000
+        },
+        {
+          "field": "pe_inverse",
+          "operator": "gt",
+          "value": 0.05
+        },
+        {
+          "field": "days_since_ipo",
+          "operator": "gte",
+          "value": 250
+        }
+      ],
+      "sort": [
+        {"field": "circ_market_cap", "order": "asc"}
+      ],
+      "default_limit": 100
+    },
+    {
+      "id": "momentum_breakthrough",
+      "name": "动量突破",
+      "description": "筛选近期表现强势，10 日涨幅超过 20% 且 20 日涨幅超过 30% 的股票",
+      "category": "动量选股",
+      "filters": [
+        {
+          "field": "change_10d",
+          "operator": "gt",
+          "value": 0.2
+        },
+        {
+          "field": "change_20d",
+          "operator": "gt",
+          "value": 0.3
+        },
+        {
+          "field": "rsi_14",
+          "operator": "lt",
+          "value": 80
+        }
+      ],
+      "sort": [
+        {"field": "change_10d", "order": "desc"}
+      ],
+      "default_limit": 50
+    },
+    {
+      "id": "quality_growth",
+      "name": "优质成长",
+      "description": "筛选具备成长性的优质股票（需要基本面因子支持）",
+      "category": "成长选股",
+      "filters": [
+        {
+          "field": "roe",
+          "operator": "gt",
+          "value": 0.15
+        },
+        {
+          "field": "net_profit_growth_yoy",
+          "operator": "gt",
+          "value": 0.2
+        },
+        {
+          "field": "gross_margin",
+          "operator": "gt",
+          "value": 0.3
+        }
+      ],
+      "sort": [
+        {"field": "roe", "order": "desc"}
+      ],
+      "default_limit": 50,
+      "note": "需要基本面因子数据支持"
+    },
+    {
+      "id": "technical_buy",
+      "name": "技术面买入信号",
+      "description": "KDJ 金叉且 RSI 处于低位的技术面买入信号",
+      "category": "技术选股",
+      "filters": [
+        {
+          "field": "kdj_k",
+          "operator": "gt",
+          "value": 20
+        },
+        {
+          "field": "kdj_d",
+          "operator": "lt",
+          "value": 30
+        },
+        {
+          "field": "rsi_14",
+          "operator": "lt",
+          "value": 30
+        }
+      ],
+      "sort": [
+        {"field": "kdj_k", "order": "desc"}
+      ],
+      "default_limit": 50
+    },
+    {
+      "id": "limit_up_potential",
+      "name": "涨停潜力",
+      "description": "近期有涨停记录且处于强势的股票",
+      "category": "特色选股",
+      "filters": [
+        {
+          "field": "limit_up_count_10d",
+          "operator": "gte",
+          "value": 1
+        },
+        {
+          "field": "change_std_5",
+          "operator": "gt",
+          "value": 0.03
+        }
+      ],
+      "sort": [
+        {"field": "limit_up_count_10d", "order": "desc"},
+        {"field": "change_10d", "order": "desc"}
+      ],
+      "default_limit": 30
+    }
+  ]
+}

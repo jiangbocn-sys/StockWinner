@@ -1,0 +1,10 @@
+id,factor_id,factor_name,factor_type,weight,threshold,direction,formula,description,is_enabled,created_at,updated_at
+1,ma_uptrend,均线多头排列,technical,0.1,0.5,higher_better,MA5>MA10>MA20,短期均线在长期均线之上，呈多头排列,1,2026-04-02 15:07:33,2026-04-02 15:07:33
+2,macd_golden_cross,MACD 金叉,technical,0.15,0.5,higher_better,MACD>0 AND MACD_HIST>0,MACD 快线上穿慢线，形成金叉,1,2026-04-02 15:07:33,2026-04-02 15:07:33
+3,rsi_strength,RSI 强势,technical,0.1,50.0,higher_better,RSI>50,RSI 在 50 以上，显示多头强势,1,2026-04-02 15:07:33,2026-04-02 15:07:33
+4,kdj_golden_cross,KDJ 金叉,technical,0.1,0.5,higher_better,K>D AND J>50,K 线上穿 D 线，J 值在 50 以上,1,2026-04-02 15:07:33,2026-04-02 15:07:33
+5,volume_ratio,量比,volume,0.15,1.5,higher_better,"VOL/MA(VOL,5)>=1.5",当日成交量是 5 日均量的 1.5 倍以上,1,2026-04-02 15:07:33,2026-04-02 15:07:33
+6,volume_trend,成交量趋势,volume,0.1,0.5,higher_better,"VOL>MA(VOL,5)",成交量站在 5 日均量之上,1,2026-04-02 15:07:33,2026-04-02 15:07:33
+7,5day_gain,5 日涨幅,momentum,0.15,0.05,higher_better,"(CLOSE-REF(CLOSE,5))/REF(CLOSE,5)>=0.05",近 5 日涨幅超过 5%,1,2026-04-02 15:07:33,2026-04-02 15:07:33
+8,breakthrough,突破新高,momentum,0.15,0.5,higher_better,"CLOSE>=HHV(HIGH,20)",收盘价突破近 20 日最高点,1,2026-04-02 15:07:33,2026-04-02 15:07:33
+9,bullish_engulfing,阳包阴,pattern,0.1,0.5,higher_better,"CLOSE>OPEN AND CLOSE>REF(CLOSE,1)",今日阳线完全包裹昨日阴线,1,2026-04-02 15:07:33,2026-04-02 15:07:33
