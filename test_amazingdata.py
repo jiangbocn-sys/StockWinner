@@ -25,10 +25,6 @@ def test_amazingdata():
             print(f"获取版本信息失败: {e}")
 
         # 测试登录
-        username = 'REDACTED_SDK_USERNAME'
-        password = 'REDACTED_SDK_PASSWORD'
-        host = '101.230.159.234'  # 电信 IP
-        port = 8600
 
         print(f"尝试连接到服务器: {host}:{port}")
 
