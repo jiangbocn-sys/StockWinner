@@ -243,10 +243,11 @@ def download_weekly_kline_sync(
 
 
 if __name__ == "__main__":
-    # 测试下载
+    import os
+    # 测试下载 - 从环境变量读取凭证
     download_weekly_kline_sync(
         years=10,
-        broker_account="REDACTED_SDK_USERNAME",
-        broker_password="REDACTED_SDK_PASSWORD",
+        broker_account=os.environ.get("SDK_USERNAME", ""),
+        broker_password=os.environ.get("SDK_PASSWORD", ""),
         batch_size=50
     )

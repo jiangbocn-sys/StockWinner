@@ -160,11 +160,11 @@ class GalaxyTradingGateway(TradingGatewayInterface):
     """银河交易网关（使用 AmazingData SDK 作为底层实现）"""
 
     def __init__(self, app_id: str = "", password: str = ""):
-        self.app_id = app_id or "REDACTED_SDK_USERNAME"
-        self.password = password or "REDACTED_SDK_PASSWORD"
+        self.app_id = app_id  # 不再硬编码默认值，由调用方提供
+        self.password = password
         self.connected = False
         self._token = None
-        self.server_ip = "140.206.44.234"
+        self.server_ip = "140.206.44.234"  # 银河服务器地址（公开信息）
         self.server_port = 8600
 
         # 银河 SDK 参数（保留用于兼容）
@@ -858,11 +858,11 @@ class AmazingDataTradingGateway(TradingGatewayInterface):
     """AmazingData 交易网关"""
 
     def __init__(self, app_id: str = "", password: str = ""):
-        self.app_id = app_id or "REDACTED_SDK_USERNAME"
-        self.password = password or "REDACTED_SDK_PASSWORD"
+        self.app_id = app_id  # 不再硬编码默认值，由调用方提供
+        self.password = password
         self.connected = False
         self._token = None
-        self.server_ip = "140.206.44.234"
+        self.server_ip = "140.206.44.234"  # 银河服务器地址（公开信息）
         self.server_port = 8600
 
         # 使用 SDKManager 管理 SDK 实例，避免重复创建导致 TGW 连接数超限

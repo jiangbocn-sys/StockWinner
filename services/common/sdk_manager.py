@@ -221,11 +221,12 @@ class SDKManager:
             return {}
 
 
-# SDK 登录信息
-SDK_USERNAME = "REDACTED_SDK_USERNAME"
-SDK_PASSWORD = "REDACTED_SDK_PASSWORD"
-SDK_HOST = "101.230.159.234"
-SDK_PORT = 8600
+# SDK 登录信息 - 从环境变量读取，不再硬编码
+import os
+SDK_USERNAME = os.environ.get("SDK_USERNAME", "")
+SDK_PASSWORD = os.environ.get("SDK_PASSWORD", "")
+SDK_HOST = os.environ.get("SDK_HOST", "")
+SDK_PORT = int(os.environ.get("SDK_PORT", "8600"))
 
 
 # 全局单例
