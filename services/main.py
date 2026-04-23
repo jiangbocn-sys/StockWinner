@@ -2,6 +2,10 @@
 FastAPI 主应用
 """
 
+# 在任何其他导入之前加载环境变量
+from dotenv import load_dotenv
+load_dotenv()  # 从 .env 文件加载环境变量
+
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse

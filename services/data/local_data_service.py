@@ -1938,7 +1938,18 @@ async def download_all_kline_data(
 
     # 获取进度跟踪器
     tracker = get_progress_tracker()
-    tracker.reset()
+    # 使用同步方法重置（reset是async，在后台任务中可能不生效）
+    tracker.set_status_sync(DownloadStatus.IDLE)
+    tracker._total_stocks = 0
+    tracker._processed_stocks = 0
+    tracker._total_tasks = 0
+    tracker._processed_tasks = 0
+    tracker._downloaded_records = 0
+    tracker._current_stock = ""
+    tracker._message = ""
+    tracker._error = ""
+    tracker._start_time = None
+    tracker._end_time = None
 
     # 获取网关
     gateway = await get_gateway_for_account({
@@ -1972,7 +1983,12 @@ async def download_all_kline_data(
 
     total_stocks = len(stock_list)
     print(f"[LocalData] 获取到 {total_stocks} 只股票")
-    tracker.update_sync(total_tasks=total_stocks, message=f"开始下载 {total_stocks} 只股票K线...")
+
+    # 初始化进度（设置总数和开始时间）
+    tracker._total_stocks = total_stocks
+    tracker._total_tasks = total_stocks
+    tracker._start_time = get_china_time()
+    tracker.set_status_sync(DownloadStatus.DOWNLOADING, f"开始下载 {total_stocks} 只股票K线...")
 
     # 本地数据服务
     local_service = get_local_data_service()

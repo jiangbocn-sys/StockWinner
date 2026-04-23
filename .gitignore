@@ -30,6 +30,9 @@ data/*.db-shm
 config/accounts.json
 config/llm.json
 
+# Environment variables (sensitive data)
+.env
+
 # OS
 .DS_Store
 Thumbs.db
