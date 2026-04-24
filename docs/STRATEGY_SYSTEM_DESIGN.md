@@ -4,6 +4,62 @@
 
 策略系统支持三种独立的策略类型：持仓策略、买卖策略、选股策略。三种策略各司其职，通过关联实现完整的投资决策流程。
 
+## 重要设计决策记录
+
+### 1. 选股策略结构命名统一 (2026-04-24)
+
+**决策**：将 `conditions.buy/sell` 改为 `buy_conditions`
+
+**原因**：
+- sell卖出条件语义上属于交易策略，不属于选股策略
+- 选股策略只负责筛选股票和识别买入信号
+- 卖出条件（止损、止盈）在交易策略中管理
+
+**最终结构**：
+```json
+{
+  "stock_filters": {"total_market_cap_max": 50, "roe_min": 15},
+  "buy_conditions": ["DIF_CROSS_UP_DEA", "VOLUME_RATIO > 1.5"]
+}
+```
+
+**兼容性**：screening service 支持三种格式向后兼容：
+- `buy_conditions`（新格式，推荐）
+- `buy`（旧格式1）
+- `conditions.buy`（旧格式2）
+
+### 2. 因子管理方式 (2026-04-24)
+
+**决策**：从硬编码 FACTOR_MAPPING 改为数据库驱动
+
+**原因**：
+- 硬编码难以维护和扩展
+- 新增因子需要修改代码并重新部署
+- 数据库驱动支持动态配置和元数据管理
+
+**实现**：
+- 新建 `factor_metadata` 表存储因子配置（68条记录）
+- `FactorRegistry` 类从数据库动态加载因子
+- `is_filterable` 字段区分静态筛选因子和动态信号因子
+
+### 3. stock_filters vs buy_conditions 执行顺序
+
+**决策**：明确区分两类条件的执行顺序和作用
+
+| 类型 | 作用 | 执行时机 | 数据来源 |
+|------|------|----------|----------|
+| stock_filters | 静态筛选（基本面） | 第一步，先执行 | monthly_factors表 |
+| buy_conditions | 动态信号（技术指标） | 第二步，后执行 | daily_factors表 + 计算 |
+
+**执行流程**：
+```
+全市场4000股 → stock_filters筛选(200股) → buy_conditions计算(10股) → 最终结果
+```
+
+**is_filterable 分类**：
+- `is_filterable=1`：静态筛选因子（市值、PE、ROE、行业等）
+- `is_filterable=0`：动态信号因子（MACD金叉、量比等）
+
 ## 策略类型定义
 
 ### 1. 持仓策略 (Position Strategy)
@@ -82,38 +138,38 @@
 **作用**：筛选有投资潜力的股票，选出的股票放入watchlist。
 
 **特性**：
-- 结合基本面筛选和技术指标条件
+- 结合静态筛选(stock_filters)和动态信号(buy_conditions)
 - 关联买卖策略模板，自动生成买卖建议
 - 支持LLM自然语言生成
 
-**配置参数**：
+**配置参数**（注意命名统一）：
 ```json
 {
   "type": "screening",
   "name": "MACD金叉小市值选股",
   "config": {
     "stock_filters": {
-      "market": ["SH", "SZ"],              // 市场筛选
       "total_market_cap_max": 50,          // 总市值上限（亿元）
-      "total_market_cap_min": null,        // 总市值下限
-      "circ_market_cap_max": null,         // 流通市值上限
-      "circ_market_cap_min": null,         // 流通市值下限
-      "industry": ["电子", "计算机"]        // 行业筛选
+      "circ_market_cap_max": 30,           // 流通市值上限（亿元）
+      "pe_ttm_max": 30,                    // PE上限
+      "roe_min": 15,                       // ROE下限（%）
+      "gross_margin_min": 20,              // 毛利率下限（%）
+      "sw_level1": "电子"                  // 申万一级行业
     },
-    "technical_conditions": [
-      "DIF_CROSS_UP_DEA",                   // MACD金叉
+    "buy_conditions": [
+      "DIF_CROSS_UP_DEA",                   // MACD金叉（专用穿越信号）
       "RSI_14 < 60",                        // RSI未超买
       "VOLUME_RATIO > 1.5"                  // 成交量放大
     ],
     "trading_strategy_id": 123             // 关联的买卖策略模板ID
-  },
-  "suggested_entry_fields": {              // 选出股票时自动填入的建议值
-    "entry_price": "current_price * 0.98", // 建议建仓价公式
-    "stop_loss_price": "entry_price * 0.95",
-    "take_profit_price": "entry_price * 1.15"
   }
 }
 ```
+
+**注意**：
+- ❌ 已废弃：`conditions: {buy: [...], sell: [...]}`（sell条件移入交易策略）
+- ✅ 新格式：`stock_filters` + `buy_conditions`
+- screening service 向后兼容三种格式
 
 ## 数据流向
 
@@ -224,6 +280,44 @@ ALTER TABLE watchlist ADD COLUMN trading_strategy_id INTEGER REFERENCES trading_
 
 关联交易策略，候选股可引用已设置的交易策略。
 
+### factor_metadata 表（新建）
+
+因子元数据管理，替代硬编码FACTOR_MAPPING：
+
+```sql
+CREATE TABLE factor_metadata (
+    factor_id TEXT PRIMARY KEY,          -- 因子ID（如 MA5, DIF, PE_TTM）
+    factor_name TEXT,                    -- 因子名称
+    category TEXT,                       -- 分类：technical/valuation/profitability/growth
+    data_table TEXT,                     -- 数据表：stock_daily_factors / stock_monthly_factors
+    data_column TEXT,                    -- 数据列名
+    update_freq TEXT DEFAULT 'daily',    -- 更新频率：daily / monthly
+    is_filterable INTEGER DEFAULT 0,     -- 是否可用于静态筛选：1=可筛选, 0=仅动态信号
+    unit TEXT,                           -- 单位：亿元 / % / 倍
+    description TEXT,                    -- 因子描述
+    is_enabled INTEGER DEFAULT 1         -- 是否启用
+);
+```
+
+**is_filterable 分类说明**：
+- `is_filterable=1`（静态筛选因子）：市值、PE、ROE、行业等基本面属性
+  - 在 `stock_filters` 中使用
+  - 第一步筛选，缩小股票范围
+- `is_filterable=0`（动态信号因子）：MACD金叉、量比、RSI等技术指标
+  - 在 `buy_conditions` 中使用
+  - 第二步计算，生成买入信号
+
+**FactorRegistry 改为数据库驱动**：
+```python
+# 从 factor_metadata 表动态加载因子配置
+def _load_from_db(self):
+    cursor.execute("""
+        SELECT factor_id, factor_name, category, data_table, data_column,
+               update_freq, is_filterable, unit, description
+        FROM factor_metadata WHERE is_enabled = 1
+    """)
+```
+
 ## LLM策略生成接口
 
 ### 前端交互
@@ -277,16 +371,41 @@ POST /api/v1/ui/{account_id}/strategies/generate
 }
 ```
 
-**选股策略**：
+**选股策略**（使用新的 buy_conditions 格式）：
 ```json
 {
   "risk_level": "medium",
   "config": {
-    "stock_filters": {"total_market_cap_max": 50},
-    "technical_conditions": ["DIF_CROSS_UP_DEA", "VOLUME_RATIO > 1.5"],
+    "stock_filters": {
+      "total_market_cap_max": 50,
+      "roe_min": 15,
+      "pe_ttm_max": 30
+    },
+    "buy_conditions": ["DIF_CROSS_UP_DEA", "VOLUME_RATIO > 1.5"],
     "trading_strategy_id": null   // 用户后续选择关联
   }
 }
+```
+
+**LLM SYSTEM_PROMPT 关键规则**：
+```
+【重要】条件解析规则：
+
+一、市值/估值/盈利条件 → 放入 stock_filters：
+- "总市值小于X亿" → total_market_cap_max: X
+- "ROE大于X%" → roe_min: X
+- "PE小于X倍" → pe_ttm_max: X
+- "电子行业" → sw_level1: "电子"
+
+二、技术信号条件 → 放入 buy_conditions：
+- "MACD金叉" → "DIF_CROSS_UP_DEA"
+- "成交量放大" → "VOLUME_RATIO > 2"
+- "价格站上5日均线" → "PRICE > MA5"
+
+【核心原则】：
+1. 基本面条件放入 stock_filters
+2. 技术信号放入 buy_conditions
+3. 不要遗漏任何用户条件
 ```
 
 ## 实现要点
@@ -321,30 +440,29 @@ POST /api/v1/ui/{account_id}/strategies/generate
 - 穿越信号：`DIF_CROSS_UP_DEA`, `MA5_CROSS_UP_MA10`, `K_CROSS_UP_D`
 - 比较条件：`RSI_14 < 30`, `VOLUME_RATIO > 2`, `PRICE > MA5`
 
-## 待开发任务
+## 开发进度
 
-1. **数据库表结构调整**
-   - 扩展 strategies 表
-   - 扩展 watchlist 表
+### 已完成 ✅
 
-2. **持仓策略模块**
-   - 实现动态切换逻辑
-   - 指数指标监控任务
-   - 仓位预警通知
+| 任务 | 完成时间 | 说明 |
+|------|----------|------|
+| factor_metadata 表创建 | 2026-04-24 | 68条因子记录，替代硬编码 |
+| trading_strategies 表创建 | 2026-04-24 | 每股交易策略表 |
+| position_adjust_rules 表创建 | 2026-04-24 | 仓位动态调整规则表 |
+| accounts 表扩展 | 2026-04-24 | 添加仓位参数字段 |
+| buy_conditions 命名统一 | 2026-04-24 | 移除 sell，统一为 buy_conditions |
+| screening service 向后兼容 | 2026-04-24 | 支持三种格式 |
+| trading_strategies API | 2026-04-24 | CRUD 接口完成 |
+| position_rules API | 2026-04-24 | 规则管理接口完成 |
 
-3. **买卖策略模板**
-   - 模板管理API
-   - 计算建议价格逻辑
+### 待开发 ❌
 
-4. **选股策略优化**
-   - 关联买卖模板
-   - 自动填充建议值到watchlist
-
-5. **LLM生成接口**
-   - 分类型SYSTEM_PROMPT
-   - 前端类型选择UI
-
-6. **前端UI调整**
-   - 策略列表按类型分组显示
-   - 各类型策略的配置表单
-   - 策略详情展示优化
+| 任务 | 优先级 | 说明 |
+|------|--------|------|
+| 前端三策略类型界面 | P1 | 持仓策略/选股策略/交易策略三个Tab |
+| FactorRegistry 改数据库驱动 | P1 | 从 factor_metadata 加载，替代硬编码 |
+| LLM SYSTEM_PROMPT 更新 | P1 | 使用 buy_conditions 格式 |
+| 持仓策略动态切换 | P2 | 指数监控任务、条件触发 |
+| 买卖策略模板引用 | P2 | 选股策略关联模板、自动填充建议值 |
+| strategies.ui/strategies.py 完善 | P2 | validated_conditions 改为 buy_conditions |
+| 前端策略详情显示 | P3 | buy_conditions 显示优化 |
