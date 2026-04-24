@@ -597,7 +597,15 @@ const translateCondition = async () => {
       newRule.trigger_description = data.translated.description
       ElMessage.success('翻译成功')
     } else {
-      ElMessage.error(data.error || '翻译失败')
+      // 显示可用参数提示
+      if (data.available_params_hint) {
+        ElMessageBox.alert(data.available_params_hint, '可用参数参考', {
+          confirmButtonText: '知道了',
+          customClass: 'params-hint-dialog'
+        })
+      } else {
+        ElMessage.error(data.error || '翻译失败')
+      }
     }
   } catch (error) {
     ElMessage.error('翻译失败：' + error.message)

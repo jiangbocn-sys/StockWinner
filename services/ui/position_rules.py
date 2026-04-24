@@ -33,7 +33,7 @@ AVAILABLE_INDICES = {
 
 # 可用的技术指标
 AVAILABLE_FACTORS = {
-    "RSI_14": {"name": "RSI(14)", "type": "value"},
+    "RSI_14": {"name": "RSI(14)", "type": "value", "range": "0-100"},
     "MACD": {"name": "MACD柱", "type": "value"},
     "DIF": {"name": "DIF线", "type": "value"},
     "DEA": {"name": "DEA线", "type": "value"},
@@ -42,16 +42,53 @@ AVAILABLE_FACTORS = {
     "MA20": {"name": "20日均线", "type": "value"},
     "CLOSE": {"name": "收盘价", "type": "value"},
     "VOLUME": {"name": "成交量", "type": "value"},
-    "VOLUME_RATIO": {"name": "量比", "type": "value"},
-    "AMPLITUDE": {"name": "振幅", "type": "value"},
+    "VOLUME_RATIO": {"name": "量比", "type": "value", "hint": "当日成交量/5日平均成交量"},
+    "AMPLITUDE": {"name": "振幅", "type": "value", "hint": "(最高-最低)/昨收"},
     # 穿越信号
-    "MACD_CROSS_UP_DEA": {"name": "MACD金叉", "type": "signal"},
-    "MACD_CROSS_DOWN_DEA": {"name": "MACD死叉", "type": "signal"},
+    "MACD_CROSS_UP_DEA": {"name": "MACD金叉", "type": "signal", "hint": "DIF向上穿越DEA"},
+    "MACD_CROSS_DOWN_DEA": {"name": "MACD死叉", "type": "signal", "hint": "DIF向下穿越DEA"},
     "MA5_CROSS_UP_MA10": {"name": "MA5金叉MA10", "type": "signal"},
     "MA5_CROSS_DOWN_MA10": {"name": "MA5死叉MA10", "type": "signal"},
     "CLOSE_BREAK_UP_MA5": {"name": "收盘价突破MA5", "type": "signal"},
     "CLOSE_BREAK_DOWN_MA5": {"name": "收盘价跌破MA5", "type": "signal"},
 }
+
+
+def get_available_params_hint() -> str:
+    """生成可用参数提示信息"""
+    hint = "【可用指数】\n"
+    for key, info in AVAILABLE_INDICES.items():
+        hint += f"  - {info['name']} ({key})\n"
+
+    hint += "\n【可用指标】\n"
+    hint += "数值类（可比较）：\n"
+    for key, info in AVAILABLE_FACTORS.items():
+        if info.get("type") == "value":
+            range_hint = info.get("range", "")
+            extra_hint = info.get("hint", "")
+            hint += f"  - {info['name']} ({key})"
+            if range_hint:
+                hint += f" 范围:{range_hint}"
+            if extra_hint:
+                hint += f" [{extra_hint}]"
+            hint += "\n"
+
+    hint += "信号类（穿越/突破）：\n"
+    for key, info in AVAILABLE_FACTORS.items():
+        if info.get("type") == "signal":
+            extra_hint = info.get("hint", "")
+            hint += f"  - {info['name']} ({key})"
+            if extra_hint:
+                hint += f" [{extra_hint}]"
+            hint += "\n"
+
+    hint += "\n【示例表述】\n"
+    hint += "  - \"上证指数RSI跌破30\"\n"
+    hint += "  - \"大盘MACD金叉\"\n"
+    hint += "  - \"创业板成交量放大两倍\"\n"
+    hint += "  - \"沪深300跌破5日均线\"\n"
+
+    return hint
 
 # LLM SYSTEM_PROMPT
 LLM_TRANSLATE_PROMPT = """你是一个触发条件翻译助手。将用户的自然语言描述翻译为可执行的触发条件表达式。
@@ -244,11 +281,23 @@ async def translate_trigger_condition(
             "original_description": description
         }
     except Exception as e:
-        return {
-            "success": False,
-            "error": str(e),
-            "original_description": description
-        }
+        # 翻译失败时返回可用参数提示
+        error_msg = str(e)
+        if "无法识别" in error_msg or "不支持" in error_msg or "JSON" in error_msg or "解析" in error_msg:
+            # LLM无法理解用户描述，返回可用参数提示
+            return {
+                "success": False,
+                "error": f"无法理解您的描述，请参考以下可用参数：\n{get_available_params_hint()}",
+                "original_description": description,
+                "available_params_hint": get_available_params_hint()
+            }
+        else:
+            # 其他错误（如API连接失败）
+            return {
+                "success": False,
+                "error": f"翻译失败：{error_msg}",
+                "original_description": description
+            }
 
 
 @router.post("/api/v1/ui/{account_id}/position-rules")
@@ -361,10 +410,13 @@ async def create_rule_from_natural_language(
         }
 
     except Exception as e:
+        error_msg = str(e)
+        # 翻译失败时返回可用参数提示
         return {
             "success": False,
-            "error": str(e),
-            "message": f"创建失败：{str(e)}"
+            "error": f"无法理解您的描述，请参考以下可用参数：\n{get_available_params_hint()}",
+            "message": f"创建失败：{error_msg}",
+            "available_params_hint": get_available_params_hint()
         }
 
 
