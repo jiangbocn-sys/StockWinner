@@ -22,11 +22,10 @@ StockWinner is a multi-account intelligent stock trading system (v6.2.4) with re
 ./start_backend.sh logs      # View live logs
 
 # Manual start (development)
-source venv/bin/activate
-python -m uvicorn services.main:app --host 0.0.0.0 --port 8080
+python3 -m uvicorn services.main:app --host 0.0.0.0 --port 8080
 
 # Database initialization
-python scripts/init_db.py
+python3 scripts/init_db.py
 ```
 
 ### Frontend
@@ -39,8 +38,7 @@ npm run build      # Production build
 
 ### Tests
 ```bash
-source venv/bin/activate
-python tests/test_all.py
+python3 tests/test_all.py
 ```
 
 ### API Testing
