@@ -176,13 +176,18 @@ async def get_factor_stats(account_id: str = Path(..., description="账户 ID"))
         factor_dt = datetime.strptime(factor_latest, '%Y-%m-%d')
         pending_dates = (kline_dt - factor_dt).days
 
-    # 获取待计算股票数（kline有数据但因子表缺失的日期）
-    cursor.execute("""
-        SELECT COUNT(DISTINCT k.stock_code)
-        FROM kline_data k
-        WHERE k.trade_date > (SELECT COALESCE(MAX(trade_date), '1970-01-01') FROM stock_daily_factors)
-    """)
-    pending_stocks = cursor.fetchone()[0]
+    # 获取待计算股票数（今日K线有但因子表缺失的股票）
+    if kline_latest:
+        cursor.execute("""
+            SELECT COUNT(DISTINCT k.stock_code)
+            FROM kline_data k
+            LEFT JOIN stock_daily_factors f
+                ON k.stock_code = f.stock_code AND k.trade_date = f.trade_date
+            WHERE k.trade_date = ? AND f.stock_code IS NULL
+        """, (kline_latest,))
+        pending_stocks = cursor.fetchone()[0]
+    else:
+        pending_stocks = 0
 
     conn.close()
 
@@ -197,9 +202,31 @@ async def get_factor_stats(account_id: str = Path(..., description="账户 ID"))
     }
 
 
+@router.get("/api/v1/ui/{account_id}/data/factor-calc/progress")
+async def get_factor_calc_progress(account_id: str = Path(..., description="账户 ID")):
+    """获取因子计算进度"""
+    db = get_db_manager()
+
+    # 验证账户
+    account = await db.fetchone("SELECT * FROM accounts WHERE account_id = ? AND is_active = 1", (account_id,))
+    if not account:
+        raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
+
+    from services.common.factor_calc_progress import get_factor_calc_tracker
+
+    tracker = get_factor_calc_tracker()
+    progress = tracker.get_progress()
+
+    return {
+        "success": True,
+        "progress": progress
+    }
+
+
 @router.post("/api/v1/ui/{account_id}/data/calculate-factors")
 async def calculate_factors(
     account_id: str = Path(..., description="账户 ID"),
+    background_tasks: BackgroundTasks = None,
     mode: str = Body("smart", description="计算模式：smart/full (incremental/fill_empty已合并到smart)"),
     start_date: Optional[str] = Body(None, description="开始日期"),
     end_date: Optional[str] = Body(None, description="结束日期")
@@ -219,11 +246,26 @@ async def calculate_factors(
     if not account:
         raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
 
+    from services.common.factor_calc_progress import get_factor_calc_tracker
     from services.data.local_data_service import (
         calculate_and_save_factors_for_dates,
         smart_update_factors
     )
     from datetime import datetime
+    import sqlite3
+    from pathlib import Path
+
+    tracker = get_factor_calc_tracker()
+
+    # 检查是否正在计算
+    current_progress = tracker.get_progress()
+    if current_progress['status'] == 'calculating':
+        return {
+            "success": True,
+            "status": "running",
+            "message": "因子计算任务正在运行中",
+            "progress": current_progress
+        }
 
     # 向后兼容：将旧模式映射到新模式
     if mode in ('incremental', 'fill_empty'):
@@ -235,8 +277,6 @@ async def calculate_factors(
         target_start = start_date
         target_end = end_date
     else:
-        import sqlite3
-        from pathlib import Path
         db_path = Path(__file__).parent.parent.parent / "data" / "kline.db"
         conn = sqlite3.connect(str(db_path))
         cursor = conn.cursor()
@@ -246,10 +286,8 @@ async def calculate_factors(
         kline_latest = cursor.fetchone()[0]
 
         if mode == 'smart':
-            # 智能更新：覆盖kline所有日期范围（自动检测缺失和空值）
-            cursor.execute("SELECT MIN(trade_date) FROM kline_data")
-            kline_earliest = cursor.fetchone()[0]
-            target_start = kline_earliest if kline_earliest else '1970-01-01'
+            # 智能更新：只计算最新日期的缺失记录
+            target_start = kline_latest if kline_latest else datetime.now().strftime('%Y-%m-%d')
             target_end = kline_latest if kline_latest else datetime.now().strftime('%Y-%m-%d')
         else:
             # 全量：全部 kline 日期范围
@@ -260,43 +298,48 @@ async def calculate_factors(
 
         conn.close()
 
-    # 执行因子计算
-    try:
-        if mode == 'smart':
-            # 智能更新：只处理缺失记录和空值字段
-            result = smart_update_factors(
-                start_date=target_start,
-                end_date=target_end,
-                show_progress=True
-            )
-            return {
-                "success": True,
-                "inserted_count": result['inserted'],
-                "updated_count": result['updated'],
-                "total_count": result['inserted'] + result['updated'],
-                "mode": "smart",
-                "date_range": {"start": target_start, "end": target_end}
-            }
-        else:
-            # 全量重新计算
-            inserted_count = calculate_and_save_factors_for_dates(
-                start_date=target_start,
-                end_date=target_end,
-                stock_codes=None,  # 自动获取所有股票
-                only_new_dates=False,  # 全量模式
-                show_progress=True
-            )
-            return {
-                "success": True,
-                "inserted_count": inserted_count,
-                "mode": "full",
-                "date_range": {"start": target_start, "end": target_end}
-            }
-    except Exception as e:
-        return {
-            "success": False,
-            "error": str(e)
-        }
+    # 后台执行因子计算
+    def run_calculation():
+        try:
+            tracker.start(total_stocks=0, total_batches=0)  # 初始化
+
+            if mode == 'smart':
+                result = smart_update_factors(
+                    start_date=target_start,
+                    end_date=target_end,
+                    show_progress=True,
+                    tracker=tracker
+                )
+                tracker.complete(inserted=result['inserted'], updated=result['updated'])
+            else:
+                inserted_count = calculate_and_save_factors_for_dates(
+                    start_date=target_start,
+                    end_date=target_end,
+                    stock_codes=None,
+                    only_new_dates=False,
+                    show_progress=True,
+                    tracker=tracker
+                )
+                tracker.complete(inserted=inserted_count, updated=0)
+
+        except Exception as e:
+            tracker.complete(error=str(e))
+
+    # 启动后台任务
+    if background_tasks:
+        background_tasks.add_task(run_calculation)
+    else:
+        import threading
+        thread = threading.Thread(target=run_calculation)
+        thread.daemon = True
+        thread.start()
+
+    return {
+        "success": True,
+        "status": "started",
+        "message": "因子计算任务已启动",
+        "date_range": {"start": target_start, "end": target_end}
+    }
 
 
 @router.get("/api/v1/ui/{account_id}/data/download/progress")

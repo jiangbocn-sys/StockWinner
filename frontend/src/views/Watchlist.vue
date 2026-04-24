@@ -282,15 +282,30 @@
           style="margin-bottom: 20px"
         />
 
-        <el-form :model="factorCalcForm" label-width="120px">
+        <!-- 计算进度显示 -->
+        <div v-if="factorCalcProgress.status === 'calculating'" style="margin-bottom: 20px;">
+          <el-progress
+            :percentage="factorCalcProgress.percent"
+            :stroke-width="20"
+            :format="formatProgress"
+          />
+          <div class="progress-details" style="margin-top: 15px;">
+            <p><strong>当前批次：</strong>{{ factorCalcProgress.current_batch }}/{{ factorCalcProgress.total_batches }}</p>
+            <p><strong>当前股票：</strong>{{ factorCalcProgress.current_stock }}</p>
+            <p><strong>已插入：</strong>{{ factorCalcProgress.inserted_count }} 条</p>
+            <p><strong>已更新：</strong>{{ factorCalcProgress.updated_count }} 条</p>
+            <p><strong>耗时：</strong>{{ formatTime(factorCalcProgress.elapsed_seconds) }}</p>
+          </div>
+        </div>
+
+        <el-form :model="factorCalcForm" label-width="120px" v-if="factorCalcProgress.status !== 'calculating'">
           <el-form-item label="计算模式">
             <el-radio-group v-model="factorCalcForm.mode">
-              <el-radio label="fill_empty">填充空值（推荐）</el-radio>
-              <el-radio label="incremental">增量计算</el-radio>
+              <el-radio label="smart">智能更新（推荐）</el-radio>
               <el-radio label="full">全量重算</el-radio>
             </el-radio-group>
             <div style="color: #909399; font-size: 12px; margin-top: 5px;">
-              填充空值：只更新因子为NULL的记录；增量：计算新日期；全量：重新计算所有
+              智能更新：自动检测并计算缺失记录和空值字段；全量：重新计算所有数据
             </div>
           </el-form-item>
 
@@ -313,7 +328,7 @@
               />
             </div>
             <div style="color: #909399; font-size: 12px; margin-top: 5px;">
-              增量模式：只计算 stock_daily_factors 表中缺失的日期
+              不指定日期时，智能更新自动检测最新日期
             </div>
           </el-form-item>
 
@@ -341,9 +356,12 @@
         </el-form>
 
         <template #footer>
-          <el-button @click="showFactorCalcDialog = false">取消</el-button>
-          <el-button type="success" @click="startFactorCalc" :loading="calculatingFactors">
-            {{ calculatingFactors ? '计算中...' : '开始计算' }}
+          <el-button @click="showFactorCalcDialog = false" :disabled="factorCalcProgress.status === 'calculating'">取消</el-button>
+          <el-button type="success" @click="startFactorCalc" :loading="calculatingFactors" v-if="factorCalcProgress.status !== 'calculating'">
+            开始计算
+          </el-button>
+          <el-button type="primary" @click="loadFactorStats" v-if="factorCalcProgress.status === 'completed'">
+            刷新状态
           </el-button>
         </template>
       </el-dialog>
@@ -546,6 +564,25 @@ const factorStats = ref({
   latest_date: null,
   pending_count: 0
 })
+
+// 因子计算进度
+const factorCalcProgress = ref({
+  status: 'idle',
+  total_stocks: 0,
+  processed_stocks: 0,
+  inserted_count: 0,
+  updated_count: 0,
+  percent: 0,
+  current_stock: '',
+  current_batch: 0,
+  total_batches: 0,
+  message: '',
+  error: '',
+  elapsed_seconds: 0,
+  estimated_remaining: 0
+})
+
+let factorCalcProgressTimer = null
 
 const strategies = ref([])
 const candidates = ref([])
@@ -995,9 +1032,23 @@ const startFactorCalc = async () => {
 
     const data = await response.json()
     if (data.success) {
-      ElMessage.success(`因子计算完成：插入 ${data.inserted_count || 0} 条记录`)
-      showFactorCalcDialog.value = false
-      loadFactorStats()
+      if (data.status === 'running') {
+        // 已有计算任务在运行，开始轮询进度
+        startFactorCalcProgressPolling()
+      } else if (data.status === 'started') {
+        // 新任务已启动，开始轮询进度
+        factorCalcProgress.value = {
+          status: 'calculating',
+          percent: 0,
+          message: '因子计算已启动...'
+        }
+        startFactorCalcProgressPolling()
+      } else {
+        // 旧版本同步返回结果
+        ElMessage.success(`因子计算完成：插入 ${data.inserted_count || 0} 条记录`)
+        showFactorCalcDialog.value = false
+        loadFactorStats()
+      }
     } else {
       ElMessage.error(data.error || '因子计算失败')
     }
@@ -1007,6 +1058,41 @@ const startFactorCalc = async () => {
   } finally {
     calculatingFactors.value = false
   }
+}
+
+// 轮询因子计算进度
+const startFactorCalcProgressPolling = () => {
+  if (factorCalcProgressTimer) {
+    clearInterval(factorCalcProgressTimer)
+  }
+
+  factorCalcProgressTimer = setInterval(async () => {
+    try {
+      const response = await fetch(`/api/v1/ui/${currentAccountId.value}/data/factor-calc/progress`)
+      const data = await response.json()
+
+      if (data.success && data.progress) {
+        const progress = data.progress
+        factorCalcProgress.value = progress
+
+        // 完成时停止轮询
+        if (progress.status === 'completed') {
+          clearInterval(factorCalcProgressTimer)
+          factorCalcProgressTimer = null
+          calculatingFactors.value = false
+          ElMessage.success(`因子计算完成：插入 ${progress.inserted_count || 0} 条，更新 ${progress.updated_count || 0} 条`)
+          loadFactorStats()
+        } else if (progress.status === 'error') {
+          clearInterval(factorCalcProgressTimer)
+          factorCalcProgressTimer = null
+          calculatingFactors.value = false
+          ElMessage.error(progress.error || '因子计算出错')
+        }
+      }
+    } catch (error) {
+      console.error('轮询因子计算进度失败:', error)
+    }
+  }, 2000)  // 每2秒轮询一次
 }
 
 // 加载 watchlist

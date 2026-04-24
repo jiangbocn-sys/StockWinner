@@ -1602,9 +1602,10 @@ def smart_update_factors(
 
     BATCH_SIZE = 50
     all_stocks_list = list(all_stocks)
+    total_batches = (total_stocks + BATCH_SIZE - 1) // BATCH_SIZE
 
     if tracker:
-        tracker.update_sync(total_tasks=total_stocks, message="开始智能因子计算...")
+        tracker.start(total_stocks=total_stocks, total_batches=total_batches)
 
     for batch_idx in range(0, total_stocks, BATCH_SIZE):
         batch_stocks = all_stocks_list[batch_idx:batch_idx + BATCH_SIZE]
@@ -1891,7 +1892,7 @@ def smart_update_factors(
     conn.close()
 
     if tracker:
-        tracker.complete_sync()
+        tracker.complete_sync(inserted=total_inserted, updated=total_updated)
 
     result = {
         'inserted': total_inserted,

@@ -36,7 +36,7 @@ datetime = ChinaDateTime
 
 from services.common.database import get_db_manager, reset_db_manager
 from services.common.account_manager import get_account_manager, reset_account_manager
-from services.ui import dashboard, accounts, positions, trades, strategies, screening, monitoring, market_data, data_explorer, factors
+from services.ui import dashboard, accounts, positions, trades, strategies, screening, monitoring, market_data, data_explorer
 from services.strategy.api import router as strategy_v2_router
 from services.account_management.api import router as account_management_router
 from services.auth.api import router as auth_router
@@ -108,7 +108,6 @@ app.include_router(screening.router)
 app.include_router(monitoring.router)
 app.include_router(market_data.router)  # 市场行情数据 API
 app.include_router(data_explorer.router)  # 通用数据浏览 API
-app.include_router(factors.router)  # 因子计算 API
 app.include_router(strategy_v2_router)  # 策略管理 API v2
 # 添加账户管理API路由
 app.include_router(account_management_router)

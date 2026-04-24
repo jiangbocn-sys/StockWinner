@@ -8,7 +8,8 @@ StockWinner 公共模块
 - stock_code: 股票代码格式化
 - config: 统一配置
 - logging_config: 日志配置
-- progress: 进度追踪
+- download_progress: 下载进度追踪
+- factor_calc_progress: 因子计算进度追踪
 - database: 数据库管理
 - account_manager: 账户管理
 - indicators: 技术指标（向后兼容）
@@ -34,7 +35,8 @@ from .config import (
     MA_WINDOWS, SQLITE_WAL_MODE, DB_TIMEOUT,
     SDK_USERNAME, SDK_PASSWORD, SDK_HOST, SDK_PORT,
 )
-from .progress import ProgressTracker, ProgressManager, get_progress_manager
+from .download_progress import DownloadProgressTracker, get_progress_tracker
+from .factor_calc_progress import FactorCalcProgressTracker, get_factor_calc_tracker
 from .logging_config import (
     get_logger, setup_logger, get_core_logger, get_trading_logger,
     get_screening_logger, get_factor_logger, init_loggers,
@@ -69,7 +71,8 @@ __all__ = [
     'MA_WINDOWS', 'SQLITE_WAL_MODE', 'DB_TIMEOUT',
     'SDK_USERNAME', 'SDK_PASSWORD', 'SDK_HOST', 'SDK_PORT',
     # 进度追踪
-    'ProgressTracker', 'ProgressManager', 'get_progress_manager',
+    'DownloadProgressTracker', 'get_progress_tracker',
+    'FactorCalcProgressTracker', 'get_factor_calc_tracker',
     # 日志
     'get_logger', 'setup_logger', 'get_core_logger', 'get_trading_logger',
     'get_screening_logger', 'get_factor_logger', 'init_loggers',
