@@ -334,13 +334,9 @@ async def get_backtest_result(
 @router.post("/api/v1/ui/{account_id}/strategies/generate")
 async def generate_strategy_by_llm(
     account_id: str = Path(..., description="账户 ID"),
-    description: str = Body(..., description="策略描述"),
-    risk_level: str = Body("medium", description="风险等级：low/medium/high"),
-    match_score_threshold: float = Body(0.5, description="匹配度阈值"),
-    stop_loss_pct: float = Body(0.05, description="止损比例"),
-    take_profit_pct: float = Body(0.15, description="止盈比例")
+    description: str = Body(..., description="策略描述")
 ):
-    """使用 LLM 生成策略"""
+    """使用 LLM 生成选股策略"""
     db = get_db_manager()
 
     # 从数据库验证账户
@@ -355,22 +351,38 @@ async def generate_strategy_by_llm(
         # 使用 LLM 生成策略
         from services.llm.strategy_generator import get_strategy_generator
         generator = get_strategy_generator()
-        result = generator.generate(description, risk_level)
+        result = generator.generate(description)
 
-        # 将用户配置合并到 LLM 生成的配置中
+        # 获取生成的配置
         config = result["config"]
-        config["match_score_threshold"] = match_score_threshold
-        config["stop_loss_pct"] = stop_loss_pct
-        config["take_profit_pct"] = take_profit_pct
+
+        # 验证生成的条件是否可识别
+        from services.common.indicators import validate_condition
+        validated_conditions = []
+        validation_warnings = []
+
+        buy_conditions = config.get("buy_conditions", [])
+        for cond in buy_conditions:
+            validation = validate_condition(cond)
+            validated_conditions.append({
+                "condition": cond,
+                "valid": validation["valid"],
+                "reason": validation["reason"],
+                "normalized": validation["normalized"]
+            })
+            if not validation["valid"]:
+                validation_warnings.append(f"买入条件 '{cond}' 无法识别: {validation['reason']}")
 
         return {
             "success": True,
-            "message": "LLM 策略生成成功",
+            "message": "LLM 选股策略生成成功",
             "strategy": {
-                "name": f"LLM 策略-{get_china_time().strftime('%Y%m%d%H%M')}",
+                "name": f"LLM选股策略-{get_china_time().strftime('%Y%m%d%H%M')}",
                 "description": description,
-                "strategy_type": "llm",
+                "strategy_type": "screening",
                 "config": config,
+                "validated_conditions": validated_conditions,
+                "validation_warnings": validation_warnings,
                 "source": "llm"
             }
         }

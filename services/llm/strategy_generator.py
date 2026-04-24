@@ -84,90 +84,82 @@ LLM_PROVIDERS = {
 
 
 class StrategyGenerator:
-    """策略生成器"""
+    """策略生成器 - 生成选股策略"""
 
     # 系统提示词
-    SYSTEM_PROMPT = """你是一个专业的股票策略分析助手。你的任务是将用户的自然语言描述转换为结构化的股票交易策略配置。
+    SYSTEM_PROMPT = """你是一个专业的股票策略分析助手。你的任务是将用户的自然语言描述转换为【选股策略】配置。
 
-请根据用户的描述，分析并生成包含以下字段的 JSON 策略配置：
+选股策略用于筛选有投资潜力的股票，包含以下字段：
 
-1. risk_level: 风险等级 ("low", "medium", "high")
-2. position_pct: 单次建仓比例 (0.01-0.5，默认 0.1)
-3. stop_loss_pct: 止损比例 (0.01-0.2，默认 0.05)
-4. take_profit_pct: 止盈比例 (0.05-0.5，默认 0.15)
-5. conditions: 交易条件
-   - buy: 买入条件列表（使用技术指标表达式）
-   - sell: 卖出条件列表
-6. stock_filters: 股票筛选条件（可选）
-   - market: 市场筛选 (可选：SH, SZ, BJ)
-   - circ_market_cap_max: 流通市值上限（亿元，如 50 表示小于50亿）
-   - circ_market_cap_min: 流通市值下限（亿元）
+1. stock_filters: 静态筛选条件（基本面属性）
    - total_market_cap_max: 总市值上限（亿元）
    - total_market_cap_min: 总市值下限（亿元）
+   - circ_market_cap_max: 流通市值上限（亿元）
+   - pe_ttm_max: 市盈率TTM上限（倍）
+   - pb_max: 市净率上限（倍）
+   - roe_min: ROE下限（百分比，如15表示15%）
+   - gross_margin_min: 毛利率下限（百分比）
+   - revenue_growth_yoy_min: 营收同比增长下限（百分比）
+   - sw_level1: 申万一级行业（如"电子"、"计算机"）
+
+2. buy_conditions: 买点信号条件（技术指标）
+   - 使用穿越信号或比较表达式
 
 请严格按照以下 JSON 格式返回，不要包含任何额外说明：
 
 {
-    "risk_level": "medium",
-    "position_pct": 0.1,
-    "stop_loss_pct": 0.05,
-    "take_profit_pct": 0.15,
-    "conditions": {
-        "buy": ["DIF > DEA", "RSI_14 < 35", "VOLUME_RATIO > 2"],
-        "sell": ["DIF < DEA", "RSI_14 > 70"]
-    },
     "stock_filters": {
-        "market": "SH",
-        "circ_market_cap_max": 50
-    }
+        "total_market_cap_max": 50,
+        "roe_min": 15
+    },
+    "buy_conditions": [
+        "DIF_CROSS_UP_DEA",
+        "VOLUME_RATIO > 1.5"
+    ]
 }
 
-【重要】技术指标条件说明：
+【重要】条件解析规则（必须严格遵守）：
 
-一、MACD 相关条件（正确理解）：
-- "DIF > DEA" - MACD金叉（DIF线在DEA线上方，看涨信号）
-- "DIF < DEA" - MACD死叉（DIF线在DEA线下方，看跌信号）
-- "MACD > 0" - MACD柱状图为正（DIF减DEA大于0，仅表示DIF高于DEA）
-- "MACD < 0" - MACD柱状图为负
-注意：MACD金叉/死叉判断应使用 DIF 和 DEA 的关系，而非 MACD 柱状图值！
+**【第一条规则 - 市值/估值/盈利条件】**：基本面条件必须放入 stock_filters！
 
-二、市值条件（使用精确数值）：
-- "CIRC_MARKET_CAP < 50" - 流通市值小于50亿元
-- "TOTAL_MARKET_CAP < 100" - 总市值小于100亿元
-- "CIRC_MARKET_CAP > 20" - 流通市值大于20亿元
-注意：市值单位为亿元（人民币），使用 CIRC_MARKET_CAP 或 TOTAL_MARKET_CAP
+一、市值条件：
+- "总市值小于X亿" → total_market_cap_max: X
+- "流通市值小于X亿" → circ_market_cap_max: X
+
+二、估值条件：
+- "PE小于X" 或 "市盈率小于X倍" → pe_ttm_max: X
+- "PB小于X" 或 "市净率小于X倍" → pb_max: X
+
+三、盈利条件：
+- "ROE大于X%" → roe_min: X
+- "毛利率大于X%" → gross_margin_min: X
+
+四、成长条件：
+- "营收增长X%" → revenue_growth_yoy_min: X
+
+五、行业条件：
+- "电子行业" → sw_level1: "电子"
+
+二、MACD金叉/死叉 → 使用专用条件名：
+- "MACD金叉" → "DIF_CROSS_UP_DEA"
+- "MACD死叉" → "DIF_CROSS_DOWN_DEA"
 
 三、成交量条件：
-- "VOLUME_RATIO > 2" - 量比大于2（当日成交量/5日均量 > 2）
-- "VOLUME > MA(VOLUME, 20)" - 成交量高于20日均量
-- "OBV > 0" - OBV能量潮为正
+- "成交量放大" → "VOLUME_RATIO > 2"
+- "量比大于X" → "VOLUME_RATIO > X"
 
 四、均线条件：
-- "MA5 > MA10" - 5日均线上穿10日均线
-- "MA5 > MA20" - 5日均线上穿20日均线（短线上穿中线，看涨）
-- "MA10 > MA20" - 10日均线上穿20日均线
-- "PRICE > MA5" - 当前价格高于5日均线
+- "MA5上穿MA10" → "MA5_CROSS_UP_MA10"
+- "价格站上5日均线" → "PRICE > MA5"
 
-五、KDJ条件：
-- "K > D" - KDJ金叉（K线在D线上方）
-- "K < D" - KDJ死叉
-- "K < 20" - KDJ超卖区域
-- "K > 80" - KDJ超买区域
+五、RSI条件：
+- "RSI超卖" → "RSI_14 < 30"
+- "RSI超买" → "RSI_14 > 70"
 
-六、RSI条件：
-- "RSI_14 < 30" - RSI超卖（可能反弹）
-- "RSI_14 > 70" - RSI超买（可能回调）
-- "RSI_14 > 50" - RSI中性偏强
-
-七、布林带条件：
-- "PRICE < BOLL_LOWER" - 价格跌破布林下轨（可能反弹）
-- "PRICE > BOLL_UPPER" - 价格突破布林上轨（强势）
-
-【用户描述解析规则】：
-1. 市值条件：将"市值小于X亿"转换为 circ_market_cap_max 或 total_market_cap_max 字段
-2. MACD金叉：转换为 "DIF > DEA" 条件（不是 MACD > 0）
-3. 成交量倍数：将"成交量是X倍"转换为 "VOLUME_RATIO > X" 或类似表达式
-4. 保留所有用户提到的条件，不要遗漏任何条件"""
+【核心原则】：
+1. 基本面条件（市值、PE、ROE等）必须放入 stock_filters
+2. 技术信号条件（金叉、量比等）放入 buy_conditions
+3. 不要遗漏用户提到的任何条件"""
 
     def __init__(self, config: Optional[Dict[str, Any]] = None):
         """
@@ -207,13 +199,12 @@ class StrategyGenerator:
                 pass
         return {}
 
-    def generate(self, description: str, risk_level: str = "medium") -> Dict[str, Any]:
+    def generate(self, description: str) -> Dict[str, Any]:
         """
-        根据描述生成策略配置
+        根据描述生成选股策略配置
 
         Args:
             description: 策略描述
-            risk_level: 风险等级提示
 
         Returns:
             策略配置字典，失败时抛出异常
@@ -222,7 +213,7 @@ class StrategyGenerator:
             raise Exception("LLM API 未配置，请在 Settings 页面配置 API Key 或编辑 config/llm.json 文件")
 
         # 调用 LLM API
-        strategy_config = self._call_llm(description, risk_level)
+        strategy_config = self._call_llm(description)
         return {
             "success": True,
             "config": strategy_config,
@@ -230,13 +221,12 @@ class StrategyGenerator:
             "provider": self.provider
         }
 
-    def _call_llm(self, description: str, risk_level: str) -> Dict[str, Any]:
+    def _call_llm(self, description: str) -> Dict[str, Any]:
         """
-        调用 LLM API 生成策略
+        调用 LLM API 生成选股策略
 
         Args:
             description: 策略描述
-            risk_level: 风险等级
 
         Returns:
             策略配置字典
@@ -245,9 +235,8 @@ class StrategyGenerator:
         import urllib.error
 
         # 构建用户消息
-        user_prompt = f"""请根据以下策略描述生成配置：
+        user_prompt = f"""请根据以下策略描述生成选股策略配置：
 
-风险等级偏好：{risk_level}
 策略描述：{description}
 
 请返回纯 JSON，不要包含 markdown 格式或其他说明文字。"""
@@ -341,23 +330,24 @@ class StrategyGenerator:
         return content.strip()
 
     def _validate_strategy_config(self, config: Dict[str, Any]) -> None:
-        """验证策略配置的有效性"""
-        # 设置默认值
-        if "position_pct" not in config:
-            config["position_pct"] = 0.1
-        if "stop_loss_pct" not in config:
-            config["stop_loss_pct"] = 0.05
-        if "take_profit_pct" not in config:
-            config["take_profit_pct"] = 0.15
-        if "conditions" not in config:
-            config["conditions"] = {"buy": [], "sell": []}
+        """验证选股策略配置的有效性"""
+        # 设置默认值 - 使用新的 buy_conditions 格式
+        if "buy_conditions" not in config:
+            # 向后兼容：从旧格式迁移
+            if "conditions" in config and isinstance(config["conditions"], dict):
+                config["buy_conditions"] = config["conditions"].get("buy", [])
+            else:
+                config["buy_conditions"] = []
         if "stock_filters" not in config:
             config["stock_filters"] = {}
 
-        # 验证数值范围
-        config["position_pct"] = max(0.01, min(0.5, float(config["position_pct"])))
-        config["stop_loss_pct"] = max(0.01, min(0.2, float(config["stop_loss_pct"])))
-        config["take_profit_pct"] = max(0.05, min(0.5, float(config["take_profit_pct"])))
+        # 确保 buy_conditions 是列表
+        if not isinstance(config.get("buy_conditions"), list):
+            config["buy_conditions"] = []
+
+        # 确保 stock_filters 是字典
+        if not isinstance(config["stock_filters"], dict):
+            config["stock_filters"] = {}
 
 # 全局单例
 _strategy_generator: Optional[StrategyGenerator] = None
