@@ -218,7 +218,7 @@ async def translate_with_llm(description: str, provider_config: Dict[str, Any] =
 
 
 @router.get("/api/v1/ui/{account_id}/position-rules")
-async def list_position_rules(account_id: str = Path(..., description="账户 ID")):
+async def list_position_rules(account_id: str = PathParam(..., description="账户 ID")):
     """获取账户的持仓调整规则列表"""
     db = get_db_manager()
 
@@ -257,7 +257,7 @@ async def list_position_rules(account_id: str = Path(..., description="账户 ID
 
 @router.post("/api/v1/ui/{account_id}/position-rules/translate")
 async def translate_trigger_condition(
-    account_id: str = Path(..., description="账户 ID"),
+    account_id: str = PathParam(..., description="账户 ID"),
     description: str = Body(..., description="自然语言触发条件描述")
 ):
     """将自然语言描述翻译为触发条件表达式（LLM翻译）"""
@@ -302,7 +302,7 @@ async def translate_trigger_condition(
 
 @router.post("/api/v1/ui/{account_id}/position-rules")
 async def create_position_rule(
-    account_id: str = Path(..., description="账户 ID"),
+    account_id: str = PathParam(..., description="账户 ID"),
     trigger_expression: str = Body(..., description="触发条件表达式"),
     trigger_description: str = Body(..., description="触发条件描述"),
     target_max_total_pct: Optional[float] = Body(None, description="目标总仓位比例"),
@@ -360,7 +360,7 @@ async def create_position_rule(
 
 @router.post("/api/v1/ui/{account_id}/position-rules/create-from-natural")
 async def create_rule_from_natural_language(
-    account_id: str = Path(..., description="账户 ID"),
+    account_id: str = PathParam(..., description="账户 ID"),
     description: str = Body(..., description="自然语言触发条件描述"),
     target_max_total_pct: Optional[float] = Body(None, description="目标总仓位比例"),
     target_max_single_pct: Optional[float] = Body(None, description="目标单股仓位比例"),
@@ -422,8 +422,8 @@ async def create_rule_from_natural_language(
 
 @router.put("/api/v1/ui/{account_id}/position-rules/{rule_id}")
 async def update_position_rule(
-    account_id: str = Path(..., description="账户 ID"),
-    rule_id: int = Path(..., description="规则 ID"),
+    account_id: str = PathParam(..., description="账户 ID"),
+    rule_id: int = PathParam(..., description="规则 ID"),
     trigger_expression: Optional[str] = Body(None, description="触发条件表达式"),
     trigger_description: Optional[str] = Body(None, description="触发条件描述"),
     target_max_total_pct: Optional[float] = Body(None, description="目标总仓位比例"),
@@ -477,8 +477,8 @@ async def update_position_rule(
 
 @router.delete("/api/v1/ui/{account_id}/position-rules/{rule_id}")
 async def delete_position_rule(
-    account_id: str = Path(..., description="账户 ID"),
-    rule_id: int = Path(..., description="规则 ID")
+    account_id: str = PathParam(..., description="账户 ID"),
+    rule_id: int = PathParam(..., description="规则 ID")
 ):
     """删除持仓调整规则"""
     db = get_db_manager()
@@ -505,8 +505,8 @@ async def delete_position_rule(
 
 @router.post("/api/v1/ui/{account_id}/position-rules/{rule_id}/toggle")
 async def toggle_position_rule(
-    account_id: str = Path(..., description="账户 ID"),
-    rule_id: int = Path(..., description="规则 ID")
+    account_id: str = PathParam(..., description="账户 ID"),
+    rule_id: int = PathParam(..., description="规则 ID")
 ):
     """启用/停用持仓调整规则"""
     db = get_db_manager()
