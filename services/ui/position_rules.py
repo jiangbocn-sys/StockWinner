@@ -200,7 +200,7 @@ async def translate_with_llm(description: str, provider_config: Dict[str, Any] =
     )
 
     try:
-        with urllib.request.urlopen(req, timeout=30) as response:
+        with urllib.request.urlopen(req, timeout=60) as response:
             result = json.loads(response.read().decode("utf-8"))
             content = result["choices"][0]["message"]["content"]
 
@@ -219,6 +219,10 @@ async def translate_with_llm(description: str, provider_config: Dict[str, Any] =
     except urllib.error.HTTPError as e:
         error_body = e.read().decode("utf-8")
         raise Exception(f"LLM API错误 ({e.code}): {error_body}")
+    except urllib.error.URLError as e:
+        if "timed out" in str(e.reason):
+            raise Exception("LLM API响应超时(60秒)，请稍后重试或简化描述")
+        raise Exception(f"网络错误: {e.reason}")
     except json.JSONDecodeError as e:
         raise Exception(f"解析LLM响应失败: {e}")
 
