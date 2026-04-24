@@ -77,12 +77,12 @@
             <el-table :data="positionRules" stripe v-loading="loadingRules">
               <el-table-column prop="trigger_condition" label="触发条件" width="200" />
               <el-table-column prop="trigger_description" label="说明" min-width="150" />
-              <el-table-column prop="target_max_total_pct" label="目标总仓位" width="100">
+              <el-table-column prop="target_max_total_pct" label="总仓位上限" width="100">
                 <template #default="{ row }">
                   {{ (row.target_max_total_pct * 100).toFixed(0) }}%
                 </template>
               </el-table-column>
-              <el-table-column prop="target_max_single_pct" label="目标单股仓位" width="100">
+              <el-table-column prop="target_max_single_pct" label="单股上限" width="100">
                 <template #default="{ row }">
                   {{ row.target_max_single_pct > 0 ? (row.target_max_single_pct * 100).toFixed(0) + '%' : '-' }}
                 </template>
@@ -258,7 +258,7 @@
               <div><strong>说明：</strong>{{ newRule.trigger_description }}</div>
             </el-alert>
           </el-form-item>
-          <el-form-item label="目标总仓位" v-if="newRule.trigger_expression">
+          <el-form-item label="目标总仓位(占总资产)" v-if="newRule.trigger_expression">
             <el-slider
               v-model="newRule.target_max_total_pct"
               :min="0.1"
@@ -268,7 +268,7 @@
               show-input
             />
           </el-form-item>
-          <el-form-item label="目标单股仓位" v-if="newRule.trigger_expression">
+          <el-form-item label="单股上限(占总资产)" v-if="newRule.trigger_expression">
             <el-slider
               v-model="newRule.target_max_single_pct"
               :min="0"
@@ -276,7 +276,7 @@
               :step="0.01"
               show-input
             />
-            <div class="hint">0 表示不调整单股仓位</div>
+            <div class="hint">0 表示不限制单股仓位；总资产 = 现金 + 持仓市值</div>
           </el-form-item>
           <el-form-item label="优先级" v-if="newRule.trigger_expression">
             <el-input-number v-model="newRule.priority" :min="0" :max="100" />

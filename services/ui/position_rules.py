@@ -305,8 +305,8 @@ async def create_position_rule(
     account_id: str = PathParam(..., description="账户 ID"),
     trigger_expression: str = Body(..., description="触发条件表达式"),
     trigger_description: str = Body(..., description="触发条件描述"),
-    target_max_total_pct: Optional[float] = Body(None, description="目标总仓位比例"),
-    target_max_single_pct: Optional[float] = Body(None, description="目标单股仓位比例"),
+    target_max_total_pct: Optional[float] = Body(None, description="目标总仓位比例(占总资产，0-1)"),
+    target_max_single_pct: Optional[float] = Body(None, description="单股仓位上限(占总资产，0-1)"),
     priority: Optional[int] = Body(0, description="优先级"),
     is_active: Optional[int] = Body(1, description="是否启用")
 ):
@@ -362,8 +362,8 @@ async def create_position_rule(
 async def create_rule_from_natural_language(
     account_id: str = PathParam(..., description="账户 ID"),
     description: str = Body(..., description="自然语言触发条件描述"),
-    target_max_total_pct: Optional[float] = Body(None, description="目标总仓位比例"),
-    target_max_single_pct: Optional[float] = Body(None, description="目标单股仓位比例"),
+    target_max_total_pct: Optional[float] = Body(None, description="目标总仓位比例(占总资产，0-1)"),
+    target_max_single_pct: Optional[float] = Body(None, description="单股仓位上限(占总资产，0-1)"),
     priority: Optional[int] = Body(0, description="优先级")
 ):
     """从自然语言描述创建规则（自动LLM翻译）"""
@@ -426,8 +426,8 @@ async def update_position_rule(
     rule_id: int = PathParam(..., description="规则 ID"),
     trigger_expression: Optional[str] = Body(None, description="触发条件表达式"),
     trigger_description: Optional[str] = Body(None, description="触发条件描述"),
-    target_max_total_pct: Optional[float] = Body(None, description="目标总仓位比例"),
-    target_max_single_pct: Optional[float] = Body(None, description="目标单股仓位比例"),
+    target_max_total_pct: Optional[float] = Body(None, description="目标总仓位比例(占总资产，0-1)"),
+    target_max_single_pct: Optional[float] = Body(None, description="单股仓位上限(占总资产，0-1)"),
     priority: Optional[int] = Body(None, description="优先级"),
     is_active: Optional[int] = Body(None, description="是否启用")
 ):
