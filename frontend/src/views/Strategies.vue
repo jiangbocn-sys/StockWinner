@@ -411,15 +411,12 @@
           </el-descriptions-item>
           <el-descriptions-item label="描述" :span="2">{{ selectedScreening.description }}</el-descriptions-item>
           <el-descriptions-item label="筛选条件" :span="2">
-            <el-tag v-for="(cond, idx) in parseConfig(selectedScreening.config)?.stock_filters || {}" :key="idx" size="small" style="margin: 2px;">
-              {{ formatFilter(cond) }}
-            </el-tag>
+            <condition-tree :node="normalizeConditions(parseConfig(selectedScreening.config)?.stock_filters)" />
+            <span v-if="!parseConfig(selectedScreening.config)?.stock_filters" style="color: #999;">无</span>
           </el-descriptions-item>
           <el-descriptions-item label="买入条件" :span="2">
-            <el-tag v-for="(cond, idx) in parseConfig(selectedScreening.config)?.buy_conditions || []" :key="idx" size="small" style="margin: 2px;">
-              {{ cond }}
-            </el-tag>
-            <span v-if="!(parseConfig(selectedScreening.config)?.buy_conditions || []).length" style="color: #999;">无</span>
+            <condition-tree :node="normalizeConditions(parseConfig(selectedScreening.config)?.buy_conditions)" />
+            <span v-if="!parseConfig(selectedScreening.config)?.buy_conditions" style="color: #999;">无</span>
           </el-descriptions-item>
           <el-descriptions-item label="创建时间">{{ selectedScreening.created_at }}</el-descriptions-item>
           <el-descriptions-item label="更新时间">{{ selectedScreening.updated_at }}</el-descriptions-item>
@@ -435,6 +432,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Refresh, MagicStick } from '@element-plus/icons-vue'
 import { useAccountStore } from '../stores/account'
 import NavBar from '../components/NavBar.vue'
+import ConditionTree from '../components/ConditionTree.vue'
 
 const accountStore = useAccountStore()
 const currentAccountId = computed(() => accountStore.currentAccountId)
@@ -908,6 +906,32 @@ const parseConfig = (config) => {
     try { return JSON.parse(config) } catch { return {} }
   }
   return config
+}
+
+// 规范化条件格式（支持新旧格式）
+const normalizeConditions = (conditions) => {
+  if (!conditions) return { logic: 'AND', conditions: [] }
+
+  // 新格式（已有logic字段）
+  if (conditions.logic && conditions.conditions) {
+    return conditions
+  }
+
+  // 旧格式：列表 ["cond1", "cond2"]
+  if (Array.isArray(conditions)) {
+    return { logic: 'AND', conditions: conditions }
+  }
+
+  // 旧格式：stock_filters字典 {"field": value}
+  if (typeof conditions === 'object') {
+    const convertedConditions = []
+    for (const [field, value] of Object.entries(conditions)) {
+      convertedConditions.push({ field, value })
+    }
+    return { logic: 'AND', conditions: convertedConditions }
+  }
+
+  return { logic: 'AND', conditions: [] }
 }
 
 const formatFilter = (value) => {

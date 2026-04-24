@@ -159,7 +159,51 @@ class StrategyGenerator:
 【核心原则】：
 1. 基本面条件（市值、PE、ROE等）必须放入 stock_filters
 2. 技术信号条件（金叉、量比等）放入 buy_conditions
-3. 不要遗漏用户提到的任何条件"""
+3. 不要遗漏用户提到的任何条件
+
+【逻辑组合规则】（支持嵌套AND/OR）：
+
+默认情况下，多个条件之间是AND关系。如果用户使用"或者"、"任一"、"二者之一"等词语，表示OR关系。
+
+嵌套逻辑格式：
+{
+  "stock_filters": {
+    "logic": "AND",  // 或 "OR"
+    "conditions": [
+      {"field": "total_market_cap_max", "value": 50},
+      {"logic": "OR", "conditions": [{"field": "roe_min", "value": 15}, {"field": "gross_margin_min", "value": 20}]}
+    ]
+  },
+  "buy_conditions": {
+    "logic": "AND",
+    "conditions": [
+      "DIF_CROSS_UP_DEA",
+      {"logic": "OR", "conditions": ["VOLUME_RATIO > 2", "RSI_14 < 30"]}
+    ]
+  }
+}
+
+【复杂组合示例】：
+用户："市值小于50亿，ROE大于15%或者毛利率大于20%"
+→ stock_filters: {
+    "logic": "AND",
+    "conditions": [
+      {"field": "total_market_cap_max", "value": 50},
+      {"logic": "OR", "conditions": [
+        {"field": "roe_min", "value": 15},
+        {"field": "gross_margin_min", "value": 20}
+      ]}
+    ]
+  }
+
+用户："MACD金叉，或者量比大于2且RSI小于30"
+→ buy_conditions: {
+    "logic": "OR",
+    "conditions": [
+      "DIF_CROSS_UP_DEA",
+      {"logic": "AND", "conditions": ["VOLUME_RATIO > 2", "RSI_14 < 30"]}
+    ]
+  }"""
 
     def __init__(self, config: Optional[Dict[str, Any]] = None):
         """

@@ -19,6 +19,7 @@ from services.common.technical_indicators import calculate_indicators_for_screen
 from services.common.indicators import TechnicalIndicators
 from services.data.local_data_service import get_local_data_service
 from .factor_registry import get_factor_registry, FactorRegistry
+from .condition_parser import get_condition_parser, normalize_conditions
 
 # 数据库路径
 KLINE_DB = Path(__file__).parent.parent.parent / "data" / "kline.db"
@@ -402,26 +403,33 @@ class ScreeningService:
                                     # 同时添加大写键名以兼容条件检查
                                     indicators[factor] = value
 
-            # 检查条件
-            matched_conditions = []
-            for condition in buy_conditions:
-                if TechnicalIndicators.check_condition(condition, indicators):
-                    matched_conditions.append(condition)
+            # 检查条件（使用ConditionParser支持嵌套逻辑）
+            parser = get_condition_parser()
 
-            # 计算匹配度
-            match_score = len(matched_conditions) / max(len(buy_conditions), 1) if buy_conditions else 0.5
+            # 规范化buy_conditions格式（支持新旧格式）
+            buy_conditions_normalized = normalize_conditions(buy_conditions)
+
+            # 评估条件是否满足
+            is_matched = parser.evaluate(buy_conditions_normalized, indicators)
+
+            # 获取匹配的条件列表（用于显示）
+            matched_condition_names = parser.get_all_conditions(buy_conditions_normalized)
+
+            # 计算匹配度（基于基本条件数量）
+            total_conditions = len(matched_condition_names) if matched_condition_names else 0
+            match_score = 1.0 if is_matched and total_conditions > 0 else (0.5 if total_conditions == 0 else 0)
 
             # 如果匹配度达到阈值或以上，加入候选列表
-            if match_score >= match_score_threshold or not buy_conditions:
+            if is_matched or match_score >= match_score_threshold or not buy_conditions:
                 current_price = indicators.get('price', indicators.get('PRICE', 0))
                 candidates.append({
                     "stock_code": stock_code,
                     "stock_name": stock_code,
-                    "reason": ", ".join(matched_conditions) if matched_conditions else "基础筛选",
+                    "reason": parser.format_condition(buy_conditions_normalized) if is_matched and total_conditions > 0 else "基础筛选",
                     "current_price": current_price,
                     "match_score": match_score
                 })
-                if matched_conditions:
+                if is_matched:
                     matched_count += 1
 
             # 每 100 只股票计算预估剩余时间
@@ -519,25 +527,24 @@ class ScreeningService:
                 except Exception:
                     pass  # 获取实时价格失败，使用本地收盘价
 
-            # 检查条件
-            matched_conditions = []
-            for condition in buy_conditions:
-                if TechnicalIndicators.check_condition(condition, indicators):
-                    matched_conditions.append(condition)
-            
+            # 检查条件（使用ConditionParser支持嵌套逻辑）
+            parser = get_condition_parser()
+            buy_conditions_normalized = normalize_conditions(buy_conditions)
+            is_matched = parser.evaluate(buy_conditions_normalized, indicators)
+
             # 计算匹配度
-            match_score = len(matched_conditions) / max(len(buy_conditions), 1) if buy_conditions else 0.5
+            match_score = 1.0 if is_matched else 0
 
             # 如果匹配度达到阈值或以上，加入候选列表
-            if match_score >= match_score_threshold or not buy_conditions:
+            if is_matched or match_score >= match_score_threshold or not buy_conditions:
                 candidates.append({
                     "stock_code": stock_code,
                     "stock_name": stock_code,  # 本地数据暂无名称
-                    "reason": ", ".join(matched_conditions) if matched_conditions else "基础筛选",
+                    "reason": parser.format_condition(buy_conditions_normalized) if is_matched else "基础筛选",
                     "current_price": current_price,
                     "match_score": match_score
                 })
-                if matched_conditions:
+                if is_matched:
                     matched_count += 1
 
         print(f"[Screening] 本地筛选完成，共匹配 {matched_count}/{len(stock_codes)} 只股票 (匹配度阈值：{match_score_threshold*100:.0f}%)")
@@ -644,40 +651,27 @@ class ScreeningService:
             indicators['price'] = market_data.current_price
             indicators['volume'] = market_data.volume
 
-            # 检查条件 - 记录每个条件的匹配情况
-            matched_conditions = []
-            unmatched_conditions = []
-            condition_results = []
-
-            for condition in buy_conditions:
-                is_matched = TechnicalIndicators.check_condition(condition, indicators)
-                condition_results.append({
-                    "condition": condition,
-                    "matched": is_matched
-                })
-                if is_matched:
-                    matched_conditions.append(condition)
-                else:
-                    unmatched_conditions.append(condition)
+            # 检查条件（使用ConditionParser支持嵌套逻辑）
+            parser = get_condition_parser()
+            buy_conditions_normalized = normalize_conditions(buy_conditions)
+            is_matched = parser.evaluate(buy_conditions_normalized, indicators)
 
             # 计算匹配度
-            match_score = len(matched_conditions) / max(len(buy_conditions), 1) if buy_conditions else 0.5
+            match_score = 1.0 if is_matched else 0
 
             # 记录每只股票的条件匹配详情
-            print(f"[Screening] {stock_code}: 匹配 {len(matched_conditions)}/{len(buy_conditions)} "
-                  f"({match_score*100:.0f}%) - 已匹配：{matched_conditions if matched_conditions else '无'}")
-            if unmatched_conditions:
-                print(f"  未匹配：{unmatched_conditions}")
+            condition_str = parser.format_condition(buy_conditions_normalized)
+            print(f"[Screening] {stock_code}: {is_matched} - {condition_str}")
 
             # 如果匹配度达到阈值或以上，加入候选列表
-            if match_score >= match_score_threshold or not buy_conditions:
+            if is_matched or match_score >= match_score_threshold or not buy_conditions:
                 candidates.append({
                     "stock_code": f"{stock_code}",
                     "stock_name": stock_name,
-                    "reason": ", ".join(matched_conditions) if matched_conditions else "基础筛选",
+                    "reason": condition_str if is_matched else "基础筛选",
                     "current_price": market_data.current_price,
                     "match_score": match_score,
-                    "condition_results": condition_results  # 保存详细的条件匹配结果
+                    "condition_results": is_matched  # 简化：只保存是否匹配
                 })
                 self._progress["matched"] += 1
 
