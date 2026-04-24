@@ -9,6 +9,8 @@
 
 from .daily_factor_calculator import DailyFactorCalculator
 from .monthly_factor_calculator import MonthlyFactorCalculator
-from .sdk_api import AmazingDataAPI
 
-__all__ = ['DailyFactorCalculator', 'MonthlyFactorCalculator', 'AmazingDataAPI']
+# SDK API 已废弃，使用 services.common.sdk_manager 替代
+# from .sdk_api import AmazingDataAPI
+
+__all__ = ['DailyFactorCalculator', 'MonthlyFactorCalculator']

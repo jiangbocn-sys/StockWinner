@@ -14,6 +14,9 @@ from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 import json
 
+# 使用统一的SDK管理器
+from services.common.sdk_manager import get_sdk_manager
+
 # 中国时区
 CHINA_TZ = timedelta(hours=8)
 
@@ -64,11 +67,8 @@ class MonthlyFactorCalculator:
         - net_assets: 净资产
         """
         try:
-            try:
-                from .sdk_api import AmazingDataAPI
-            except ImportError:
-                from sdk_api import AmazingDataAPI
-            api = AmazingDataAPI()
+            # 使用统一的SDK管理器获取数据
+            sdk = get_sdk_manager()
 
             result = {
                 'stock_code': stock_code,
@@ -77,7 +77,7 @@ class MonthlyFactorCalculator:
             }
 
             # 获取利润表数据
-            income_df = api.get_income_statement([stock_code])
+            income_df = sdk.get_income_statement([stock_code])
             if not income_df.empty:
                 # 根据季度和年份筛选数据
                 # REPORT_TYPE: 1=年报，2=中报，3=季报，4=一季报
@@ -107,7 +107,7 @@ class MonthlyFactorCalculator:
                     result['net_profit_ttm'] = recent['NET_PRO_INCL_MIN_INT_INC'].sum()
 
             # 获取现金流量表数据
-            cashflow_df = api.get_cash_flow_statement([stock_code])
+            cashflow_df = sdk.get_cash_flow_statement([stock_code])
             if not cashflow_df.empty:
                 # 获取对应报告期的数据
                 if report_quarter == 3:
@@ -128,7 +128,7 @@ class MonthlyFactorCalculator:
                     result['operating_cash_flow'] = row.get('NET_CASH_FLOWS_OPERA_ACT')
 
             # 获取资产负债表数据
-            balance_df = api.get_balance_sheet([stock_code])
+            balance_df = sdk.get_balance_sheet([stock_code])
             if not balance_df.empty:
                 # 获取对应报告期的数据
                 if report_quarter == 3:
