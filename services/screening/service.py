@@ -243,11 +243,13 @@ class ScreeningService:
         """
         candidates = []
 
-        # 1. 获取买入条件
-        buy_conditions = config.get("buy", [])
+        # 1. 获取买入条件（支持三种格式）
+        buy_conditions = config.get("buy_conditions", [])  # 新格式
         if not buy_conditions:
-            conditions = config.get("conditions", {})
-            buy_conditions = conditions.get("buy", [])
+            buy_conditions = config.get("buy", [])  # 旧格式1
+            if not buy_conditions:
+                conditions = config.get("conditions", {})  # 旧格式2
+                buy_conditions = conditions.get("buy", [])
 
         if not buy_conditions:
             print("[Screening] 警告：策略配置中没有找到买入条件")
@@ -457,11 +459,13 @@ class ScreeningService:
         self._progress["processed"] = 0
         self._progress["matched"] = 0
         
-        # 获取买入条件
-        buy_conditions = config.get("buy", [])
+        # 获取买入条件（支持三种格式）
+        buy_conditions = config.get("buy_conditions", [])  # 新格式
         if not buy_conditions:
-            conditions = config.get("conditions", {})
-            buy_conditions = conditions.get("buy", [])
+            buy_conditions = config.get("buy", [])  # 旧格式1
+            if not buy_conditions:
+                conditions = config.get("conditions", {})  # 旧格式2
+                buy_conditions = conditions.get("buy", [])
         
         if not buy_conditions:
             print("[Screening] 警告：策略配置中没有找到买入条件")
@@ -568,13 +572,16 @@ class ScreeningService:
         except Exception as e:
             raise Exception(f"获取股票列表失败：{str(e)} - SDK 可能未安装或连接失败")
 
-        # 获取买入条件 - 支持两种配置格式
-        # 格式 1: {"buy": [...]} (旧格式)
-        # 格式 2: {"conditions": {"buy": [...]}} (新格式)
-        buy_conditions = config.get("buy", [])
+        # 获取买入条件 - 支持三种配置格式
+        # 格式 1: {"buy_conditions": [...]} (新格式，推荐)
+        # 格式 2: {"buy": [...]} (旧格式)
+        # 格式 3: {"conditions": {"buy": [...]}} (旧格式)
+        buy_conditions = config.get("buy_conditions", [])  # 新格式
         if not buy_conditions:
-            conditions = config.get("conditions", {})
-            buy_conditions = conditions.get("buy", [])
+            buy_conditions = config.get("buy", [])  # 旧格式1
+            if not buy_conditions:
+                conditions = config.get("conditions", {})  # 旧格式2
+                buy_conditions = conditions.get("buy", [])
 
         if not buy_conditions:
             print("[Screening] 警告：策略配置中没有找到买入条件")
