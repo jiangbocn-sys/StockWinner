@@ -333,27 +333,26 @@ async def create_position_rule(
     if target_max_single_pct is not None and not (0.0 <= target_max_single_pct <= 1.0):
         raise HTTPException(status_code=400, detail="单股仓位比例必须在0-1之间")
 
-    # 检查是否已存在相同表达式
+    # 检查是否已存在相同表达式（使用trigger_condition列）
     existing = await db.fetchone(
-        "SELECT id FROM position_adjust_rules WHERE account_id = ? AND trigger_expression = ?",
+        "SELECT id FROM position_adjust_rules WHERE account_id = ? AND trigger_condition = ?",
         (account_id, trigger_expression)
     )
 
     if existing:
         raise HTTPException(status_code=400, detail=f"该触发条件已存在规则")
 
-    # 创建规则
+    # 创建规则（映射到数据库列名）
     rule_id = await db.insert(
         "position_adjust_rules",
         {
             "account_id": account_id,
-            "trigger_expression": trigger_expression,
-            "trigger_description": trigger_description,
+            "trigger_condition": trigger_expression,  # 数据库列名
+            "description": trigger_description,       # 数据库列名
             "target_max_total_pct": target_max_total_pct or 0.5,
             "target_max_single_pct": target_max_single_pct or 0,
             "priority": priority or 0,
-            "is_active": is_active or 1,
-            "created_at": get_china_time().isoformat()
+            "is_active": is_active or 1
         }
     )
 
@@ -393,18 +392,17 @@ async def create_rule_from_natural_language(
         if not trigger_expression:
             raise Exception("LLM翻译失败：未生成表达式")
 
-        # 创建规则
+        # 创建规则（映射到数据库列名）
         rule_id = await db.insert(
             "position_adjust_rules",
             {
                 "account_id": account_id,
-                "trigger_expression": trigger_expression,
-                "trigger_description": trigger_description,
+                "trigger_condition": trigger_expression,  # 数据库列名
+                "description": trigger_description,       # 数据库列名
                 "target_max_total_pct": target_max_total_pct or 0.5,
                 "target_max_single_pct": target_max_single_pct or 0,
                 "priority": priority or 0,
-                "is_active": 1,
-                "created_at": get_china_time().isoformat()
+                "is_active": 1
             }
         )
 
@@ -455,12 +453,12 @@ async def update_position_rule(
     if target_max_single_pct is not None and not (0.0 <= target_max_single_pct <= 1.0):
         raise HTTPException(status_code=400, detail="单股仓位比例必须在0-1之间")
 
-    # 更新
+    # 更新（映射到数据库列名）
     update_data = {}
     if trigger_expression is not None:
-        update_data["trigger_expression"] = trigger_expression
+        update_data["trigger_condition"] = trigger_expression  # 数据库列名
     if trigger_description is not None:
-        update_data["trigger_description"] = trigger_description
+        update_data["description"] = trigger_description       # 数据库列名
     if target_max_total_pct is not None:
         update_data["target_max_total_pct"] = target_max_total_pct
     if target_max_single_pct is not None:
@@ -469,8 +467,6 @@ async def update_position_rule(
         update_data["priority"] = priority
     if is_active is not None:
         update_data["is_active"] = is_active
-
-    update_data["updated_at"] = get_china_time().isoformat()
 
     if update_data:
         await db.update("position_adjust_rules", update_data, "id = ?", (rule_id,))
@@ -529,7 +525,7 @@ async def toggle_position_rule(
     new_status = 0 if rule["is_active"] else 1
     await db.update(
         "position_adjust_rules",
-        {"is_active": new_status, "updated_at": get_china_time().isoformat()},
+        {"is_active": new_status},
         "id = ?",
         (rule_id,)
     )
