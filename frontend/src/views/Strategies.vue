@@ -234,28 +234,41 @@
       </el-tabs>
 
       <!-- 持仓调整规则对话框 -->
-      <el-dialog v-model="showRuleDialog" title="新建调整规则" width="500px">
+      <el-dialog v-model="showRuleDialog" title="新建调整规则" width="550px">
         <el-form :model="newRule" label-width="120px">
-          <el-form-item label="触发条件" required>
-            <el-select v-model="newRule.trigger_condition" placeholder="选择触发条件">
-              <el-option
-                v-for="(desc, key) in supportedConditions"
-                :key="key"
-                :label="desc"
-                :value="key"
-              />
-            </el-select>
+          <el-form-item label="触发条件描述" required>
+            <el-input
+              v-model="newRule.natural_description"
+              type="textarea"
+              :rows="2"
+              placeholder="用自然语言描述，如：'上证指数RSI跌破30时降低仓位'"
+              :disabled="translating"
+            />
+            <div class="hint">可用：上证/深证/创业板指数，MACD金叉/死叉，RSI超买/超卖，成交量放大等</div>
           </el-form-item>
-          <el-form-item label="目标总仓位">
+          <el-form-item>
+            <el-button type="warning" @click="translateCondition" :loading="translating" :disabled="!newRule.natural_description">
+              <el-icon v-if="!translating"><MagicStick /></el-icon>
+              {{ translating ? '翻译中...' : 'LLM翻译' }}
+            </el-button>
+          </el-form-item>
+          <el-form-item label="翻译结果" v-if="newRule.trigger_expression">
+            <el-alert type="success" :closable="false">
+              <div><strong>表达式：</strong>{{ newRule.trigger_expression }}</div>
+              <div><strong>说明：</strong>{{ newRule.trigger_description }}</div>
+            </el-alert>
+          </el-form-item>
+          <el-form-item label="目标总仓位" v-if="newRule.trigger_expression">
             <el-slider
               v-model="newRule.target_max_total_pct"
               :min="0.1"
               :max="1.0"
               :step="0.05"
+              :marks="{0.1: '10%', 0.5: '50%', 0.8: '80%', 1.0: '100%'}"
               show-input
             />
           </el-form-item>
-          <el-form-item label="目标单股仓位">
+          <el-form-item label="目标单股仓位" v-if="newRule.trigger_expression">
             <el-slider
               v-model="newRule.target_max_single_pct"
               :min="0"
@@ -265,16 +278,15 @@
             />
             <div class="hint">0 表示不调整单股仓位</div>
           </el-form-item>
-          <el-form-item label="规则描述">
-            <el-input v-model="newRule.description" placeholder="可选，自动生成描述" />
-          </el-form-item>
-          <el-form-item label="优先级">
+          <el-form-item label="优先级" v-if="newRule.trigger_expression">
             <el-input-number v-model="newRule.priority" :min="0" :max="100" />
           </el-form-item>
         </el-form>
         <template #footer>
           <el-button @click="showRuleDialog = false">取消</el-button>
-          <el-button type="primary" @click="createRule" :loading="creatingRule">创建</el-button>
+          <el-button type="primary" @click="createRule" :loading="creatingRule" :disabled="!newRule.trigger_expression">
+            创建规则
+          </el-button>
         </template>
       </el-dialog>
 
@@ -443,12 +455,13 @@ const positionRules = ref([])
 const loadingRules = ref(false)
 const showRuleDialog = ref(false)
 const creatingRule = ref(false)
-const supportedConditions = ref({})
+const translating = ref(false)  // LLM翻译中状态
 const newRule = reactive({
-  trigger_condition: '',
+  natural_description: '',       // 用户自然语言描述
+  trigger_expression: '',         // LLM翻译后的表达式
+  trigger_description: '',        // LLM翻译后的描述
   target_max_total_pct: 0.5,
   target_max_single_pct: 0,
-  description: '',
   priority: 0
 })
 
@@ -556,7 +569,6 @@ const loadPositionRules = async () => {
     const data = await res.json()
     if (data.success) {
       positionRules.value = data.rules
-      supportedConditions.value = data.supported_conditions
     }
   } catch (error) {
     console.error('加载调整规则失败:', error)
@@ -565,10 +577,39 @@ const loadPositionRules = async () => {
   }
 }
 
+// LLM翻译触发条件
+const translateCondition = async () => {
+  if (!newRule.natural_description) {
+    ElMessage.warning('请输入触发条件描述')
+    return
+  }
+
+  translating.value = true
+  try {
+    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/position-rules/translate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ description: newRule.natural_description })
+    })
+    const data = await res.json()
+    if (data.success) {
+      newRule.trigger_expression = data.translated.expression
+      newRule.trigger_description = data.translated.description
+      ElMessage.success('翻译成功')
+    } else {
+      ElMessage.error(data.error || '翻译失败')
+    }
+  } catch (error) {
+    ElMessage.error('翻译失败：' + error.message)
+  } finally {
+    translating.value = false
+  }
+}
+
 // 创建规则
 const createRule = async () => {
-  if (!newRule.trigger_condition) {
-    ElMessage.warning('请选择触发条件')
+  if (!newRule.trigger_expression) {
+    ElMessage.warning('请先翻译触发条件')
     return
   }
 
@@ -577,17 +618,24 @@ const createRule = async () => {
     const res = await fetch(`/api/v1/ui/${currentAccountId.value}/position-rules`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(newRule)
+      body: JSON.stringify({
+        trigger_expression: newRule.trigger_expression,
+        trigger_description: newRule.trigger_description,
+        target_max_total_pct: newRule.target_max_total_pct,
+        target_max_single_pct: newRule.target_max_single_pct,
+        priority: newRule.priority
+      })
     })
     const data = await res.json()
     if (data.success) {
       ElMessage.success('规则创建成功')
       showRuleDialog.value = false
       // 重置表单
-      newRule.trigger_condition = ''
+      newRule.natural_description = ''
+      newRule.trigger_expression = ''
+      newRule.trigger_description = ''
       newRule.target_max_total_pct = 0.5
       newRule.target_max_single_pct = 0
-      newRule.description = ''
       newRule.priority = 0
       await loadPositionRules()
     } else {
