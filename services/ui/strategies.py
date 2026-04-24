@@ -334,7 +334,7 @@ async def get_backtest_result(
 @router.post("/api/v1/ui/{account_id}/strategies/generate")
 async def generate_strategy_by_llm(
     account_id: str = Path(..., description="账户 ID"),
-    description: str = Body(..., description="策略描述")
+    description: str = Body(..., embed=True, description="策略描述")
 ):
     """使用 LLM 生成选股策略"""
     db = get_db_manager()

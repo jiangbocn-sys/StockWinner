@@ -7,9 +7,10 @@ services/common/technical_indicators.py 统一实现
 新代码应该直接使用 technical_indicators 模块
 """
 
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass
 from datetime import datetime
+import re
 
 # 导入统一实现
 from .technical_indicators import (
@@ -22,6 +23,120 @@ from .technical_indicators import (
     calculate_kdj as kdj,
     calculate_indicators_for_screening,
 )
+
+
+# 可识别的穿越信号
+CROSS_SIGNALS = {
+    "DIF_CROSS_UP_DEA": "MACD金叉(DIF向上穿越DEA)",
+    "DIF_CROSS_DOWN_DEA": "MACD死叉(DIF向下穿越DEA)",
+    "MA5_CROSS_UP_MA10": "MA5金叉MA10",
+    "MA5_CROSS_DOWN_MA10": "MA5死叉MA10",
+    "MA10_CROSS_UP_MA20": "MA10金叉MA20",
+    "PRICE_CROSS_UP_MA5": "价格突破MA5向上",
+    "PRICE_CROSS_DOWN_MA5": "价格跌破MA5向下",
+    "PRICE > MA5": "价格站上MA5",
+    "PRICE < MA5": "价格低于MA5",
+    "CLOSE > MA5": "收盘价高于MA5",
+    "CLOSE < MA5": "收盘价低于MA5",
+}
+
+# 可识别的指标因子
+INDICATOR_FACTORS = {
+    "RSI_14", "RSI", "VOLUME_RATIO", "DIF", "DEA", "MACD",
+    "MA5", "MA10", "MA20", "MA60",
+    "PRICE", "CLOSE", "VOLUME",
+    "KDJ_K", "KDJ_D", "KDJ_J", "K", "D", "J",
+    "BOLL_UPPER", "BOLL_LOWER", "BOLL_MID",
+    "ATR", "CCI", "ADX",
+}
+
+
+def validate_condition(condition: str) -> Dict:
+    """
+    验证条件表达式是否可识别
+
+    Args:
+        condition: 条件字符串，如 "DIF_CROSS_UP_DEA", "RSI_14 < 30"
+
+    Returns:
+        {
+            "valid": bool,
+            "reason": str,
+            "normalized": str,
+            "type": "signal" or "comparison"
+        }
+    """
+    condition = condition.strip()
+
+    # 1. 检查是否是预定义的穿越信号
+    if condition in CROSS_SIGNALS:
+        return {
+            "valid": True,
+            "reason": f"预定义信号: {CROSS_SIGNALS[condition]}",
+            "normalized": condition,
+            "type": "signal"
+        }
+
+    # 2. 检查是否是比较表达式（如 "RSI_14 < 30", "VOLUME_RATIO > 2"）
+    # 正则匹配: INDICATOR [比较运算符] 数值
+    comparison_pattern = r'^([A-Z_]+)\s*(>|<|>=|<=|=|==)\s*(\d+\.?\d*)$'
+    match = re.match(comparison_pattern, condition)
+
+    if match:
+        indicator = match.group(1)
+        operator = match.group(2)
+        value = match.group(3)
+
+        if indicator in INDICATOR_FACTORS:
+            return {
+                "valid": True,
+                "reason": f"有效的比较表达式: {indicator} {operator} {value}",
+                "normalized": condition,
+                "type": "comparison",
+                "indicator": indicator,
+                "operator": operator,
+                "value": float(value)
+            }
+        else:
+            return {
+                "valid": False,
+                "reason": f"未知指标: {indicator}",
+                "normalized": condition,
+                "type": "comparison"
+            }
+
+    # 3. 检查是否是指标间比较（如 "PRICE > MA5", "MA5 > MA10"）
+    indicator_compare_pattern = r'^([A-Z_]+)\s*(>|<|>=|<=|=|==)\s*([A-Z_]+)$'
+    match = re.match(indicator_compare_pattern, condition)
+
+    if match:
+        left_indicator = match.group(1)
+        operator = match.group(2)
+        right_indicator = match.group(3)
+
+        if left_indicator in INDICATOR_FACTORS and right_indicator in INDICATOR_FACTORS:
+            return {
+                "valid": True,
+                "reason": f"有效的指标间比较: {left_indicator} {operator} {right_indicator}",
+                "normalized": condition,
+                "type": "indicator_comparison"
+            }
+        else:
+            unknown = left_indicator if left_indicator not in INDICATOR_FACTORS else right_indicator
+            return {
+                "valid": False,
+                "reason": f"未知指标: {unknown}",
+                "normalized": condition,
+                "type": "indicator_comparison"
+            }
+
+    # 4. 无法识别的表达式
+    return {
+        "valid": False,
+        "reason": f"无法识别的条件格式: {condition}",
+        "normalized": condition,
+        "type": "unknown"
+    }
 
 
 @dataclass
