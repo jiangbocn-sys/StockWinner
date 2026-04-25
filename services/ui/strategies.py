@@ -358,11 +358,20 @@ async def generate_strategy_by_llm(
 
         # 验证生成的条件是否可识别
         from services.common.indicators import validate_condition
+        from services.screening.condition_parser import get_condition_parser, normalize_conditions
+
         validated_conditions = []
         validation_warnings = []
 
-        buy_conditions = config.get("buy_conditions", [])
-        for cond in buy_conditions:
+        # 使用ConditionParser提取基本条件
+        parser = get_condition_parser()
+        buy_conditions_config = config.get("buy_conditions", {})
+        buy_conditions_normalized = normalize_conditions(buy_conditions_config)
+
+        # 提取所有基本条件（用于验证）
+        all_conditions = parser.get_all_conditions(buy_conditions_normalized)
+
+        for cond in all_conditions:
             validation = validate_condition(cond)
             validated_conditions.append({
                 "condition": cond,

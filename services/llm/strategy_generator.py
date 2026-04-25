@@ -153,56 +153,45 @@ class StrategyGenerator:
 - "价格站上5日均线" → "PRICE > MA5"
 
 五、RSI条件：
-- "RSI超卖" → "RSI_14 < 30"
-- "RSI超买" → "RSI_14 > 70"
+- "RSI超卖" 或 "RSI小于30" → "RSI < 30"
+- "RSI超买" 或 "RSI大于70" → "RSI > 70"
+- "rsi处于超卖" → "RSI < 30"
+
+六、成交量放大条件（注意：各种描述都转换为VOLUME_RATIO）：
+- "成交量放大" → "VOLUME_RATIO > 2"
+- "量比大于X" → "VOLUME_RATIO > X"
+- "近一个月日均成交量是过去六个月日均的1.5倍以上" → "VOLUME_RATIO > 1.5"
+- "日均成交量达到X日均成交量的1.5倍" → "VOLUME_RATIO > 1.5"
 
 【核心原则】：
 1. 基本面条件（市值、PE、ROE等）必须放入 stock_filters
-2. 技术信号条件（金叉、量比等）放入 buy_conditions
-3. 不要遗漏用户提到的任何条件
+2. 技术信号条件（金叉、RSI、量比等）必须放入 buy_conditions
+3. 不要遗漏用户提到的任何技术条件！
 
 【逻辑组合规则】（支持嵌套AND/OR）：
 
-默认情况下，多个条件之间是AND关系。如果用户使用"或者"、"任一"、"二者之一"等词语，表示OR关系。
+默认情况下，多个条件之间是AND关系。如果用户使用"或者"、"或"、"任一"等词语，表示OR关系。
 
-嵌套逻辑格式：
-{
-  "stock_filters": {
-    "logic": "AND",  // 或 "OR"
-    "conditions": [
-      {"field": "total_market_cap_max", "value": 50},
-      {"logic": "OR", "conditions": [{"field": "roe_min", "value": 15}, {"field": "gross_margin_min", "value": 20}]}
-    ]
-  },
-  "buy_conditions": {
-    "logic": "AND",
-    "conditions": [
-      "DIF_CROSS_UP_DEA",
-      {"logic": "OR", "conditions": ["VOLUME_RATIO > 2", "RSI_14 < 30"]}
-    ]
-  }
-}
-
-【复杂组合示例】：
-用户："市值小于50亿，ROE大于15%或者毛利率大于20%"
-→ stock_filters: {
-    "logic": "AND",
-    "conditions": [
-      {"field": "total_market_cap_max", "value": 50},
-      {"logic": "OR", "conditions": [
-        {"field": "roe_min", "value": 15},
-        {"field": "gross_margin_min", "value": 20}
-      ]}
-    ]
-  }
-
-用户："MACD金叉，或者量比大于2且RSI小于30"
+【复杂buy_conditions示例】：
+用户："RSI超卖或者MACD金叉"
 → buy_conditions: {
     "logic": "OR",
+    "conditions": ["RSI < 30", "DIF_CROSS_UP_DEA"]
+  }
+
+用户："近一个月日均成交量是过去六个月日均的1.5倍以上，RSI超卖或MACD金叉"
+→ buy_conditions: {
+    "logic": "AND",
     "conditions": [
-      "DIF_CROSS_UP_DEA",
-      {"logic": "AND", "conditions": ["VOLUME_RATIO > 2", "RSI_14 < 30"]}
+      "VOLUME_RATIO > 1.5",
+      {"logic": "OR", "conditions": ["RSI < 30", "DIF_CROSS_UP_DEA"]}
     ]
+  }
+
+用户："MACD金叉，且成交量放大"
+→ buy_conditions: {
+    "logic": "AND",
+    "conditions": ["DIF_CROSS_UP_DEA", "VOLUME_RATIO > 2"]
   }"""
 
     def __init__(self, config: Optional[Dict[str, Any]] = None):
@@ -385,13 +374,34 @@ class StrategyGenerator:
         if "stock_filters" not in config:
             config["stock_filters"] = {}
 
-        # 确保 buy_conditions 是列表
-        if not isinstance(config.get("buy_conditions"), list):
-            config["buy_conditions"] = []
+        # buy_conditions 支持两种格式：
+        # 1. 新格式：{"logic": "AND/OR", "conditions": [...]}
+        # 2. 旧格式：["cond1", "cond2"]
+        buy_cond = config.get("buy_conditions")
+        if isinstance(buy_cond, dict):
+            # 新格式：验证逻辑结构
+            if "logic" not in buy_cond:
+                buy_cond["logic"] = "AND"
+            if "conditions" not in buy_cond:
+                buy_cond["conditions"] = []
+        elif isinstance(buy_cond, list):
+            # 旧格式：转换为新格式
+            config["buy_conditions"] = {"logic": "AND", "conditions": buy_cond}
+        else:
+            # 无效格式：设置为空新格式
+            config["buy_conditions"] = {"logic": "AND", "conditions": []}
 
-        # 确保 stock_filters 是字典
-        if not isinstance(config["stock_filters"], dict):
-            config["stock_filters"] = {}
+        # stock_filters 支持两种格式：
+        # 1. 新格式：{"logic": "AND/OR", "conditions": [{"field": "xxx", "value": xxx}]}
+        # 2. 旧格式：{"field": value}
+        stock_filt = config.get("stock_filters")
+        if isinstance(stock_filt, dict):
+            if "logic" not in stock_filt and "conditions" not in stock_filt:
+                # 旧格式：转换为新格式
+                conditions = [{"field": k, "value": v} for k, v in stock_filt.items()]
+                config["stock_filters"] = {"logic": "AND", "conditions": conditions}
+        else:
+            config["stock_filters"] = {"logic": "AND", "conditions": []}
 
 # 全局单例
 _strategy_generator: Optional[StrategyGenerator] = None
