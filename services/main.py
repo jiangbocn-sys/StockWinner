@@ -36,7 +36,7 @@ datetime = ChinaDateTime
 
 from services.common.database import get_db_manager, reset_db_manager
 from services.common.account_manager import get_account_manager, reset_account_manager
-from services.ui import dashboard, accounts, positions, trades, strategies, screening, monitoring, market_data, data_explorer, position_rules
+from services.ui import dashboard, accounts, positions, trades, strategies, screening, monitoring, market_data, data_explorer, position_rules, factors, scheduler
 from services.strategy.api import router as strategy_v2_router
 from services.account_management.api import router as account_management_router
 from services.auth.api import router as auth_router
@@ -60,10 +60,17 @@ async def lifespan(app: FastAPI):
     active_accounts = [a for a in accounts if a.get('is_active')]
     print(f"已加载 {len(active_accounts)} 个激活账户：{', '.join([a['account_id'] for a in active_accounts])}")
 
+    # 启动调度服务（每天凌晨1点检查K线，每月5日检查月频因子）
+    from services.common.scheduler_service import start_scheduler
+    start_scheduler()
+    print("调度服务已启动")
+
     yield
 
     # 关闭时清理
     print("StockWinner 关闭中...")
+    from services.common.scheduler_service import stop_scheduler
+    stop_scheduler()
     await db_manager.close()
     reset_db_manager()
     reset_account_manager()
@@ -72,8 +79,8 @@ async def lifespan(app: FastAPI):
 # 创建 FastAPI 应用
 app = FastAPI(
     title="StockWinner",
-    description="智能股票交易系统 v6.2.4 - K 线数据 API 增强",
-    version="6.2.4",
+    description="智能股票交易系统 v6.2.5 - 调度服务增强",
+    version="6.2.5",
     lifespan=lifespan
 )
 
@@ -109,6 +116,8 @@ app.include_router(monitoring.router)
 app.include_router(market_data.router)  # 市场行情数据 API
 app.include_router(data_explorer.router)  # 通用数据浏览 API
 app.include_router(position_rules.router)  # 持仓调整规则 API
+app.include_router(factors.router)  # 因子计算 API
+app.include_router(scheduler.router)  # 调度服务 API
 app.include_router(strategy_v2_router)  # 策略管理 API v2
 # 添加账户管理API路由
 app.include_router(account_management_router)

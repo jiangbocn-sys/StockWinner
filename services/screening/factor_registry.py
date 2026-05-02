@@ -114,22 +114,59 @@ class FactorRegistry:
             if cfg.get('is_filterable', 0) == 1
         ]
 
-    def extract_required_factors(self, conditions: List[str]) -> Set[str]:
+    def extract_required_factors(self, conditions: Any) -> Set[str]:
         """
-        从条件列表中提取需要的指标名称
+        从条件中提取需要的指标名称（支持嵌套格式）
 
         Args:
-            conditions: 条件列表，如 ["MA5 > MA20", "RSI_14 < 30"]
+            conditions: 可以是：
+                - 字符串列表：["MA5 > MA20", "RSI_14 < 30"]
+                - 嵌套字典：{"logic": "AND", "conditions": [...]}
+                - 单个字符串："RSI_14 < 30"
 
         Returns:
             需要的指标名称集合
         """
         factors = set()
-        for condition in conditions:
-            matches = INDICATOR_PATTERN.findall(condition)
+
+        # 处理嵌套字典格式
+        if isinstance(conditions, dict):
+            if 'conditions' in conditions:
+                # 递归处理嵌套条件
+                for c in conditions['conditions']:
+                    factors.update(self.extract_required_factors(c))
+            return factors
+
+        # 处理列表格式
+        if isinstance(conditions, list):
+            for condition in conditions:
+                factors.update(self.extract_required_factors(condition))
+            return factors
+
+        # 处理单个字符串条件
+        if isinstance(conditions, str):
+            matches = INDICATOR_PATTERN.findall(conditions)
             for match in matches:
                 if match in self._mapping:
                     factors.add(match)
+            # 也处理特殊条件名（如 DIF_CROSS_UP_DEA）
+            special_conditions = ['DIF_CROSS_UP_DEA', 'DIF_CROSS_DOWN_DEA',
+                                   'MA5_CROSS_UP_MA10', 'MA5_CROSS_DOWN_MA10',
+                                   'MA10_CROSS_UP_MA20']
+            for special in special_conditions:
+                if special in conditions:
+                    # 提取相关因子
+                    if 'DIF' in special or 'DEA' in special:
+                        factors.add('DIF')
+                        factors.add('DEA')
+                    if 'MA5' in special:
+                        factors.add('MA5')
+                    if 'MA10' in special:
+                        factors.add('MA10')
+                    if 'MA20' in special:
+                        factors.add('MA20')
+            return factors
+
         return factors
 
     def classify_factors(self, factors: Set[str]) -> Tuple[Set[str], Set[str]]:

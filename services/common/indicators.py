@@ -195,45 +195,71 @@ class TechnicalIndicators:
         检查条件表达式
 
         Args:
-            condition: 条件字符串，如 "MA5>MA20", "RSI<30"
+            condition: 条件字符串，如 "MA5>MA20", "RSI<30", "DIF_CROSS_UP_DEA"
             indicators: 指标值字典
 
         Returns:
             条件是否成立
         """
         try:
-            # 支持的指标映射
+            # 1. 检查是否是预定义的穿越信号
+            if condition in CROSS_SIGNALS:
+                if condition == "DIF_CROSS_UP_DEA":
+                    # MACD金叉：DIF > DEA
+                    dif = indicators.get('dif') or indicators.get('DIF')
+                    dea = indicators.get('dea') or indicators.get('DEA')
+                    return dif is not None and dea is not None and dif > dea
+                elif condition == "DIF_CROSS_DOWN_DEA":
+                    # MACD死叉：DIF < DEA
+                    dif = indicators.get('dif') or indicators.get('DIF')
+                    dea = indicators.get('dea') or indicators.get('DEA')
+                    return dif is not None and dea is not None and dif < dea
+                elif condition in ("MA5_CROSS_UP_MA10",):
+                    # MA5金叉MA10
+                    ma5 = indicators.get('ma5') or indicators.get('MA5')
+                    ma10 = indicators.get('ma10') or indicators.get('MA10')
+                    return ma5 is not None and ma10 is not None and ma5 > ma10
+                elif condition in ("MA5_CROSS_DOWN_MA10",):
+                    ma5 = indicators.get('ma5') or indicators.get('MA5')
+                    ma10 = indicators.get('ma10') or indicators.get('MA10')
+                    return ma5 is not None and ma10 is not None and ma5 < ma10
+                elif condition in ("PRICE > MA5", "CLOSE > MA5"):
+                    price = indicators.get('price') or indicators.get('PRICE') or indicators.get('close')
+                    ma5 = indicators.get('ma5') or indicators.get('MA5')
+                    return price is not None and ma5 is not None and price > ma5
+                elif condition in ("PRICE < MA5", "CLOSE < MA5"):
+                    price = indicators.get('price') or indicators.get('PRICE') or indicators.get('close')
+                    ma5 = indicators.get('ma5') or indicators.get('MA5')
+                    return price is not None and ma5 is not None and price < ma5
+                # 其他预定义信号暂时返回 False
+                return False
+
+            # 2. 检查是比较表达式
+            # 支持的指标映射（大写名 → 数据库小写名）
             available = {
-                'MA5': indicators.get('ma5'),
-                'MA10': indicators.get('ma10'),
-                'MA20': indicators.get('ma20'),
-                'MA60': indicators.get('ma60'),
-                'RSI': indicators.get('rsi'),
-                'MACD': indicators.get('macd'),
-                'K': indicators.get('kdj_k'),
-                'D': indicators.get('kdj_d'),
-                'J': indicators.get('kdj_j'),
-                'PRICE': indicators.get('price'),
-                'VOLUME': indicators.get('volume'),
-                'MA_VOL': indicators.get('ma_vol'),
-                'MA_VOL5': indicators.get('ma_vol5'),
-                'MA_VOL10': indicators.get('ma_vol10'),
+                'MA5': indicators.get('ma5') or indicators.get('MA5'),
+                'MA10': indicators.get('ma10') or indicators.get('MA10'),
+                'MA20': indicators.get('ma20') or indicators.get('MA20'),
+                'MA60': indicators.get('ma60') or indicators.get('MA60'),
+                'RSI': indicators.get('rsi_14') or indicators.get('rsi') or indicators.get('RSI'),
+                'RSI_14': indicators.get('rsi_14') or indicators.get('RSI_14'),
+                'MACD': indicators.get('macd') or indicators.get('MACD'),
+                'DIF': indicators.get('dif') or indicators.get('DIF'),
+                'DEA': indicators.get('dea') or indicators.get('DEA'),
+                'VOLUME_RATIO': indicators.get('volume_ratio') or indicators.get('VOLUME_RATIO'),
+                'K': indicators.get('kdj_k') or indicators.get('K'),
+                'D': indicators.get('kdj_d') or indicators.get('D'),
+                'J': indicators.get('kdj_j') or indicators.get('J'),
+                'PRICE': indicators.get('price') or indicators.get('PRICE') or indicators.get('close'),
+                'CLOSE': indicators.get('close') or indicators.get('CLOSE') or indicators.get('price'),
+                'VOLUME': indicators.get('volume') or indicators.get('VOLUME'),
             }
 
             # 替换条件中的指标名称
             expr = condition
 
-            # 先处理 MA(VOL, X) 形式的条件，将其替换为对应的值
+            # 替换指标名
             import re
-            ma_vol_pattern = r'MA\(VOL\s*,\s*(\d+)\)'
-            for match in re.finditer(ma_vol_pattern, expr):
-                period = int(match.group(1))
-                key = f'MA_VOL{period}' if period != 5 else 'MA_VOL'
-                value = available.get(key) or indicators.get(f'ma_vol{period}') or indicators.get('ma_vol')
-                if value is not None:
-                    expr = expr.replace(match.group(0), str(value))
-
-            # 替换其他指标名称
             for key, value in available.items():
                 if value is not None:
                     expr = expr.replace(key, str(value))

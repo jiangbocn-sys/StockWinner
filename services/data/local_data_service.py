@@ -2218,3 +2218,121 @@ def download_incremental_kline_data_sync(
         return loop.run_until_complete(_async_download())
     finally:
         loop.close()
+
+
+def download_industry_indices() -> Dict:
+    """
+    下载申万行业指数K线数据
+
+    使用SDK的InfoData.get_industry_daily方法获取行业指数数据，
+    注意：这与普通股票/指数的query_kline方法不同，SI类型需要专用接口。
+
+    Returns:
+        下载统计信息
+    """
+    from services.common.sdk_manager import get_sdk_manager
+
+    sdk = get_sdk_manager()
+
+    # 1. 获取行业指数代码列表
+    industry_info = sdk.get_industry_base_info()
+    if industry_info is None or len(industry_info) == 0:
+        return {'success': False, 'message': '无法获取行业指数基本信息'}
+
+    # 只获取一级分类（申万31个行业）
+    level1 = industry_info[industry_info['LEVEL_TYPE'] == 1]
+    print(f"[LocalData] 找到 {len(level1)} 个申万一级行业指数")
+
+    # 提取代码列表和名称映射
+    codes = []
+    code_to_name = {}
+    for idx, row in level1.iterrows():
+        index_code = str(row.get('INDEX_CODE', ''))
+        level1_name = row.get('LEVEL1_NAME', '')
+        if index_code:
+            codes.append(index_code)
+            code_to_name[index_code] = level1_name
+
+    # 2. 批量获取行业日行情数据
+    print(f"[LocalData] 开始下载 {len(codes)} 个行业指数数据...")
+    result = sdk.get_industry_daily(codes)
+
+    if not result:
+        return {'success': False, 'message': 'SDK下载失败'}
+
+    # 3. 保存到数据库
+    conn = sqlite3.connect(str(DB_PATH))
+    cursor = conn.cursor()
+
+    total_saved = 0
+    success_count = 0
+    latest_dates = []
+    for code, df in result.items():
+        if df is None or len(df) == 0:
+            print(f"[LocalData]   {code}: 无数据")
+            continue
+
+        # 将索引转换为列（TRADE_DATE是索引）
+        original_index_name = df.index.name
+        if original_index_name is not None:
+            df = df.reset_index()
+            print(f"[LocalData]   {code}: 索引 '{original_index_name}' 转换为列")
+
+        # 转换列名小写
+        df.columns = df.columns.str.lower()
+        print(f"[LocalData]   {code}: 列名 {list(df.columns)}")
+
+        # 确认trade_date存在
+        if 'trade_date' not in df.columns:
+            print(f"[LocalData]   {code}: 无trade_date列，跳过")
+            continue
+
+        # 插入数据
+        saved_count = 0
+        for _, row in df.iterrows():
+            try:
+                trade_date = row['trade_date']
+                if pd.isna(trade_date):
+                    continue
+                if isinstance(trade_date, pd.Timestamp):
+                    trade_date = trade_date.strftime('%Y-%m-%d')
+                elif isinstance(trade_date, str) and len(trade_date) == 10:
+                    pass  # 已经是正确格式
+                else:
+                    trade_date = str(trade_date)[:10]
+
+                cursor.execute('''
+                    INSERT OR REPLACE INTO kline_data
+                    (stock_code, stock_name, trade_date, open, high, low, close, volume, amount)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    code,
+                    code_to_name.get(code, ''),
+                    trade_date,
+                    float(row.get('open', 0) or 0),
+                    float(row.get('high', 0) or 0),
+                    float(row.get('low', 0) or 0),
+                    float(row.get('close', 0) or 0),
+                    int(row.get('volume', 0) or 0),
+                    float(row.get('amount', 0) or 0)
+                ))
+                saved_count += 1
+                total_saved += 1
+            except Exception as e:
+                pass  # 忽略单条错误
+
+        conn.commit()
+        success_count += 1
+        latest_date = df['trade_date'].max()
+        latest_dates.append(latest_date)
+        print(f"[LocalData]   {code} ({code_to_name.get(code, '')}): 保存 {saved_count} 条，最新 {latest_date}")
+
+    conn.close()
+
+    print(f"[LocalData] 行业指数下载完成：{success_count}/{len(codes)} 个指数，{total_saved} 条记录")
+    return {
+        'success': True,
+        'indices_count': success_count,
+        'total_records': total_saved,
+        'latest_date': str(max(latest_dates) if latest_dates else 'N/A')
+    }

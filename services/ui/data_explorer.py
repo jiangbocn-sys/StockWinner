@@ -846,6 +846,11 @@ async def get_table_data(
     trade_date: Optional[str] = Query(None, description="交易日期（单日）"),
     start_date: Optional[str] = Query(None, description="开始日期"),
     end_date: Optional[str] = Query(None, description="结束日期"),
+    # Django风格参数支持（兼容用户习惯）
+    trade_date__lte: Optional[str] = Query(None, description="交易日期 <= (Django风格，等同于end_date)"),
+    trade_date__gte: Optional[str] = Query(None, description="交易日期 >= (Django风格，等同于start_date)"),
+    trade_date__lt: Optional[str] = Query(None, description="交易日期 < "),
+    trade_date__gt: Optional[str] = Query(None, description="交易日期 > "),
     date_range: Optional[str] = Query(None, description="日期范围快捷方式：last_30d, last_90d, ytd"),
     industry: Optional[str] = Query(None, description="行业分类"),
     # 分页和排序
@@ -920,6 +925,7 @@ async def get_table_data(
                 conditions.append(f"{date_field} = ?")
                 params.append(trade_date)
 
+            # 标准 start_date / end_date 参数
             if start_date:
                 # 对于周K线，开始日期筛选：week_end_date >= start_date（周的结束日期在范围内）
                 if table_name == 'weekly_kline_data' and 'week_end_date' in column_names:
@@ -937,6 +943,23 @@ async def get_table_data(
                 else:
                     conditions.append(f"{date_field} <= ?")
                     params.append(end_date)
+
+            # Django风格参数支持 (trade_date__lte, trade_date__gte 等)
+            if trade_date__lte:
+                conditions.append(f"{date_field} <= ?")
+                params.append(trade_date__lte)
+
+            if trade_date__gte:
+                conditions.append(f"{date_field} >= ?")
+                params.append(trade_date__gte)
+
+            if trade_date__lt:
+                conditions.append(f"{date_field} < ?")
+                params.append(trade_date__lt)
+
+            if trade_date__gt:
+                conditions.append(f"{date_field} > ?")
+                params.append(trade_date__gt)
 
             # 日期范围快捷方式
             if date_range:

@@ -296,11 +296,42 @@ class ScreeningService:
         print(f"[Screening] 从数据库获取到 {len(stock_codes)} 只股票的因子数据")
 
         # 5.1 市值过滤（在因子筛选之前）
+        # 支持新旧两种格式：
+        # 新格式：{"logic": "AND", "conditions": [{"field": "total_market_cap_max", "value": 50}]}
+        # 旧格式：{"total_market_cap_max": 50}
         stock_filters = config.get("stock_filters", {})
-        circ_cap_max = stock_filters.get("circ_market_cap_max")
-        circ_cap_min = stock_filters.get("circ_market_cap_min")
-        total_cap_max = stock_filters.get("total_market_cap_max")
-        total_cap_min = stock_filters.get("total_market_cap_min")
+        stock_filters_normalized = normalize_conditions(stock_filters)
+
+        # 从嵌套结构中提取市值相关条件
+        def extract_cap_conditions(condition_node):
+            """递归提取市值条件"""
+            cap_fields = {
+                'total_market_cap_max', 'total_market_cap_min',
+                'circ_market_cap_max', 'circ_market_cap_min'
+            }
+            result = {}
+
+            if isinstance(condition_node, dict):
+                if 'field' in condition_node:
+                    field = condition_node.get('field', '')
+                    if field in cap_fields:
+                        result[field] = condition_node.get('value')
+                elif 'conditions' in condition_node:
+                    for c in condition_node['conditions']:
+                        extracted = extract_cap_conditions(c)
+                        result.update(extracted)
+            elif isinstance(condition_node, list):
+                for c in condition_node:
+                    extracted = extract_cap_conditions(c)
+                    result.update(extracted)
+
+            return result
+
+        cap_values = extract_cap_conditions(stock_filters_normalized)
+        circ_cap_max = cap_values.get('circ_market_cap_max')
+        circ_cap_min = cap_values.get('circ_market_cap_min')
+        total_cap_max = cap_values.get('total_market_cap_max')
+        total_cap_min = cap_values.get('total_market_cap_min')
 
         if circ_cap_max or circ_cap_min or total_cap_max or total_cap_min:
             import sqlite3

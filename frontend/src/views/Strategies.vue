@@ -140,13 +140,17 @@
                 </template>
               </el-table-column>
               <el-table-column prop="created_at" label="创建时间" width="160" />
-              <el-table-column label="操作" width="200">
+              <el-table-column label="操作" width="240">
                 <template #default="{ row }">
                   <el-button type="primary" size="small" @click="viewScreeningStrategy(row)">
                     详情
                   </el-button>
-                  <el-button type="success" size="small" @click="runScreening(row)">
-                    执行筛选
+                  <el-button
+                    :type="row.status === 'active' ? 'warning' : 'success'"
+                    size="small"
+                    @click="toggleScreeningStrategy(row)"
+                  >
+                    {{ row.status === 'active' ? '停用' : '激活' }}
                   </el-button>
                   <el-button type="danger" size="small" @click="deleteScreeningStrategy(row)">
                     删除
@@ -711,9 +715,23 @@ const viewScreeningStrategy = (row) => {
   showScreeningDetailDialog.value = true
 }
 
-// 执行筛选
-const runScreening = async (row) => {
-  ElMessage.info('筛选功能开发中')
+// 激活/停用选股策略
+const toggleScreeningStrategy = async (row) => {
+  try {
+    const action = row.status === 'active' ? 'deactivate' : 'activate'
+    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/strategies/${row.id}/${action}`, {
+      method: 'POST'
+    })
+    const data = await res.json()
+    if (data.success) {
+      ElMessage.success(data.message)
+      await loadScreeningStrategies()
+    } else {
+      ElMessage.error(data.detail || '操作失败')
+    }
+  } catch (error) {
+    ElMessage.error('操作失败：' + error.message)
+  }
 }
 
 // 删除选股策略

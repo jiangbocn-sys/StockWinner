@@ -9,10 +9,6 @@
             <el-icon><Search /></el-icon>
             选股
           </el-button>
-          <el-button :type="screeningRunning ? 'danger' : 'success'" @click="toggleScreening">
-            <el-icon><VideoPlay /></el-icon>
-            {{ screeningRunning ? '停止选股' : '启动选股' }}
-          </el-button>
           <el-button type="primary" @click="showDownloadDialog = true" :loading="downloading">
             <el-icon><Download /></el-icon>
             下载数据
@@ -73,12 +69,7 @@
 
       <!-- 服务状态 -->
       <el-card class="status-card">
-        <el-descriptions :column="4" border>
-          <el-descriptions-item label="选股服务">
-            <el-tag :type="screeningRunning ? 'success' : 'info'" size="small">
-              {{ screeningRunning ? '运行中' : '已停止' }}
-            </el-tag>
-          </el-descriptions-item>
+        <el-descriptions :column="3" border>
           <el-descriptions-item label="监控服务">
             <el-tag :type="monitoringRunning ? 'success' : 'info'" size="small">
               {{ monitoringRunning ? '运行中' : '已停止' }}
@@ -514,7 +505,7 @@
 <script setup>
 import { ref, reactive, onMounted, computed } from 'vue'
 import { ElMessage } from 'element-plus'
-import { Search, VideoPlay, Download, Refresh, Delete, VideoPause, DataAnalysis } from '@element-plus/icons-vue'
+import { Search, Download, Refresh, Delete, VideoPause, DataAnalysis } from '@element-plus/icons-vue'
 import { useAccountStore } from '../stores/account'
 import NavBar from '../components/NavBar.vue'
 
@@ -525,7 +516,6 @@ const currentAccount = computed(() => accountStore.currentAccount)
 const loading = ref(false)
 const watchlist = ref([])
 const filterStatus = ref('')
-const screeningRunning = ref(false)
 const monitoringRunning = ref(false)
 const showEditDialog = ref(false)
 const showDownloadDialog = ref(false)
@@ -1119,37 +1109,11 @@ const confirmClearWatchlist = () => {
   showClearDialog.value = true
 }
 
-// 切换选股服务
-const toggleScreening = async () => {
-  try {
-    const url = `/api/v1/ui/${currentAccountId.value}/screening/${screeningRunning.value ? 'stop' : 'start'}`
-    const response = await fetch(url, { method: 'POST' })
-    const data = await response.json()
-
-    if (data.success) {
-      ElMessage.success(screeningRunning.value ? '选股服务已停止' : '选股服务已启动')
-      screeningRunning.value = !screeningRunning.value
-    } else {
-      ElMessage.error(data.message || '操作失败')
-    }
-  } catch (error) {
-    console.error('切换选股服务失败:', error)
-    ElMessage.error('操作失败')
-  }
-}
-
 // 检查服务状态
 const checkServiceStatus = async () => {
   try {
-    const [screeningRes, monitoringRes] = await Promise.all([
-      fetch(`/api/v1/ui/${currentAccountId.value}/screening/status`),
-      fetch(`/api/v1/ui/${currentAccountId.value}/monitoring/status`)
-    ])
-
-    const screeningData = await screeningRes.json()
+    const monitoringRes = await fetch(`/api/v1/ui/${currentAccountId.value}/monitoring/status`)
     const monitoringData = await monitoringRes.json()
-
-    screeningRunning.value = screeningData.screening?.running || false
     monitoringRunning.value = monitoringData.monitoring?.running || false
 
     // 如果选股服务正在运行，开始轮询进度
