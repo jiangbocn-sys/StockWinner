@@ -13,10 +13,12 @@
 import asyncio
 import threading
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional, Dict
 import sqlite3
+
+from services.common.timezone import get_china_time, CHINA_TZ
 
 # 配置日志
 logging.basicConfig(
@@ -58,24 +60,34 @@ class SchedulerService:
             from apscheduler.schedulers.background import BackgroundScheduler
             from apscheduler.triggers.cron import CronTrigger
 
-            self._scheduler = BackgroundScheduler()
+            # 配置 APScheduler 使用中国时区
+            self._scheduler = BackgroundScheduler(timezone=CHINA_TZ)
             self._running = True
 
-            # 每天凌晨1点执行K线数据检查任务
+            # 每天凌晨1点(中国时间)执行K线数据检查任务
             self._scheduler.add_job(
                 self._daily_kline_check_job,
-                CronTrigger(hour=1, minute=0),
+                CronTrigger(hour=1, minute=0, timezone=CHINA_TZ),
                 id='daily_kline_check',
                 name='每日K线数据检查',
                 replace_existing=True
             )
 
-            # 每月5日凌晨1点执行月频因子更新任务
+            # 每月5日凌晨1点(中国时间)执行月频因子更新任务
             self._scheduler.add_job(
                 self._monthly_factor_check_job,
-                CronTrigger(day=5, hour=1, minute=0),
+                CronTrigger(day=5, hour=1, minute=0, timezone=CHINA_TZ),
                 id='monthly_factor_check',
                 name='每月因子数据检查',
+                replace_existing=True
+            )
+
+            # 每周六凌晨2点(中国时间)执行周K线下载
+            self._scheduler.add_job(
+                self._weekly_kline_check_job,
+                CronTrigger(day_of_week='sat', hour=2, minute=0, timezone=CHINA_TZ),
+                id='weekly_kline_download',
+                name='每周周K线数据下载',
                 replace_existing=True
             )
 
@@ -83,6 +95,7 @@ class SchedulerService:
             logger.info("调度服务已启动:")
             logger.info("  - 每天凌晨1点执行K线数据检查")
             logger.info("  - 每月5日凌晨1点执行月频因子更新")
+            logger.info("  - 每周六凌晨2点执行周K线数据下载")
 
         except ImportError:
             logger.warning("APScheduler 未安装，使用简单的定时检查方案")
@@ -102,8 +115,8 @@ class SchedulerService:
 
         def simple_loop():
             while self._running:
-                # 计算到下一个凌晨1点的等待时间
-                now = datetime.now()
+                # 计算到下一个凌晨1点(中国时间)的等待时间
+                now = get_china_time()
                 next_run = now.replace(hour=1, minute=0, second=0, microsecond=0)
                 if now.hour >= 1:
                     next_run = next_run + timedelta(days=1)
@@ -128,7 +141,7 @@ class SchedulerService:
         logger.info("开始每日K线数据检查任务")
         logger.info("=" * 60)
 
-        self._task_status['last_check_time'] = datetime.now().isoformat()
+        self._task_status['last_check_time'] = get_china_time().isoformat()
 
         try:
             # Step 1: 检查K线数据是否最新
@@ -140,7 +153,7 @@ class SchedulerService:
 
                 # Step 2: 启动K线增量下载
                 download_result = self._run_kline_download()
-                self._task_status['last_download_time'] = datetime.now().isoformat()
+                self._task_status['last_download_time'] = get_china_time().isoformat()
                 self._task_status['kline_status'] = download_result
 
                 if download_result.get('success'):
@@ -164,7 +177,7 @@ class SchedulerService:
                     expected_date,
                     force_full=True  # 覆盖率不足时强制全量计算
                 )
-                self._task_status['last_factor_calc_time'] = datetime.now().isoformat()
+                self._task_status['last_factor_calc_time'] = get_china_time().isoformat()
                 self._task_status['factor_status'] = factor_result
 
                 if factor_result.get('success'):
@@ -175,15 +188,8 @@ class SchedulerService:
                 logger.info(f"因子覆盖率正常: {factor_check['coverage_pct']:.1f}%")
                 self._task_status['factor_status'] = {'status': 'up_to_date', 'coverage': factor_check['coverage_pct']}
 
-            # Step 4: 检查并下载申万行业指数数据
-            logger.info("检查申万行业指数数据...")
-            industry_result = self._run_industry_indices_download()
-            self._task_status['industry_indices_status'] = industry_result
-
-            if industry_result.get('success'):
-                logger.info(f"行业指数更新完成: {industry_result}")
-            else:
-                logger.warning(f"行业指数更新失败: {industry_result}")
+            # Step 4: 行业指数已随K线下载自动更新（download_incremental_kline_data_sync 默认包含）
+            self._task_status['industry_indices_status'] = {'status': 'included_in_kline_download'}
 
             logger.info("=" * 60)
             logger.info("每日K线数据检查任务完成")
@@ -199,7 +205,7 @@ class SchedulerService:
         logger.info("开始月频因子更新任务（每月5日）")
         logger.info("=" * 60)
 
-        self._task_status['last_monthly_check_time'] = datetime.now().isoformat()
+        self._task_status['last_monthly_check_time'] = get_china_time().isoformat()
 
         try:
             # 检查月频因子是否需要更新
@@ -210,7 +216,7 @@ class SchedulerService:
 
                 # 执行月频因子更新
                 result = self._run_monthly_factor_update()
-                self._task_status['last_monthly_update_time'] = datetime.now().isoformat()
+                self._task_status['last_monthly_update_time'] = get_china_time().isoformat()
 
                 logger.info(f"月频因子更新完成: {result}")
             else:
@@ -235,7 +241,7 @@ class SchedulerService:
         latest_report = cursor.fetchone()[0]
 
         # 获取当前应有的最新报告期（季度报告日期）
-        now = datetime.now()
+        now = get_china_time()
         year = now.year
         month = now.month
 
@@ -406,15 +412,12 @@ class SchedulerService:
             task_manager.start_task(TaskType.DATA_DOWNLOAD)
 
             # 在当前线程执行（因为是后台任务）
-            from services.data.local_data_service import LocalKlineDataService
+            from services.data.local_data_service import download_incremental_kline_data_sync
             from dotenv import load_dotenv
             load_dotenv()
 
-            service = LocalKlineDataService()
-
-            # 执行增量下载
-            result = service.download_all_stocks_kline(
-                mode='incremental',
+            # 执行增量下载（行业指数随K线一起下载）
+            result = download_incremental_kline_data_sync(
                 show_progress=True
             )
 
@@ -451,7 +454,7 @@ class SchedulerService:
             from services.data.local_data_service import calculate_and_save_factors_for_dates
 
             # 计算日期范围
-            calc_start = start_date or (datetime.now() - timedelta(days=120)).strftime('%Y-%m-%d')
+            calc_start = start_date or (get_china_time() - timedelta(days=120)).strftime('%Y-%m-%d')
 
             # 当覆盖率不足时，使用only_new_dates=False强制全量计算
             # 这样可以填充中间缺失的日期和没有因子记录的股票
@@ -512,6 +515,93 @@ class SchedulerService:
             logger.error(f"月频因子更新失败: {e}", exc_info=True)
             return {'success': False, 'message': str(e)}
 
+    def _run_full_kline_download(self) -> Dict:
+        """执行K线全量下载"""
+        logger.info("开始K线全量下载...")
+
+        try:
+            from services.common.task_manager import get_task_manager, TaskType
+            task_manager = get_task_manager()
+
+            if task_manager.is_running(TaskType.DATA_DOWNLOAD):
+                logger.warning("已有下载任务在运行")
+                return {'success': False, 'message': '已有下载任务在运行'}
+
+            task_manager.start_task(TaskType.DATA_DOWNLOAD)
+
+            from services.data.local_data_service import download_all_kline_data_sync
+            from dotenv import load_dotenv
+            load_dotenv()
+
+            result = download_all_kline_data_sync(show_progress=True)
+
+            if result.get('success'):
+                task_manager.complete_task(TaskType.DATA_DOWNLOAD, result)
+            else:
+                task_manager.fail_task(TaskType.DATA_DOWNLOAD, result.get('message', '下载失败'))
+
+            return result
+
+        except Exception as e:
+            logger.error(f"K线全量下载失败: {e}", exc_info=True)
+            return {'success': False, 'message': str(e)}
+
+    def _run_weekly_kline_download(self) -> Dict:
+        """执行周K线下载"""
+        logger.info("开始周K线下载...")
+
+        try:
+            from services.common.task_manager import get_task_manager, TaskType
+            task_manager = get_task_manager()
+
+            if task_manager.is_running(TaskType.WEEKLY_KLINE_DOWNLOAD):
+                logger.warning("已有周K线下载任务在运行")
+                return {'success': False, 'message': '已有周K线下载任务在运行'}
+
+            task_manager.start_task(TaskType.WEEKLY_KLINE_DOWNLOAD)
+
+            from services.data.download_weekly_kline import download_weekly_kline_sync
+            from dotenv import load_dotenv
+            load_dotenv()
+
+            result = download_weekly_kline_sync(
+                years=10,
+                batch_size=50
+            )
+
+            task_manager.complete_task(TaskType.WEEKLY_KLINE_DOWNLOAD, result)
+            return result
+
+        except Exception as e:
+            logger.error(f"周K线下载失败: {e}", exc_info=True)
+            return {'success': False, 'message': str(e)}
+
+    def _weekly_kline_check_job(self):
+        """每周周K线数据下载任务"""
+        logger.info("=" * 60)
+        logger.info("开始周K线数据下载任务")
+        logger.info("=" * 60)
+
+        try:
+            self._task_status['last_weekly_kline_check'] = get_china_time().isoformat()
+
+            result = self._run_weekly_kline_download()
+            self._task_status['last_weekly_kline_download'] = get_china_time().isoformat()
+            self._task_status['weekly_kline_status'] = result
+
+            if result.get('success'):
+                logger.info(f"周K线下载完成: {result}")
+            else:
+                logger.warning(f"周K线下载失败: {result}")
+
+            logger.info("=" * 60)
+            logger.info("周K线数据下载任务完成")
+            logger.info("=" * 60)
+
+        except Exception as e:
+            logger.error(f"周K线下载任务异常: {e}", exc_info=True)
+            self._task_status['weekly_kline_status'] = {'success': False, 'message': str(e)}
+
     def _run_industry_indices_download(self) -> Dict:
         """执行申万行业指数下载"""
         logger.info("开始申万行业指数下载...")
@@ -548,12 +638,22 @@ class SchedulerService:
             'task_status': self._task_status
         }
 
-    def run_manual_kline_check(self) -> Dict:
+    def run_manual_kline_check(self, full: bool = False) -> Dict:
         """手动触发K线数据检查"""
-        logger.info("手动触发K线数据检查")
-        thread = threading.Thread(target=self._daily_kline_check_job)
+        logger.info(f"手动触发K线数据{'全量下载' if full else '检查'}")
+        if full:
+            thread = threading.Thread(target=self._run_full_kline_download)
+        else:
+            thread = threading.Thread(target=self._daily_kline_check_job)
         thread.start()
-        return {'success': True, 'message': 'K线数据检查任务已启动'}
+        return {'success': True, 'message': 'K线数据' + ('全量下载任务' if full else '检查任务') + '已启动'}
+
+    def run_manual_weekly_kline_download(self) -> Dict:
+        """手动触发周K线下载"""
+        logger.info("手动触发周K线下载")
+        thread = threading.Thread(target=self._run_weekly_kline_download)
+        thread.start()
+        return {'success': True, 'message': '周K线下载任务已启动'}
 
     def run_manual_monthly_check(self) -> Dict:
         """手动触发月频因子更新"""

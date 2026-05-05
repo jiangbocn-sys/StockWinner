@@ -10,18 +10,11 @@
 4. 分散度控制 - 单只股票最大持仓比例
 """
 
-from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional, Any, Tuple
 from dataclasses import dataclass, field
 from enum import Enum
 
-
-# 中国时区
-CHINA_TZ = timezone(timedelta(hours=8))
-
-def get_china_time():
-    """获取中国时区时间"""
-    return datetime.now(CHINA_TZ).replace(tzinfo=None)
+from services.common.timezone import get_china_time
 
 
 class MarketCondition(Enum):

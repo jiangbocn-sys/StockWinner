@@ -4,14 +4,6 @@
 """
 
 from typing import Dict, List, Optional
-from datetime import datetime, timezone, timedelta
-
-# 中国时区
-CHINA_TZ = timezone(timedelta(hours=8))
-
-def get_china_time():
-    """获取中国时区时间"""
-    return datetime.now(CHINA_TZ).replace(tzinfo=None)
 
 
 class AccountManager:

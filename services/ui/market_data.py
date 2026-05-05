@@ -169,11 +169,12 @@ async def get_kline_data(
 
     # 处理时间范围参数
     from datetime import datetime, timedelta
+    from services.common.timezone import get_china_time
     actual_start_date = start_date
     actual_end_date = end_date
 
     if time_range and not start_date and not end_date:
-        end_dt = datetime.now()
+        end_dt = get_china_time()
         if time_range == "7d":
             start_dt = end_dt - timedelta(days=7)
         elif time_range == "30d":

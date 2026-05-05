@@ -198,3 +198,110 @@ async def fill_monthly_factors_inherit():
         "message": f"月度因子填充完成：成功 {result['filled']} 条",
         "result": result
     }
+
+
+@router.post("/api/v1/ui/factors/daily/calculate")
+async def calculate_daily_factors(
+    lookback_days: int = Body(5, embed=True, description="前溯天数，默认5天")
+):
+    """
+    智能补算日频因子
+
+    检测最近 N 个交易日的因子覆盖率，对缺失的股票进行计算
+
+    Returns:
+        计算结果统计
+    """
+    from services.common.task_manager import get_task_manager, TaskType
+
+    task_manager = get_task_manager()
+
+    if task_manager.is_running(TaskType.DAILY_FACTOR_CALC):
+        task_info = task_manager.get_status(TaskType.DAILY_FACTOR_CALC)
+        return {
+            "success": False,
+            "message": "日频因子计算任务已在运行中",
+            "task_status": task_info.to_dict()
+        }
+
+    task_manager.start_task(TaskType.DAILY_FACTOR_CALC)
+
+    def run_calc():
+        try:
+            from services.data.local_data_service import calculate_and_save_factors_for_dates
+            from services.common.timezone import get_china_time
+            from datetime import timedelta
+
+            end_date = get_china_time().strftime('%Y-%m-%d')
+            start_date = (get_china_time() - timedelta(days=lookback_days)).strftime('%Y-%m-%d')
+
+            task_manager.update_progress(TaskType.DAILY_FACTOR_CALC, 10, f"正在计算 {start_date} 至 {end_date}...")
+
+            inserted = calculate_and_save_factors_for_dates(
+                start_date=start_date,
+                end_date=end_date,
+                only_new_dates=True,
+                show_progress=True
+            )
+
+            task_manager.complete_task(TaskType.DAILY_FACTOR_CALC, {
+                "inserted": inserted,
+                "date_range": f"{start_date} 至 {end_date}"
+            })
+        except Exception as e:
+            task_manager.fail_task(TaskType.DAILY_FACTOR_CALC, str(e))
+
+    thread = threading.Thread(target=run_calc, daemon=True)
+    thread.start()
+
+    return {
+        "success": True,
+        "message": f"日频因子计算任务已启动（前溯 {lookback_days} 天）",
+        "task_status": task_manager.get_status(TaskType.DAILY_FACTOR_CALC).to_dict()
+    }
+
+
+@router.post("/api/v1/ui/factors/daily/fill-empty")
+async def fill_daily_factors_empty():
+    """
+    补算日频因子空值
+
+    对已有记录但因子字段为空值的记录进行填充计算
+
+    Returns:
+        计算结果统计
+    """
+    from services.common.task_manager import get_task_manager, TaskType
+
+    task_manager = get_task_manager()
+
+    if task_manager.is_running(TaskType.DAILY_FACTOR_FILL):
+        task_info = task_manager.get_status(TaskType.DAILY_FACTOR_FILL)
+        return {
+            "success": False,
+            "message": "日频因子补算空值任务已在运行中",
+            "task_status": task_info.to_dict()
+        }
+
+    task_manager.start_task(TaskType.DAILY_FACTOR_FILL)
+
+    def run_fill():
+        try:
+            from services.data.local_data_service import fill_empty_factor_values
+
+            task_manager.update_progress(TaskType.DAILY_FACTOR_FILL, 10, "正在补算空值...")
+
+            result = fill_empty_factor_values(show_progress=True)
+
+            task_manager.complete_task(TaskType.DAILY_FACTOR_FILL, result)
+        except Exception as e:
+            task_manager.fail_task(TaskType.DAILY_FACTOR_FILL, str(e))
+
+    thread = threading.Thread(target=run_fill, daemon=True)
+    thread.start()
+
+    return {
+        "success": True,
+        "message": "日频因子补算空值任务已启动",
+        "task_status": task_manager.get_status(TaskType.DAILY_FACTOR_FILL).to_dict()
+    }

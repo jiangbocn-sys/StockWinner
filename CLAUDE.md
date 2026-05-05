@@ -121,7 +121,14 @@ await gateway.get_kline_data("600000.SH", period="day", start_date="20260101")
 Stock codes use `.SH` (Shanghai) or `.SZ` (Shenzhen) suffix format: `600000.SH`, `000001.SZ`
 
 ### Timezone
-All timestamps use China timezone (Asia/Shanghai, UTC+8). Use `get_china_time()` helper.
+All timestamps use China timezone (Asia/Shanghai, UTC+8). **唯一合法来源**：
+```python
+from services.common.timezone import get_china_time, CHINA_TZ
+```
+- 禁止在任何文件中定义 `CHINA_TZ` 或 `get_china_time()`
+- 禁止使用 `datetime.now()`（返回系统时区），必须用 `get_china_time()`
+- 数据库统一存中国时间的 naive ISO string（不带 `+08:00`）
+- 前端收到 naive string 后应附加 `+08:00` 再解析
 
 ## SDK Integration (AmazingData/银河证券)
 

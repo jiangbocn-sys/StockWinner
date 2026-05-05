@@ -11,19 +11,11 @@
 4. 卖出时机 - 形态破位、指标死叉、基本面恶化
 """
 
-from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional, Any, Tuple
 from dataclasses import dataclass, field
 from enum import Enum
 from services.common.indicators import TechnicalIndicators
-
-
-# 中国时区
-CHINA_TZ = timezone(timedelta(hours=8))
-
-def get_china_time():
-    """获取中国时区时间"""
-    return datetime.now(CHINA_TZ).replace(tzinfo=None)
+from services.common.timezone import get_china_time
 
 
 class SignalType(Enum):

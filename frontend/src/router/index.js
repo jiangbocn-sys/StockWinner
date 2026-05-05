@@ -42,6 +42,12 @@ const routes = [
     meta: { title: '数据浏览器' }
   },
   {
+    path: '/data-management',
+    name: 'DataManagement',
+    component: () => import('../views/DataManagement.vue'),
+    meta: { title: '数据维护' }
+  },
+  {
     path: '/watchlist',
     name: 'Watchlist',
     component: () => import('../views/Watchlist.vue'),

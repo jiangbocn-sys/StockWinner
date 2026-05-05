@@ -17,12 +17,16 @@ from datetime import datetime
 from enum import Enum
 import asyncio
 
+from services.common.timezone import get_china_time
+
 
 class TaskType(Enum):
     """任务类型"""
     DATA_DOWNLOAD = "data_download"
     DAILY_FACTOR_CALC = "daily_factor_calc"
+    DAILY_FACTOR_FILL = "daily_factor_fill"
     MONTHLY_FACTOR_UPDATE = "monthly_factor_update"
+    WEEKLY_KLINE_DOWNLOAD = "weekly_kline_download"
 
 
 class TaskStatus(Enum):
@@ -47,7 +51,7 @@ class TaskInfo:
     def start(self):
         """启动任务"""
         self.status = TaskStatus.RUNNING
-        self.start_time = datetime.now()
+        self.start_time = get_china_time()
         self.progress = {"percent": 0, "message": "正在启动..."}
 
     def update_progress(self, percent: float, message: str = None, **extra):
@@ -58,14 +62,14 @@ class TaskInfo:
     def complete(self, result: Dict = None):
         """完成任务"""
         self.status = TaskStatus.COMPLETED
-        self.end_time = datetime.now()
+        self.end_time = get_china_time()
         self.result = result
         self.progress = {"percent": 100, "message": "已完成"}
 
     def fail(self, error: str):
         """任务失败"""
         self.status = TaskStatus.FAILED
-        self.end_time = datetime.now()
+        self.end_time = get_china_time()
         self.error = error
         self.progress = {"percent": 0, "message": f"失败: {error}"}
 
@@ -82,7 +86,7 @@ class TaskInfo:
         """转换为字典"""
         elapsed_seconds = 0
         if self.start_time:
-            end_time = self.end_time or datetime.now()
+            end_time = self.end_time or get_china_time()
             elapsed_seconds = (end_time - self.start_time).total_seconds()
 
         return {

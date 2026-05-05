@@ -6,7 +6,7 @@ Provides database list, table list, table statistics, schema, data query and edi
 
 from fastapi import APIRouter, HTTPException, Query, Body, Path as FastAPIPath
 from typing import List, Optional, Dict, Any, Union
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta
 import aiosqlite
 from pathlib import Path
 from pydantic import BaseModel, Field
@@ -25,15 +25,9 @@ DATABASES = {
 # 筛选模板配置文件
 TEMPLATES_FILE = Path(__file__).parent.parent.parent / "config" / "screening_templates.json"
 
-# 中国时区
-CHINA_TZ = timezone(timedelta(hours=8))
-
 # 导入公共股票代码工具
 from services.common.stock_code import normalize_stock_code
-
-def get_china_time():
-    """获取中国时区时间"""
-    return datetime.now(CHINA_TZ).replace(tzinfo=None)
+from services.common.timezone import get_china_time
 
 
 from contextlib import asynccontextmanager

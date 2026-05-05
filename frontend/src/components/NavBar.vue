@@ -44,6 +44,10 @@
           <el-icon><DataLine /></el-icon>
           <span>数据浏览器</span>
         </el-menu-item>
+        <el-menu-item index="/data-management">
+          <el-icon><Files /></el-icon>
+          <span>数据维护</span>
+        </el-menu-item>
         <el-menu-item index="/accounts">
           <el-icon><User /></el-icon>
           <span>账户管理</span>
@@ -86,7 +90,7 @@
 import { computed, ref, onMounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { Lock, SwitchButton, ArrowDown, DataLine } from '@element-plus/icons-vue'
+import { Lock, SwitchButton, ArrowDown, DataLine, Files } from '@element-plus/icons-vue'
 
 const router = useRouter()
 const route = useRoute()

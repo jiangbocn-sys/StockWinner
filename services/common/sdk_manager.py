@@ -153,7 +153,7 @@ class SDKManager:
             return pd.DataFrame()
 
     def get_industry_base_info(self) -> pd.DataFrame:
-        """获取行业分类数据"""
+        """获取行业分类/行业指数基本信息（申万行业分类）"""
         info = self.get_info()
         try:
             result = info.get_industry_base_info(is_local=False)
@@ -172,7 +172,7 @@ class SDKManager:
         """获取每日最新证券信息（包含股票名称、昨收价、涨跌停价等）"""
         self._ensure_login()
         try:
-            base_data = self.get_base_data()  # 使用缓存的实例
+            base_data = self.get_base_data()
             result = base_data.get_code_info(security_type=security_type)
             if isinstance(result, pd.DataFrame):
                 return result
@@ -185,7 +185,7 @@ class SDKManager:
         """获取每日最新代码表"""
         self._ensure_login()
         try:
-            base_data = self.get_base_data()  # 使用缓存的实例
+            base_data = self.get_base_data()
             result = base_data.get_code_list(security_type=security_type)
             if isinstance(result, list):
                 return result
@@ -193,19 +193,6 @@ class SDKManager:
         except Exception as e:
             print(f"[SDK] 获取代码列表失败：{e}")
             return []
-
-    def get_industry_base_info(self) -> pd.DataFrame:
-        """获取行业指数基本信息"""
-        self._ensure_login()
-        try:
-            info = self.get_info()
-            result = info.get_industry_base_info(is_local=False)
-            if isinstance(result, pd.DataFrame):
-                return result
-            return pd.DataFrame()
-        except Exception as e:
-            print(f"[SDK] 获取行业指数基本信息失败：{e}")
-            return pd.DataFrame()
 
     def get_industry_daily(self, code_list: list) -> Dict[str, pd.DataFrame]:
         """获取行业指数日行情数据"""
@@ -245,23 +232,3 @@ def reset_sdk_manager():
     """重置 SDKManager（用于测试）"""
     global _sdk_manager
     _sdk_manager = None
-
-
-def get_equity_structure(stock_codes: list) -> pd.DataFrame:
-    """便捷函数：获取股本结构数据"""
-    return get_sdk_manager().get_equity_structure(stock_codes)
-
-
-def get_income_statement(stock_codes: list) -> pd.DataFrame:
-    """便捷函数：获取利润表数据"""
-    return get_sdk_manager().get_income_statement(stock_codes)
-
-
-def get_balance_sheet(stock_codes: list) -> pd.DataFrame:
-    """便捷函数：获取资产负债表数据"""
-    return get_sdk_manager().get_balance_sheet(stock_codes)
-
-
-def get_cash_flow_statement(stock_codes: list) -> pd.DataFrame:
-    """便捷函数：获取现金流量表数据"""
-    return get_sdk_manager().get_cash_flow_statement(stock_codes)

@@ -19,6 +19,8 @@ from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Tuple
 
+from services.common.timezone import get_china_time
+
 DB_PATH = Path(__file__).parent.parent.parent / "data" / "kline.db"
 
 
@@ -200,7 +202,7 @@ class MonthlyFactorFiller:
 
             if update_fields:
                 update_values.extend([
-                    datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                    get_china_time().strftime('%Y-%m-%d %H:%M:%S'),
                     f"inherited_from_{item['source_date']}",
                     record_id
                 ])

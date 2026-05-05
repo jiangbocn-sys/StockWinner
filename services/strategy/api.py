@@ -6,19 +6,11 @@
 
 from fastapi import APIRouter, HTTPException, Path, Body, Query
 from typing import List, Optional, Dict, Any
-from datetime import datetime, timezone, timedelta
 from services.common.database import get_db_manager
 from services.strategy.selection_engine import get_selection_engine, StockScore
 from services.strategy.position_engine import get_position_engine, PositionRecommendation, MarketIndicator
 from services.strategy.trading_engine import get_trading_engine, PositionData, TradingSignal
 import json
-
-# 中国时区
-CHINA_TZ = timezone(timedelta(hours=8))
-
-def get_china_time():
-    """获取中国时区时间"""
-    return datetime.now(CHINA_TZ).replace(tzinfo=None)
 
 router = APIRouter()
 

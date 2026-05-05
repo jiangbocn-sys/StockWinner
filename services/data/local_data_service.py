@@ -1916,7 +1916,8 @@ async def download_all_kline_data(
     broker_account: str = "",
     broker_password: str = "",
     calculate_factors: bool = True,
-    market_filter: Optional[List[str]] = None
+    market_filter: Optional[List[str]] = None,
+    download_industry: bool = True
 ):
     """
     异步下载全量 K 线数据
@@ -2058,6 +2059,18 @@ async def download_all_kline_data(
         except Exception as e:
             print(f"[LocalData] 因子计算失败：{e}")
 
+    # 下载行业指数数据
+    if download_industry:
+        tracker.set_status_sync(DownloadStatus.DOWNLOADING, "下载申万行业指数数据...")
+        try:
+            industry_result = download_industry_indices()
+            if industry_result.get('success'):
+                print(f"[LocalData] 行业指数下载完成：{industry_result.get('saved', 0)} 条记录")
+            else:
+                print(f"[LocalData] 行业指数下载失败：{industry_result.get('message', '未知错误')}")
+        except Exception as e:
+            print(f"[LocalData] 行业指数下载失败：{e}")
+
     tracker.complete_sync()
 
     return failed_count < total_stocks * 0.5  # 失败不超过50%视为成功
@@ -2071,7 +2084,8 @@ def download_all_kline_data_sync(
     broker_account: str = "",
     broker_password: str = "",
     calculate_factors: bool = True,
-    market_filter: Optional[List[str]] = None
+    market_filter: Optional[List[str]] = None,
+    download_industry: bool = True
 ):
     """同步版本的下载函数，用于后台任务
 
@@ -2084,6 +2098,7 @@ def download_all_kline_data_sync(
         broker_password: 银河证券资金密码
         calculate_factors: 下载完成后是否自动计算因子
         market_filter: 市场筛选列表，如 ['SH', 'SZ'] 只下载沪深 A 股，['BJ'] 只下载北交所股票
+        download_industry: 下载完成后是否自动下载行业指数（默认 True）
     """
     import asyncio
 
@@ -2096,7 +2111,8 @@ def download_all_kline_data_sync(
             broker_account=broker_account,
             broker_password=broker_password,
             calculate_factors=calculate_factors,
-            market_filter=market_filter
+            market_filter=market_filter,
+            download_industry=download_industry
         )
 
     # 创建新的事件循环来运行异步函数
@@ -2116,7 +2132,8 @@ async def download_incremental_kline_data(
     calculate_factors: bool = True,
     use_trading_time_rule: bool = True,
     start_date: Optional[str] = None,
-    end_date: Optional[str] = None
+    end_date: Optional[str] = None,
+    download_industry: bool = True
 ):
     """
     增量下载 K 线数据（带交易时间检查）
@@ -2172,7 +2189,8 @@ async def download_incremental_kline_data(
         end_date=end_date,
         broker_account=broker_account,
         broker_password=broker_password,
-        calculate_factors=calculate_factors
+        calculate_factors=calculate_factors,
+        download_industry=download_industry
     )
 
 
@@ -2184,7 +2202,8 @@ def download_incremental_kline_data_sync(
     calculate_factors: bool = True,
     use_trading_time_rule: bool = True,
     start_date: Optional[str] = None,
-    end_date: Optional[str] = None
+    end_date: Optional[str] = None,
+    download_industry: bool = True
 ):
     """同步版本的增量下载函数
 
@@ -2197,6 +2216,7 @@ def download_incremental_kline_data_sync(
         use_trading_time_rule: 是否应用交易时间规则（默认 True）
         start_date: 开始日期（YYYY-MM-DD），指定则直接使用
         end_date: 结束日期（YYYY-MM-DD），指定则直接使用
+        download_industry: 下载完成后是否自动下载行业指数（默认 True）
     """
     import asyncio
 
@@ -2209,7 +2229,8 @@ def download_incremental_kline_data_sync(
             calculate_factors=calculate_factors,
             use_trading_time_rule=use_trading_time_rule,
             start_date=start_date,
-            end_date=end_date
+            end_date=end_date,
+            download_industry=download_industry
         )
 
     try:

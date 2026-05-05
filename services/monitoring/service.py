@@ -11,18 +11,11 @@
 """
 
 import asyncio
-from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional, Any
 from services.common.database import get_db_manager
+from services.common.timezone import get_china_time
 from services.trading.gateway import get_gateway, MarketData
 from services.trading.execution_service import get_trade_execution_service
-
-# 中国时区
-CHINA_TZ = timezone(timedelta(hours=8))
-
-def get_china_time():
-    """获取中国时区时间"""
-    return datetime.now(CHINA_TZ).replace(tzinfo=None)
 
 
 class TradingMonitor:

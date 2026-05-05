@@ -16,19 +16,13 @@ SDK 连接队列管理器
 
 import asyncio
 import threading
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
 from typing import Optional, Dict, Any, List
 from enum import Enum
 from dataclasses import dataclass
 import uuid
 
-# 中国时区
-CHINA_TZ = timezone(timedelta(hours=8))
-
-
-def get_china_time() -> datetime:
-    """获取中国时区时间"""
-    return datetime.now(CHINA_TZ).replace(tzinfo=None)
+from services.common.timezone import get_china_time
 
 
 class TaskType(Enum):

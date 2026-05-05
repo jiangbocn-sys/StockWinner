@@ -11,7 +11,6 @@
 """
 
 import asyncio
-from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional, Any, Tuple
 from dataclasses import dataclass, field
 from enum import Enum
@@ -19,15 +18,8 @@ import json
 
 from services.common.database import get_db_manager
 from services.common.indicators import TechnicalIndicators
+from services.common.timezone import get_china_time
 from services.data.local_data_service import get_local_data_service
-
-
-# 中国时区
-CHINA_TZ = timezone(timedelta(hours=8))
-
-def get_china_time():
-    """获取中国时区时间"""
-    return datetime.now(CHINA_TZ).replace(tzinfo=None)
 
 
 class FactorType(Enum):

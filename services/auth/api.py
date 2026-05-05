@@ -5,14 +5,7 @@ from fastapi import APIRouter, HTTPException, Header, Depends
 from typing import Dict, Any, Optional
 from services.auth.service import get_auth_service
 import logging
-from datetime import datetime, timezone, timedelta
-
-# 中国时区
-CHINA_TZ = timezone(timedelta(hours=8))
-
-def get_china_time():
-    """获取中国时区时间"""
-    return datetime.now(CHINA_TZ).replace(tzinfo=None)
+from services.common.timezone import get_china_time
 
 
 logger = logging.getLogger(__name__)
@@ -103,7 +96,6 @@ async def change_password(
     """
     from services.common.database import get_db_manager
     import hashlib
-    from datetime import datetime, timezone, timedelta
 
     old_password = password_data.get("old_password", "")
     new_password = password_data.get("new_password", "")

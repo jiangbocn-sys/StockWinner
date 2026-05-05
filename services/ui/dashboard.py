@@ -3,18 +3,12 @@
 """
 
 from fastapi import APIRouter, HTTPException, Path
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
 from services.common.account_manager import get_account_manager
 from services.common.database import get_db_manager
 from services.screening.service import get_screening_service
 from services.monitoring.service import get_trading_monitor
-
-# 中国时区
-CHINA_TZ = timezone(timedelta(hours=8))
-
-def get_china_time():
-    """获取中国时区时间"""
-    return datetime.now(CHINA_TZ).replace(tzinfo=None)
+from services.common.timezone import get_china_time
 
 router = APIRouter()
 

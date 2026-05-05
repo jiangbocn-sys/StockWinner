@@ -5,16 +5,9 @@
 from fastapi import APIRouter, HTTPException, Path, Body, Query
 from typing import List, Optional, Dict, Any
 from fastapi.background import BackgroundTasks
-from datetime import datetime, timezone, timedelta
 from services.common.database import get_db_manager
 from services.screening.service import get_screening_service
-
-# 中国时区
-CHINA_TZ = timezone(timedelta(hours=8))
-
-def get_china_time():
-    """获取中国时区时间"""
-    return datetime.now(CHINA_TZ).replace(tzinfo=None)
+from services.common.timezone import get_china_time
 
 router = APIRouter()
 
@@ -287,14 +280,14 @@ async def calculate_factors(
 
         if mode == 'smart':
             # 智能更新：只计算最新日期的缺失记录
-            target_start = kline_latest if kline_latest else datetime.now().strftime('%Y-%m-%d')
-            target_end = kline_latest if kline_latest else datetime.now().strftime('%Y-%m-%d')
+            target_start = kline_latest if kline_latest else get_china_time().strftime('%Y-%m-%d')
+            target_end = kline_latest if kline_latest else get_china_time().strftime('%Y-%m-%d')
         else:
             # 全量：全部 kline 日期范围
             cursor.execute("SELECT MIN(trade_date) FROM kline_data")
             kline_earliest = cursor.fetchone()[0]
             target_start = kline_earliest if kline_earliest else '1970-01-01'
-            target_end = kline_latest if kline_latest else datetime.now().strftime('%Y-%m-%d')
+            target_end = kline_latest if kline_latest else get_china_time().strftime('%Y-%m-%d')
 
         conn.close()
 

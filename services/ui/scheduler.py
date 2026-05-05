@@ -4,7 +4,7 @@
 提供调度状态查询和手动触发功能
 """
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Query
 from typing import Dict
 
 router = APIRouter()
@@ -57,11 +57,11 @@ async def stop_scheduler() -> Dict:
 
 
 @router.post("/api/v1/ui/scheduler/kline/check")
-async def manual_kline_check() -> Dict:
+async def manual_kline_check(full: bool = Query(False, description="是否全量下载")) -> Dict:
     """
     手动触发K线数据检查
 
-    检查K线数据是否最新，如落后则启动增量下载和因子计算
+    默认增量检查，full=true 时执行全量下载
 
     Returns:
         任务启动状态
@@ -69,7 +69,21 @@ async def manual_kline_check() -> Dict:
     from services.common.scheduler_service import get_scheduler
 
     scheduler = get_scheduler()
-    return scheduler.run_manual_kline_check()
+    return scheduler.run_manual_kline_check(full=full)
+
+
+@router.post("/api/v1/ui/scheduler/weekly/kline")
+async def manual_weekly_kline_download() -> Dict:
+    """
+    手动触发周K线数据下载
+
+    Returns:
+        任务启动状态
+    """
+    from services.common.scheduler_service import get_scheduler
+
+    scheduler = get_scheduler()
+    return scheduler.run_manual_weekly_kline_download()
 
 
 @router.post("/api/v1/ui/scheduler/monthly/check")
@@ -102,3 +116,41 @@ async def manual_industry_indices_download() -> Dict:
 
     scheduler = get_scheduler()
     return scheduler.run_manual_industry_indices_download()
+
+
+@router.get("/api/v1/ui/data/status")
+async def get_data_status() -> Dict:
+    """
+    获取各数据表最新日期
+
+    Returns:
+        kline_data、weekly_kline_data、stock_daily_factors、stock_monthly_factors 最新日期
+    """
+    import sqlite3
+    from pathlib import Path
+
+    db_path = Path(__file__).parent.parent.parent / "data" / "kline.db"
+
+    conn = sqlite3.connect(str(db_path))
+    cursor = conn.cursor()
+
+    status = {}
+
+    # kline_data 最新日期
+    cursor.execute("SELECT MAX(trade_date) FROM kline_data")
+    status['kline_latest'] = cursor.fetchone()[0]
+
+    # weekly_kline_data 最新日期
+    cursor.execute("SELECT MAX(week_end_date) FROM weekly_kline_data")
+    status['weekly_kline_latest'] = cursor.fetchone()[0]
+
+    # stock_daily_factors 最新日期
+    cursor.execute("SELECT MAX(trade_date) FROM stock_daily_factors")
+    status['daily_factors_latest'] = cursor.fetchone()[0]
+
+    # stock_monthly_factors 最新报告期
+    cursor.execute("SELECT MAX(report_date) FROM stock_monthly_factors")
+    status['monthly_factors_latest'] = cursor.fetchone()[0]
+
+    conn.close()
+    return status

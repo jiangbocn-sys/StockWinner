@@ -21,6 +21,7 @@ import json
 
 # 使用统一的SDK管理器
 from services.common.sdk_manager import get_sdk_manager
+from services.common.timezone import get_china_time
 
 # 数据库路径
 DB_PATH = Path(__file__).parent.parent.parent / "data" / "kline.db"
@@ -523,7 +524,7 @@ class MonthlyFactorUpdater:
                 update_fields = [f"{field} = ?" for field in factor_values.keys()]
                 update_values = list(factor_values.values())
                 update_values.extend([
-                    datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                    get_china_time().strftime('%Y-%m-%d %H:%M:%S'),
                     stock_code, report_date
                 ])
                 sql = f"""
@@ -538,8 +539,8 @@ class MonthlyFactorUpdater:
                 stock_name = stock_names.get(stock_code, '') if stock_names else ''
                 fields = ['stock_code', 'stock_name', 'report_date', 'source', 'created_at', 'updated_at']
                 values = [stock_code, stock_name, report_date, 'sdk_insert',
-                         datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                         datetime.now().strftime('%Y-%m-%d %H:%M:%S')]
+                         get_china_time().strftime('%Y-%m-%d %H:%M:%S'),
+                         get_china_time().strftime('%Y-%m-%d %H:%M:%S')]
 
                 for field, value in factor_values.items():
                     fields.append(field)

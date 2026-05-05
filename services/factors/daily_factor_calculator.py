@@ -18,9 +18,6 @@ from typing import List, Dict, Optional, Tuple
 import aiosqlite
 import asyncio
 
-# 中国时区
-CHINA_TZ = timezone(timedelta(hours=8))
-
 # 导入统一技术指标模块
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))

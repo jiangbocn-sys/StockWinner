@@ -12,28 +12,8 @@ from fastapi.responses import JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
 import os
-from datetime import datetime, timezone, timedelta
 
-# 设置默认时区为中国时区 (Asia/Shanghai)
-CHINA_TZ = timezone(timedelta(hours=8))
-
-def get_china_time():
-    """获取中国时区时间"""
-    return datetime.now(CHINA_TZ).replace(tzinfo=None)
-
-# 覆盖 datetime.now 以使用中国时区
-original_datetime = datetime
-
-class ChinaDateTime(original_datetime):
-    """使用中国时区的 datetime 类"""
-    @classmethod
-    def now(cls, tz=None):
-        if tz is None:
-            return original_datetime.now(CHINA_TZ).replace(tzinfo=None)
-        return original_datetime.now(tz)
-
-datetime = ChinaDateTime
-
+from services.common.timezone import get_china_time
 from services.common.database import get_db_manager, reset_db_manager
 from services.common.account_manager import get_account_manager, reset_account_manager
 from services.ui import dashboard, accounts, positions, trades, strategies, screening, monitoring, market_data, data_explorer, position_rules, factors, scheduler
@@ -42,12 +22,14 @@ from services.account_management.api import router as account_management_router
 from services.auth.api import router as auth_router
 from services.llm.api import router as llm_router
 
+VERSION = "6.2.5"
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期"""
     # 启动时初始化
-    print("StockWinner v6.2.4 启动中...")
+    print(f"StockWinner v{VERSION} 启动中...")
 
     # 初始化数据库连接
     db_manager = get_db_manager()
@@ -79,8 +61,8 @@ async def lifespan(app: FastAPI):
 # 创建 FastAPI 应用
 app = FastAPI(
     title="StockWinner",
-    description="智能股票交易系统 v6.2.5 - 调度服务增强",
-    version="6.2.5",
+    description=f"智能股票交易系统 v{VERSION} - 调度服务增强",
+    version=VERSION,
     lifespan=lifespan
 )
 
@@ -135,7 +117,7 @@ async def root():
     """根路径"""
     return {
         "service": "StockWinner",
-        "version": "6.2.4",
+        "version": VERSION,
         "status": "running"
     }
 
@@ -145,5 +127,5 @@ async def health_check():
     """健康检查（不带账户参数）"""
     return {
         "status": "healthy",
-        "version": "6.2.4"
+        "version": VERSION
     }
