@@ -300,7 +300,7 @@
           <el-form-item label="选择策略" required>
             <el-select v-model="strategySelectForm.strategyId" placeholder="请选择策略" style="width: 100%">
               <el-option
-                v-for="s in strategies"
+                v-for="s in screeningStrategies"
                 :key="s.id"
                 :label="`${s.name} (${s.status === 'active' ? '激活' : '停用'})`"
                 :value="s.id"
@@ -577,7 +577,8 @@ const dataStats = ref({ total_stocks: 0, total_records: 0, latest_date: null, ea
 
 // 策略
 const strategies = ref([])
-const screeningStrategies = computed(() => strategies.value.filter(s => s.strategy_type === 'screening'))
+// 关联策略：仅配置型选股策略（排除代码型）
+const screeningStrategies = computed(() => strategies.value.filter(s => s.strategy_type === 'screening' && s.code_type !== 'python'))
 // 调度任务可选：screening 类型或代码型策略
 const taskStrategies = computed(() => {
   return strategies.value.filter(s => s.strategy_type === 'screening' || s.code_type === 'python')

@@ -114,7 +114,8 @@ def init_database():
             code TEXT,
             code_type TEXT DEFAULT 'config',
             target_scope TEXT DEFAULT 'group',
-            function_name TEXT DEFAULT 'run'
+            function_name TEXT DEFAULT 'run',
+            code_scope TEXT DEFAULT 'screening'
         )
     """)
 

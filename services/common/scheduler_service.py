@@ -131,7 +131,7 @@ class SchedulerService:
 
                 if self._running:
                     logger.info("开始执行每日数据检查")
-                    self._daily_check_job()
+                    self._daily_kline_check_job()
 
         self._running = True
         thread = threading.Thread(target=simple_loop, daemon=True)
@@ -792,10 +792,70 @@ class SchedulerService:
                     (task["account_id"], task["group_id"])
                 )
 
+                # ── 数据获取函数（策略沙盒中注入）──
+
+                # ① 本地 K 线查询（同步，不经过 TGW）
+                def _get_kline_local(stock_code: str, limit: int = 100, start_date: str = None):
+                    """从本地 kline.db 获取历史 K 线"""
+                    from services.data.local_data_service import get_local_data_service
+                    lds = get_local_data_service()
+                    return lds.get_kline_data(stock_code, start_date=start_date, limit=limit)
+
+                # ② 批量本地 K 线查询（同步）
+                def _get_batch_kline(stock_codes: list, limit: int = 100):
+                    """从本地 kline.db 批量获取 K 线"""
+                    from services.data.local_data_service import get_local_data_service
+                    lds = get_local_data_service()
+                    return lds.get_batch_kline(stock_codes, limit=limit)
+
+                # ③ 日频因子查询（同步）
+                def _get_factors(stock_code: str, date: str = None):
+                    """从 stock_daily_factors 获取指定日期因子"""
+                    from services.data.local_data_service import get_local_data_service
+                    lds = get_local_data_service()
+                    target_date = date or get_china_time().strftime("%Y-%m-%d")
+                    return lds.get_daily_factors(stock_code, target_date)
+
+                # ④ 批量日频因子查询（同步）
+                def _get_factors_batch(stock_codes: list, date: str = None):
+                    """批量获取多只股票指定日期因子"""
+                    from services.data.local_data_service import get_local_data_service
+                    lds = get_local_data_service()
+                    target_date = date or get_china_time().strftime("%Y-%m-%d")
+                    return lds.get_daily_factors_batch(stock_codes, target_date)
+
+                # ⑤ 拼接 K 线：本地历史 + 当日实时（同步，TGW 部分走 gateway 排队）
+                def _get_kline_spliced(stock_codes: list, lookback: int = 100):
+                    """本地历史 + 当日实时行情拼接（仅当日走 TGW）"""
+                    from services.data.local_data_service import get_local_data_service
+                    lds = get_local_data_service()
+                    return lds.get_kline_spliced(stock_codes, lookback=lookback)
+
+                # ⑤b 智能 K 线获取：根据交易时段自动选择数据源
+                def _get_kline_smart(stock_codes: list, lookback: int = 100):
+                    """
+                    盘中 → 本地历史 + TGW当日实时拼接
+                    盘后 → 纯本地数据（当日因子已计算完成）
+                    """
+                    from services.data.local_data_service import get_local_data_service
+                    lds = get_local_data_service()
+                    return lds.get_kline_with_realtime(
+                        stock_codes, lookback=lookback,
+                        fetch_realtime_fn=_get_realtime_quote,
+                    )
+
+                # ⑥ 实时行情（异步，走 gateway → sdk_connection_manager 排队）
+                async def _get_realtime_quote(stock_code: str):
+                    """获取当日实时行情（走 TGW）"""
+                    gateway = await get_gateway()
+                    return await gateway.get_market_data(stock_code)
+
+                # ⑦ 单股 K 线（异步，走 gateway → sdk_connection_manager 排队）
                 async def _get_kline(stock_code: str, period: str = "day", start_date: str = None):
                     gateway = await get_gateway()
                     return await gateway.get_kline_data(stock_code, period=period, start_date=start_date)
 
+                # ⑧ 单股行情（异步，走 gateway → sdk_connection_manager 排队）
                 async def _get_market_data(stock_code: str):
                     gateway = await get_gateway()
                     return await gateway.get_market_data(stock_code)
@@ -818,8 +878,15 @@ class SchedulerService:
                         "calculate_obv": technical_indicators.calculate_obv,
                         "calculate_historical_volatility": technical_indicators.calculate_historical_volatility,
                     },
-                    "get_kline": _get_kline,
-                    "get_market_data": _get_market_data,
+                    "get_kline": _get_kline,                          # 异步: 走 gateway TGW
+                    "get_market_data": _get_market_data,              # 异步: 走 gateway TGW
+                    "get_kline_local": _get_kline_local,              # 同步: 本地 kline.db
+                    "get_batch_kline": _get_batch_kline,              # 同步: 批量本地 K 线
+                    "get_factors": _get_factors,                      # 同步: stock_daily_factors
+                    "get_factors_batch": _get_factors_batch,          # 同步: 批量因子
+                    "get_kline_spliced": _get_kline_spliced,          # 同步: 本地历史+当日拼接
+                    "get_kline_smart": _get_kline_smart,              # 同步: 自动判断盘中/盘后
+                    "get_realtime_quote": _get_realtime_quote,        # 异步: 走 gateway TGW
                 }
 
                 engine = get_strategy_engine()
@@ -832,12 +899,6 @@ class SchedulerService:
                 )
             else:
                 raise ValueError(f"不支持的任务类型: {task_type}")
-            logger.info(f"策略 '{strategy['name']}' 返回 {len(signals)} 个信号")
-
-            # 写入 watchlist
-            result = await engine.write_signals_to_watchlist(
-                signals, task["account_id"], task["strategy_id"], task["group_id"]
-            )
 
             # 更新任务状态为 success
             await db.execute(
@@ -898,7 +959,7 @@ if __name__ == "__main__":
     scheduler = start_scheduler()
 
     print("手动触发一次检查...")
-    scheduler.run_manual_check()
+    scheduler.run_manual_kline_check()
 
     print("等待任务完成...")
     import time

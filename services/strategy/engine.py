@@ -9,6 +9,7 @@
     # signals = [{action, stock_code, buy_price, target_quantity, ...}]
 """
 
+import ast
 import asyncio
 import types
 from typing import Dict, List, Optional, Any
@@ -135,16 +136,92 @@ class StrategyEngine:
 
     def validate_code(self, code: str) -> Dict:
         """
-        验证策略代码语法
+        验证策略代码语法和调用逻辑
+
+        检查项：
+        1. Python 语法正确性
+        2. 存在入口函数 def run(context)
+        3. 禁止的调用模式（SDK 直调、危险函数）
+        4. 推荐的调用模式提示
 
         Returns:
-            {"valid": bool, "error": str}
+            {"valid": bool, "error": str, "warnings": list, "info": list}
         """
+        warnings = []
+        errors = []
+        info = []
+
+        # 1. 语法检查 + AST 构建
         try:
-            compile(code, "<strategy>", "exec")
-            return {"valid": True, "error": None}
+            tree = ast.parse(code, filename="<strategy>")
         except SyntaxError as e:
-            return {"valid": False, "error": str(e)}
+            return {"valid": False, "error": str(e), "warnings": [], "info": []}
+
+        # 2. 检查入口函数
+        if isinstance(tree, ast.Module):
+            has_run_func = False
+            for node in ast.walk(tree):
+                if isinstance(node, ast.AsyncFunctionDef):
+                    errors.append(f"入口函数不能是 async def: '{node.name}'，请使用 def")
+                    return {"valid": False, "error": errors[0], "warnings": warnings, "info": info}
+                if isinstance(node, ast.FunctionDef) and node.name == "run":
+                    has_run_func = True
+                    if len(node.args.args) < 1:
+                        errors.append("run() 需要至少一个参数 (context)")
+                    elif node.args.args[0].arg != "context":
+                        warnings.append(f"建议第一个参数命名为 'context'，当前为 '{node.args.args[0].arg}'")
+            if not has_run_func:
+                errors.append("未找到入口函数 def run(context)")
+
+        # 3. 禁止的调用模式 — AST 遍历
+        forbidden_patterns = {
+            "get_sdk_manager": "禁止直接调用 get_sdk_manager()，请使用 context 中注入的数据函数",
+            "get_sdk": "禁止直接获取 SDK，请使用 context 中注入的数据函数",
+            "query_kline": "禁止直接调用 SDK.query_kline()，请使用 get_kline_smart() 或 get_batch_kline()",
+            "get_market_data": "禁止直接调用 SDK.get_market_data()，请使用 context 中的数据函数",
+            "__import__": "禁止使用 __import__",
+            "import_module": "禁止使用 importlib.import_module",
+        }
+
+        for node in ast.walk(tree):
+            # 检查函数调用
+            if isinstance(node, ast.Call):
+                # 检查 func 名称
+                if isinstance(node.func, ast.Name):
+                    func_name = node.func.id
+                    if func_name in forbidden_patterns:
+                        errors.append(f"第 {node.lineno} 行: {forbidden_patterns[func_name]}")
+                # 检查属性调用 (如 xxx.query_kline)
+                elif isinstance(node.func, ast.Attribute):
+                    if node.func.attr in forbidden_patterns:
+                        errors.append(f"第 {node.lineno} 行: {forbidden_patterns[node.func.attr]}")
+
+            # 检查 import 语句
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                module = getattr(node, 'module', None)
+                if module and module in ('AmazingData', 'importlib', 'subprocess', 'os', 'sys'):
+                    warnings.append(f"第 {node.lineno} 行: 导入 '{module}' 可能不安全")
+
+            # 检查 open() 调用
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "open":
+                errors.append(f"第 {node.lineno} 行: 禁止使用 open() 文件操作")
+
+        if errors:
+            return {"valid": False, "error": "；".join(errors[:3]), "warnings": warnings, "info": info}
+
+        # 4. 推荐检查（不阻塞，只警告）
+        recommended = {"get_kline_smart": "智能K线获取", "get_batch_kline": "批量K线", "get_factors": "日频因子"}
+        has_recommended = False
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                if isinstance(node.func, ast.Name) and node.func.id in recommended:
+                    has_recommended = True
+                    break
+
+        if not has_recommended:
+            warnings.append("未检测到推荐的数据获取函数调用（get_kline_smart / get_batch_kline / get_factors），请确保不使用 SDK 直调")
+
+        return {"valid": True, "error": None, "warnings": warnings, "info": info}
 
     def _build_env(self, context: Dict) -> Dict:
         """构建安全的执行环境"""
@@ -162,9 +239,20 @@ class StrategyEngine:
         # 注入技术指标工具
         env["indicators"] = context.get("indicators", {})
 
-        # 注入数据获取函数
+        # 注入数据获取函数 — 本地数据（同步，不经过 TGW）
         env["get_kline"] = context.get("get_kline", lambda *a, **k: None)
+        env["get_batch_kline"] = context.get("get_batch_kline", lambda *a, **k: {})
+        env["get_factors"] = context.get("get_factors", lambda *a, **k: None)
+        env["get_factors_batch"] = context.get("get_factors_batch", lambda *a, **k: {})
+
+        # 注入智能数据获取函数（自动判断盘中/盘后）
+        env["get_kline_smart"] = context.get("get_kline_smart", lambda *a, **k: {})
+        env["get_kline_spliced"] = context.get("get_kline_spliced", lambda *a, **k: {})
+
+        # 注入数据获取函数 — 实时/TGW（走 gateway → sdk_connection_manager 排队）
+        # 注意：_get_kline 和 _get_market_data 是异步函数，策略代码中直接调用会返回协程对象
         env["get_market_data"] = context.get("get_market_data", lambda *a, **k: None)
+        env["get_realtime_quote"] = context.get("get_realtime_quote", lambda *a, **k: None)
 
         return env
 

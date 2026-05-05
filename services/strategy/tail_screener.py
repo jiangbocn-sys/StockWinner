@@ -3,6 +3,12 @@
 尾盘策略选股扫描 — 系统适配版
 
 调度服务设定运行时间和候选股票分组，返回符合条件的股票信号。
+
+数据路由：
+- 盘中（09:00-16:00）：本地历史K线 + TGW当日实时OHLCV拼接 → 重算指标
+- 盘后（≥16:00/非交易日）：纯本地kline.db数据（当日数据已下载完成）
+- 技术指标（RSI/MACD/BOLL/ADX）：从K线自行计算
+- Kronos预测：仅对初筛通过的 top 候选执行
 """
 import sys, os, json, statistics, datetime
 
@@ -155,7 +161,7 @@ def run(context):
             "stocks": [...],  # 候选组股票（含 stock_code, stock_name）
             "account_id": str,
             "today": str,     # YYYY-MM-DD
-            "get_kline": fn,  # 异步函数，获取K线数据
+            "get_kline_smart": fn,   # 智能K线获取：盘中=本地历史+TGW实时拼接， 盘后=纯本地
         }
 
     Returns:
@@ -170,8 +176,6 @@ def run(context):
             "target_quantity": 100,
         }]
     """
-    from services.common.sdk_manager import get_sdk_manager
-
     # 获取候选股票
     stocks = context.get("stocks", [])
     if not stocks:
@@ -183,31 +187,10 @@ def run(context):
 
     today_str = context.get("today", datetime.date.today().strftime('%Y-%m-%d'))
     today_int = int(today_str.replace('-', ''))
-    begin_date = today_int - 100
 
-    # 获取 SDK 和 K 线数据
-    sdk_mgr = get_sdk_manager()
-    md = sdk_mgr.get_market_data()
-
-    SH_LIST = [c for c in stock_codes if c.endswith('.SH')]
-    SZ_LIST = [c for c in stock_codes if c.endswith('.SZ')]
-
-    kline_data = {}
-    if SH_LIST:
-        try:
-            kline_sh = md.query_kline(code_list=SH_LIST, begin_date=begin_date, end_date=today_int, period=10000)
-            kline_data.update(kline_sh)
-        except Exception as e:
-            print(f"  SH K线获取失败: {e}")
-
-    for sz in SZ_LIST:
-        try:
-            kline_sz = md.query_kline(code_list=[sz], begin_date=begin_date, end_date=today_int, period=10000)
-            if isinstance(kline_sz, dict):
-                kline_data.update(kline_sz)
-        except Exception as e:
-            print(f"  {sz} K线获取失败: {e}")
-
+    # ── 获取 K 线数据（自动判断盘中/盘后）───
+    print(f'尾盘策略：获取 {len(stock_codes)} 只股票的K线数据...')
+    kline_data = get_kline_smart(stock_codes, lookback=100)
     print(f'尾盘策略：获取到 {len(kline_data)} 只股票的K线')
 
     # 加载 Kronos
@@ -224,21 +207,22 @@ def run(context):
 
     # ── 计算指标 ─────────────────────────────────────
     results = {}
-    for code, df_min in kline_data.items():
-        if df_min is None or len(df_min) < 30:
+    for code, rows in kline_data.items():
+        if not rows or len(rows) < 30:
             continue
         try:
-            df = df_min.copy()
-            df['date'] = pd.to_datetime(df['kline_time']).dt.date
+            # 本地数据格式: List[Dict] with trade_date
+            df = pd.DataFrame(rows)
+            df['date'] = pd.to_datetime(df['trade_date']).dt.date
             daily = df.groupby('date').agg(
-                open=('open','first'), high=('high','max'), low=('low','min'),
-                close=('close','last'), volume=('volume','sum'), amount=('amount','sum')
+                open=('open', 'first'), high=('high', 'max'), low=('low', 'min'),
+                close=('close', 'last'), volume=('volume', 'sum'), amount=('amount', 'sum')
             ).reset_index()
 
             if len(daily) < 30:
                 continue
 
-            daily['timestamps'] = pd.to_datetime(daily['date'])
+            daily['timestamps'] = pd.to_datetime(daily['date'].values)
 
             closes = daily['close'].tolist()
             highs  = daily['high'].tolist()

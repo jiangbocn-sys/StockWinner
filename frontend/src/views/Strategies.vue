@@ -180,7 +180,7 @@
                 <el-alert type="info" :closable="false" class="margin-bottom-15">
                   用 Python 代码编写选股策略，在候选组股票池上运行，输出交易信号到 watchlist
                 </el-alert>
-                <el-table :data="screeningCodeStrategies" stripe v-loading="loadingScreening">
+                <el-table :data="screeningCodeStrategies" stripe v-loading="loadingCodeStrategies">
                   <el-table-column prop="name" label="策略名称" width="180" />
                   <el-table-column prop="description" label="描述" min-width="200" show-overflow-tooltip />
                   <el-table-column prop="function_name" label="入口函数" width="100" />
@@ -189,9 +189,12 @@
                       <el-tag :type="getStatusType(row.status)" size="small">{{ getStatusText(row.status) }}</el-tag>
                     </template>
                   </el-table-column>
-                  <el-table-column label="操作" width="240">
+                  <el-table-column label="操作" width="520">
                     <template #default="{ row }">
+                      <el-button type="info" size="small" @click="viewCodeStrategy(row)">详情</el-button>
                       <el-button type="primary" size="small" @click="editCodeStrategy(row)">编辑</el-button>
+                      <el-button type="warning" size="small" @click="testRunStrategy(row)">试运行</el-button>
+                      <el-button type="warning" size="small" @click="showScheduleDialogForStrategy(row)">创建调度</el-button>
                       <el-button :type="row.status === 'active' ? 'warning' : 'success'" size="small" @click="toggleScreeningStrategy(row)">
                         {{ row.status === 'active' ? '停用' : '激活' }}
                       </el-button>
@@ -199,7 +202,7 @@
                     </template>
                   </el-table-column>
                 </el-table>
-                <el-empty v-if="!loadingScreening && screeningCodeStrategies.length === 0" description="暂无代码选股策略" />
+                <el-empty v-if="!loadingCodeStrategies && screeningCodeStrategies.length === 0" description="暂无代码选股策略" />
               </el-card>
             </el-tab-pane>
 
@@ -218,7 +221,7 @@
                 <el-alert type="info" :closable="false" class="margin-bottom-15">
                   用 Python 代码编写交易策略，接收选股信号后自动执行买入卖出
                 </el-alert>
-                <el-table :data="tradingCodeStrategies" stripe v-loading="loadingScreening">
+                <el-table :data="tradingCodeStrategies" stripe v-loading="loadingCodeStrategies">
                   <el-table-column prop="name" label="策略名称" width="180" />
                   <el-table-column prop="description" label="描述" min-width="200" show-overflow-tooltip />
                   <el-table-column prop="function_name" label="入口函数" width="100" />
@@ -227,9 +230,12 @@
                       <el-tag :type="getStatusType(row.status)" size="small">{{ getStatusText(row.status) }}</el-tag>
                     </template>
                   </el-table-column>
-                  <el-table-column label="操作" width="240">
+                  <el-table-column label="操作" width="520">
                     <template #default="{ row }">
+                      <el-button type="info" size="small" @click="viewCodeStrategy(row)">详情</el-button>
                       <el-button type="primary" size="small" @click="editCodeStrategy(row)">编辑</el-button>
+                      <el-button type="warning" size="small" @click="testRunStrategy(row)">试运行</el-button>
+                      <el-button type="warning" size="small" @click="showScheduleDialogForStrategy(row)">创建调度</el-button>
                       <el-button :type="row.status === 'active' ? 'warning' : 'success'" size="small" @click="toggleScreeningStrategy(row)">
                         {{ row.status === 'active' ? '停用' : '激活' }}
                       </el-button>
@@ -237,7 +243,7 @@
                     </template>
                   </el-table-column>
                 </el-table>
-                <el-empty v-if="!loadingScreening && tradingCodeStrategies.length === 0" description="暂无代码交易策略" />
+                <el-empty v-if="!loadingCodeStrategies && tradingCodeStrategies.length === 0" description="暂无代码交易策略" />
               </el-card>
             </el-tab-pane>
           </el-tabs>
@@ -514,11 +520,11 @@
           <el-form-item label="策略名称" required>
             <el-input v-model="codeStrategyForm.name" placeholder="如：尾盘选股策略" />
           </el-form-item>
-          <el-form-item label="策略类型" required>
-            <el-radio-group v-model="codeStrategyForm.code_scope">
-              <el-radio value="screening">选股型（输出信号到 watchlist）</el-radio>
-              <el-radio value="trading">交易型（自动执行买卖）</el-radio>
-            </el-radio-group>
+          <el-form-item label="策略类型">
+            <el-tag :type="codeStrategyForm.code_scope === 'trading' ? 'warning' : 'success'" size="large">
+              {{ codeStrategyForm.code_scope === 'trading' ? '交易型（自动执行买卖）' : '选股型（输出信号到 watchlist）' }}
+            </el-tag>
+            <div class="hint">类型由所在标签页决定，无需手动选择</div>
           </el-form-item>
           <el-form-item label="描述">
             <el-input v-model="codeStrategyForm.description" type="textarea" :rows="2" />
@@ -566,6 +572,137 @@
           <el-button type="primary" @click="saveCodeStrategy" :loading="savingCodeStrategy">保存</el-button>
         </template>
       </el-dialog>
+
+      <!-- 代码策略详情对话框 -->
+      <el-dialog v-model="showCodeDetailDialog" :title="selectedCodeStrategy?.name" width="800px">
+        <el-descriptions :column="2" border v-if="selectedCodeStrategy">
+          <el-descriptions-item label="策略名称">{{ selectedCodeStrategy.name }}</el-descriptions-item>
+          <el-descriptions-item label="状态">
+            <el-tag :type="getStatusType(selectedCodeStrategy.status)" size="small">
+              {{ getStatusText(selectedCodeStrategy.status) }}
+            </el-tag>
+          </el-descriptions-item>
+          <el-descriptions-item label="类型">
+            <el-tag :type="selectedCodeStrategy.code_scope === 'trading' ? 'warning' : 'success'">
+              {{ selectedCodeStrategy.code_scope === 'trading' ? '交易型' : '选股型' }}
+            </el-tag>
+          </el-descriptions-item>
+          <el-descriptions-item label="入口函数">{{ selectedCodeStrategy.function_name || 'run' }}</el-descriptions-item>
+          <el-descriptions-item label="描述" :span="2">{{ selectedCodeStrategy.description || '无' }}</el-descriptions-item>
+        </el-descriptions>
+        <el-divider>Python 代码</el-divider>
+        <pre v-if="selectedCodeStrategy?.code" class="code-block">{{ selectedCodeStrategy.code }}</pre>
+        <el-empty v-else description="暂无代码" :image-size="80" />
+        <template #footer>
+          <el-button @click="showCodeDetailDialog = false">关闭</el-button>
+          <el-button type="primary" @click="showCodeDetailDialog = false; editCodeStrategy(selectedCodeStrategy)">编辑</el-button>
+        </template>
+      </el-dialog>
+
+      <!-- 代码策略调度对话框 -->
+      <el-dialog v-model="showScheduleDialog" :title="`创建调度 - ${scheduleStrategyName}`" width="600px">
+        <el-form label-width="120px">
+          <el-form-item label="候选分组" required>
+            <el-select v-model="scheduleForm.groupId" placeholder="选择候选分组" style="width: 100%">
+              <el-option v-for="g in candidateGroups" :key="g.id" :label="g.name" :value="g.id" />
+            </el-select>
+            <div class="hint">策略将在该分组的股票池上运行</div>
+          </el-form-item>
+          <el-form-item label="Cron 表达式" required>
+            <el-input v-model="scheduleForm.cron" placeholder="如: 0 14 * * 1-5" />
+            <div class="hint">
+              快捷模板：<br/>
+              每个交易日14:00 → <code>0 14 * * 1-5</code><br/>
+              每天14:00 → <code>0 14 * * *</code><br/>
+              每小时 → <code>0 * * * *</code>
+            </div>
+          </el-form-item>
+          <el-form-item>
+            <el-button @click="applyQuickCron('0 14 * * 1-5')">交易日14:00</el-button>
+            <el-button @click="applyQuickCron('0 14 * * *')">每天14:00</el-button>
+            <el-button @click="applyQuickCron('0 * * * *')">每小时</el-button>
+          </el-form-item>
+        </el-form>
+        <template #footer>
+          <el-button @click="showScheduleDialog = false">取消</el-button>
+          <el-button type="primary" @click="createScheduleTask" :loading="creatingTask">创建</el-button>
+        </template>
+      </el-dialog>
+
+      <!-- 策略试运行对话框 -->
+      <el-dialog v-model="showTestRunDialog" :title="`试运行策略 - ${testRunStrategyName}`" width="700px" :close-on-click-modal="false">
+        <el-form label-width="120px">
+          <el-form-item label="候选分组" required>
+            <el-select v-model="testRunForm.groupId" placeholder="选择候选分组" style="width: 100%">
+              <el-option v-for="g in candidateGroups" :key="g.id" :label="g.name" :value="g.id" />
+            </el-select>
+            <div class="hint">策略将在该分组的股票池上运行</div>
+          </el-form-item>
+          <el-form-item label="股票代码（可选）">
+            <el-input v-model="testRunForm.stockCodes" placeholder="留空则使用分组全部股票，或手动指定如 600000.SH,000001.SZ" />
+            <div class="hint">指定股票代码可快速测试特定股票，多个用逗号分隔</div>
+          </el-form-item>
+        </el-form>
+        <template #footer>
+          <el-button @click="showTestRunDialog = false">取消</el-button>
+          <el-button type="primary" @click="doTestRun" :loading="testRunning">开始试运行</el-button>
+        </template>
+      </el-dialog>
+
+      <!-- 试运行结果对话框 -->
+      <el-dialog v-model="showTestRunResultDialog" :title="`试运行结果 - ${testRunStrategyName}`" width="750px">
+        <el-alert type="success" :closable="false" class="margin-bottom-15">
+          <template #title>仅模拟执行，未写入候选列表，未执行任何交易</template>
+        </el-alert>
+        <el-descriptions :column="3" border>
+          <el-descriptions-item label="耗时">{{ testRunResult.duration_ms }}ms</el-descriptions-item>
+          <el-descriptions-item label="信号数">{{ testRunResult.signal_count }}</el-descriptions-item>
+          <el-descriptions-item label="状态">
+            <el-tag :type="testRunResult.success ? 'success' : 'danger'">
+              {{ testRunResult.success ? '执行成功' : '执行失败' }}
+            </el-tag>
+          </el-descriptions-item>
+        </el-descriptions>
+
+        <!-- 错误信息 -->
+        <el-alert v-if="testRunResult.error" type="error" :closable="false" class="margin-top-10">
+          <template #title>{{ testRunResult.error }}</template>
+        </el-alert>
+
+        <!-- 验证警告 -->
+        <el-alert v-if="testRunResult.validation_warnings?.length" type="warning" :closable="false" class="margin-top-10">
+          <template #title>代码警告：</template>
+          <ul>
+            <li v-for="(w, i) in testRunResult.validation_warnings" :key="i">{{ w }}</li>
+          </ul>
+        </el-alert>
+
+        <!-- 控制台输出 -->
+        <el-divider>控制台输出</el-divider>
+        <pre class="console-output">{{ testRunResult.output || '(无输出)' }}</pre>
+
+        <!-- 生成的信号 -->
+        <el-divider>生成的信号</el-divider>
+        <el-table v-if="testRunResult.signals?.length" :data="testRunResult.signals" stripe size="small">
+          <el-table-column prop="action" label="动作" width="70">
+            <template #default="{ row }">
+              <el-tag :type="row.action === 'buy' ? 'success' : row.action === 'sell' ? 'danger' : 'info'" size="small">
+                {{ row.action === 'buy' ? '买入' : row.action === 'sell' ? '卖出' : '观察' }}
+              </el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column prop="stock_code" label="股票代码" width="110" />
+          <el-table-column prop="stock_name" label="股票名称" width="120" />
+          <el-table-column prop="buy_price" label="参考价格" width="90" />
+          <el-table-column prop="reason" label="原因" min-width="200" show-overflow-tooltip />
+        </el-table>
+        <el-empty v-else description="未生成任何信号" :image-size="60" />
+
+        <template #footer>
+          <el-button @click="showTestRunResultDialog = false">关闭</el-button>
+          <el-button type="primary" @click="showTestRunResultDialog = false; showTestRunDialog = true" :disabled="testRunning">重新运行</el-button>
+        </template>
+      </el-dialog>
     </el-main>
   </div>
 </template>
@@ -608,11 +745,9 @@ const newRule = reactive({
   priority: 0
 })
 
-// 选股策略
+// 选股策略（配置型）
 const screeningStrategies = ref([])
-const configScreeningStrategies = computed(() => screeningStrategies.value.filter(s => s.code_type !== 'python'))
-const screeningCodeStrategies = computed(() => screeningStrategies.value.filter(s => s.code_type === 'python' && s.code_scope !== 'trading'))
-const tradingCodeStrategies = computed(() => screeningStrategies.value.filter(s => s.code_type === 'python' && s.code_scope === 'trading'))
+const configScreeningStrategies = computed(() => screeningStrategies.value)
 const loadingScreening = ref(false)
 const showCreateScreeningDialog = ref(false)
 const showScreeningDetailDialog = ref(false)
@@ -623,8 +758,41 @@ const validatingCode = ref(false)
 const savingCodeStrategy = ref(false)
 const codeValidationResult = ref(null)
 const codeFileInput = ref(null)
-const importedFileName = ref('')
+const importedFileName = ref(null)
 const codeStrategyForm = reactive({ name: '', description: '', code: '', function_name: 'run', code_scope: 'screening' })
+
+// 代码型策略（独立数据源）
+const codeStrategies = ref([])
+const screeningCodeStrategies = computed(() => codeStrategies.value.filter(s => s.code_scope !== 'trading'))
+const tradingCodeStrategies = computed(() => codeStrategies.value.filter(s => s.code_scope === 'trading'))
+const loadingCodeStrategies = ref(false)
+const showCodeDetailDialog = ref(false)
+const selectedCodeStrategy = ref(null)
+
+// 调度设置
+const showScheduleDialog = ref(false)
+const scheduleStrategyName = ref('')
+const scheduleStrategyId = ref(null)
+const creatingTask = ref(false)
+const candidateGroups = ref([])
+const scheduleForm = reactive({ groupId: null, cron: '' })
+
+// 策略试运行
+const showTestRunDialog = ref(false)
+const showTestRunResultDialog = ref(false)
+const testRunStrategyName = ref('')
+const testRunStrategyId = ref(null)
+const testRunning = ref(false)
+const testRunForm = reactive({ groupId: null, stockCodes: '' })
+const testRunResult = reactive({
+  success: false,
+  signals: [],
+  signal_count: 0,
+  output: '',
+  error: null,
+  duration_ms: 0,
+  validation_warnings: [],
+})
 
 // LLM生成
 const showLLMDialog = ref(false)
@@ -671,7 +839,9 @@ const loadAllData = async () => {
   await loadPositionStrategy()
   await loadPositionRules()
   await loadScreeningStrategies()
+  await loadCodeStrategies()
   await loadTradingStrategies()
+  await loadCandidateGroups()
 }
 
 // 加载持仓策略
@@ -855,9 +1025,14 @@ const editCodeStrategy = (row) => {
   codeStrategyForm.code_scope = row.code_scope || 'screening'
   showCreateCodeDialog.value = true
   codeValidationResult.value = null
-  importedFileName.value = ''
+  importedFileName.value = null
   // Switch to the correct sub-tab
   activeCodeTab.value = row.code_scope === 'trading' ? 'trading_code' : 'screening_code'
+}
+
+const viewCodeStrategy = (row) => {
+  selectedCodeStrategy.value = row
+  showCodeDetailDialog.value = true
 }
 
 const validateCode = async () => {
@@ -892,13 +1067,13 @@ const saveCodeStrategy = async () => {
   savingCodeStrategy.value = true
   try {
     const url = editingCodeId.value
-      ? `/api/v1/ui/${currentAccountId.value}/strategies/${editingCodeId.value}`
+      ? `/api/v1/ui/${currentAccountId.value}/code-strategies/${editingCodeId.value}`
       : `/api/v1/ui/${currentAccountId.value}/strategies`
     const method = editingCodeId.value ? 'PUT' : 'POST'
     const body = {
       name: codeStrategyForm.name,
       description: codeStrategyForm.description,
-      strategy_type: 'screening',
+      strategy_type: 'python',
       code_type: 'python',
       code_scope: codeStrategyForm.code_scope,
       code: codeStrategyForm.code,
@@ -918,9 +1093,9 @@ const saveCodeStrategy = async () => {
       codeStrategyForm.function_name = 'run'
       codeStrategyForm.code_scope = 'screening'
       codeValidationResult.value = null
-      importedFileName.value = ''
+      importedFileName.value = null
       if (codeFileInput.value) codeFileInput.value.value = ''
-      await loadScreeningStrategies()
+      await loadCodeStrategies()
     } else {
       ElMessage.error(data.detail || '保存失败')
     }
@@ -961,7 +1136,7 @@ const handleCodeFileImport = async (event) => {
   event.target.value = ''
 }
 
-// 加载选股策略
+// 加载选股策略（配置型）
 const loadScreeningStrategies = async () => {
   loadingScreening.value = true
   try {
@@ -974,6 +1149,92 @@ const loadScreeningStrategies = async () => {
     console.error('加载选股策略失败:', error)
   } finally {
     loadingScreening.value = false
+  }
+}
+
+// 加载代码型策略（独立数据源）
+const loadCodeStrategies = async () => {
+  loadingCodeStrategies.value = true
+  try {
+    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/code-strategies`)
+    const data = await res.json()
+    if (data.strategies) {
+      codeStrategies.value = data.strategies
+    }
+  } catch (error) {
+    console.error('加载代码策略失败:', error)
+  } finally {
+    loadingCodeStrategies.value = false
+  }
+}
+
+// 加载候选分组
+const loadCandidateGroups = async () => {
+  try {
+    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/candidate-groups`)
+    const data = await res.json()
+    if (data.groups) {
+      candidateGroups.value = data.groups
+    }
+  } catch (error) {
+    console.error('加载候选分组失败:', error)
+  }
+}
+
+// 打开试运行对话框
+const testRunStrategy = (row) => {
+  testRunStrategyName.value = row.name
+  testRunStrategyId.value = row.id
+  testRunForm.groupId = null
+  testRunForm.stockCodes = ''
+  showTestRunDialog.value = true
+  // 确保分组已加载
+  if (candidateGroups.value.length === 0) {
+    loadCandidateGroups()
+  }
+}
+
+// 执行试运行
+const doTestRun = async () => {
+  if (!testRunForm.groupId) {
+    ElMessage.warning('请选择候选分组')
+    return
+  }
+  testRunning.value = true
+  try {
+    const strategy = codeStrategies.value.find(s => s.id === testRunStrategyId.value)
+    if (!strategy) {
+      ElMessage.error('策略不存在')
+      return
+    }
+
+    // 重置结果
+    Object.assign(testRunResult, { success: false, signals: [], signal_count: 0, output: '', error: null, duration_ms: 0, validation_warnings: [] })
+
+    const body = {
+      code: strategy.code,
+      function_name: strategy.function_name || 'run',
+    }
+    if (testRunForm.stockCodes.trim()) {
+      body.test_stocks = testRunForm.stockCodes.split(/[,，\s]+/).map(s => s.trim()).filter(s => s)
+    }
+
+    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/strategies/test-run`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+    const data = await res.json()
+    Object.assign(testRunResult, data)
+    showTestRunDialog.value = false
+    showTestRunResultDialog.value = true
+  } catch (error) {
+    testRunResult.success = false
+    testRunResult.error = error.message
+    showTestRunDialog.value = false
+    showTestRunResultDialog.value = true
+  } finally {
+    testRunning.value = false
   }
 }
 
@@ -1018,6 +1279,56 @@ const deleteScreeningStrategy = async (row) => {
     if (error !== 'cancel') {
       ElMessage.error('删除失败')
     }
+  }
+}
+
+// 代码策略调度
+const showScheduleDialogForStrategy = async (row) => {
+  scheduleStrategyId.value = row.id
+  scheduleStrategyName.value = row.name
+  scheduleForm.groupId = null
+  scheduleForm.cron = ''
+  showScheduleDialog.value = true
+  await loadCandidateGroups()
+}
+
+const applyQuickCron = (cron) => {
+  scheduleForm.cron = cron
+}
+
+const createScheduleTask = async () => {
+  if (!scheduleForm.groupId) {
+    ElMessage.warning('请选择候选分组')
+    return
+  }
+  if (!scheduleForm.cron) {
+    ElMessage.warning('请填写 Cron 表达式')
+    return
+  }
+  creatingTask.value = true
+  try {
+    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/strategy-tasks`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        task_type: 'strategy',
+        strategy_id: scheduleStrategyId.value,
+        group_id: scheduleForm.groupId,
+        cron_expression: scheduleForm.cron,
+        enabled: 1,
+      })
+    })
+    const data = await res.json()
+    if (data.success) {
+      ElMessage.success('调度任务已创建')
+      showScheduleDialog.value = false
+    } else {
+      ElMessage.error(data.detail || '创建失败')
+    }
+  } catch (e) {
+    ElMessage.error('创建失败')
+  } finally {
+    creatingTask.value = false
   }
 }
 
@@ -1278,5 +1589,36 @@ onMounted(() => {
 
 .margin-bottom-15 {
   margin-bottom: 15px;
+}
+
+.code-block {
+  background: #1e1e1e;
+  color: #d4d4d4;
+  padding: 16px;
+  border-radius: 6px;
+  font-family: 'Consolas', 'Monaco', monospace;
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 500px;
+}
+
+.margin-top-10 {
+  margin-top: 10px;
+}
+
+.console-output {
+  background: #1e1e1e;
+  color: #d4d4d4;
+  padding: 12px;
+  border-radius: 6px;
+  font-family: 'Consolas', 'Monaco', monospace;
+  font-size: 12px;
+  line-height: 1.4;
+  max-height: 300px;
+  overflow-y: auto;
+  white-space: pre-wrap;
 }
 </style>

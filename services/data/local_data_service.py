@@ -11,7 +11,6 @@ import pandas as pd
 from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Optional, Tuple
 from pathlib import Path
-import asyncio
 
 # 导入统一时区模块
 from services.common.timezone import CHINA_TZ, get_china_time
@@ -710,10 +709,290 @@ class LocalKlineDataService:
             "earliest_date": earliest_date,
             "database_path": str(self.db_path)
         }
+    def get_batch_kline(
+        self,
+        stock_codes: List[str],
+        limit: int = 100,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+    ) -> Dict[str, List[Dict]]:
+        """
+        批量从本地 kline.db 获取 K 线历史数据（不经过 TGW）
+
+        Args:
+            stock_codes: 股票代码列表
+            limit: 每只股票最多返回条数（默认 100）
+            start_date: 开始日期 YYYY-MM-DD（传入后 limit 不生效）
+            end_date: 结束日期 YYYY-MM-DD（需配合 start_date 使用）
+
+        Returns:
+            Dict[stock_code, [{trade_date, open, high, low, close, volume, amount}]]
+        """
+        if not stock_codes:
+            return {}
+
+        conn = sqlite3.connect(str(self.db_path))
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+
+        placeholders = ','.join(['?' for _ in stock_codes])
+
+        if start_date:
+            query = f'''
+                SELECT stock_code, trade_date, open, high, low, close, volume, amount
+                FROM kline_data
+                WHERE stock_code IN ({placeholders}) AND trade_date >= ?
+            '''
+            params = stock_codes + [start_date]
+            if end_date:
+                query += ' AND trade_date <= ?'
+                params.append(end_date)
+            query += ' ORDER BY stock_code, trade_date ASC'
+        else:
+            # 使用 LIMIT 方式：对每只股票取最近 N 条
+            # SQLite 不支持每组的 LIMIT，用子查询
+            query = f'''
+                SELECT k.stock_code, k.trade_date, k.open, k.high, k.low, k.close, k.volume, k.amount
+                FROM kline_data k
+                WHERE k.stock_code IN ({placeholders})
+                  AND (
+                      SELECT COUNT(*) FROM kline_data k2
+                      WHERE k2.stock_code = k.stock_code AND k2.trade_date >= k.trade_date
+                  ) <= ?
+                ORDER BY k.stock_code, k.trade_date ASC
+            '''
+            params = stock_codes + [limit]
+
+        cursor.execute(query, params)
+        rows = cursor.fetchall()
+        conn.close()
+
+        # 按 stock_code 分组
+        result: Dict[str, List[Dict]] = {}
+        for row in rows:
+            code = row['stock_code']
+            if code not in result:
+                result[code] = []
+            result[code].append(dict(row))
+
+        return result
+
+    def get_daily_factors(
+        self,
+        stock_code: str,
+        date: str,
+    ) -> Optional[Dict]:
+        """
+        从 stock_daily_factors 表获取指定日期的因子数据
+
+        Args:
+            stock_code: 股票代码
+            date: 日期 YYYY-MM-DD
+
+        Returns:
+            因子数据 Dict，不存在返回 None
+        """
+        conn = sqlite3.connect(str(self.db_path))
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+
+        cursor.execute(
+            'SELECT * FROM stock_daily_factors WHERE stock_code = ? AND trade_date = ?',
+            (stock_code, date)
+        )
+        row = cursor.fetchone()
+        conn.close()
+
+        return dict(row) if row else None
+
+    def get_daily_factors_batch(
+        self,
+        stock_codes: List[str],
+        date: str,
+    ) -> Dict[str, Dict]:
+        """
+        批量获取多只股票在指定日期的因子数据
+
+        Args:
+            stock_codes: 股票代码列表
+            date: 日期 YYYY-MM-DD
+
+        Returns:
+            Dict[stock_code, {factor_data}]
+        """
+        if not stock_codes:
+            return {}
+
+        conn = sqlite3.connect(str(self.db_path))
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+
+        placeholders = ','.join(['?' for _ in stock_codes])
+        query = f'SELECT * FROM stock_daily_factors WHERE stock_code IN ({placeholders}) AND trade_date = ?'
+        cursor.execute(query, stock_codes + [date])
+
+        result: Dict[str, Dict] = {}
+        for row in cursor.fetchall():
+            result[row['stock_code']] = dict(row)
+
+        conn.close()
+        return result
+
+    def get_kline_spliced(
+        self,
+        stock_codes: List[str],
+        lookback: int = 100,
+        realtime_quotes: Optional[Dict[str, Dict]] = None,
+    ) -> Dict[str, pd.DataFrame]:
+        """
+        获取完整 K 线序列：本地历史 (lookback-1) 天 + 当日实时 OHLCV
+
+        用于 Kronos 等需要包含当日数据的模型预测场景。
+
+        Args:
+            stock_codes: 股票代码列表
+            lookback: 总需要的 K 线数量（默认 100）
+            realtime_quotes: 当日实时行情 {stock_code: {open, high, low, close, volume, amount}}
+                           如果不传，自动从 kline.db 取最新日期的数据作为当日近似
+
+        Returns:
+            Dict[stock_code, pd.DataFrame] — 每只股票 lookback 条 K 线
+        """
+        if not stock_codes:
+            return {}
+
+        # 1. 从本地获取 lookback-1 条历史数据
+        history = self.get_batch_kline(stock_codes, limit=lookback - 1)
+
+        # 2. 如果没有传入实时行情，用本地最新数据近似当日
+        if realtime_quotes is None:
+            realtime_quotes = {}
+            # 获取每只股票最新一条数据作为当日近似
+            conn = sqlite3.connect(str(self.db_path))
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            placeholders = ','.join(['?' for _ in stock_codes])
+            cursor.execute(f'''
+                SELECT k.stock_code, k.trade_date, k.open, k.high, k.low, k.close, k.volume, k.amount
+                FROM kline_data k
+                WHERE k.stock_code IN ({placeholders})
+                  AND (
+                      SELECT COUNT(*) FROM kline_data k2
+                      WHERE k2.stock_code = k.stock_code AND k2.trade_date >= k.trade_date
+                  ) <= 1
+                ORDER BY k.stock_code
+            ''', stock_codes)
+            for row in cursor.fetchall():
+                code = row['stock_code']
+                realtime_quotes[code] = {
+                    'open': row['open'], 'high': row['high'],
+                    'low': row['low'], 'close': row['close'],
+                    'volume': row['volume'], 'amount': row['amount'],
+                }
+            conn.close()
+
+        # 3. 拼接历史 + 当日
+        result: Dict[str, pd.DataFrame] = {}
+        today = get_china_time().strftime('%Y-%m-%d')
+
+        for code in stock_codes:
+            rows = history.get(code, [])
+
+            # 追加当日实时数据（去重：如果历史已包含今日数据则跳过）
+            if realtime_quotes and code in realtime_quotes:
+                latest_date = rows[-1].get('trade_date') if rows else None
+                if latest_date != today:
+                    q = realtime_quotes[code]
+                rows.append({
+                    'stock_code': code,
+                    'trade_date': today,
+                    'open': q.get('open', 0),
+                    'high': q.get('high', 0),
+                    'low': q.get('low', 0),
+                    'close': q.get('close', 0),
+                    'volume': q.get('volume', 0),
+                    'amount': q.get('amount', 0),
+                })
+
+            # 确保总条数不超过 lookback
+            if len(rows) > lookback:
+                rows = rows[-lookback:]
+
+            if len(rows) > 0:
+                df = pd.DataFrame(rows)
+                result[code] = df
+
+        return result
+
+    def get_kline_with_realtime(
+        self,
+        stock_codes: List[str],
+        lookback: int = 100,
+        fetch_realtime_fn = None,
+    ) -> Dict[str, pd.DataFrame]:
+        """
+        智能获取 K 线数据：根据交易时段自动选择数据源
+
+        数据路由规则：
+        - 盘中（09:00-16:00 交易日）：本地 lookback-1 天 + TGW 当日实时拼接
+        - 盘后（收盘后/非交易日）：本地 lookback 天（已包含当日数据）
+
+        Args:
+            stock_codes: 股票代码列表
+            lookback: 总需要的 K 线数量（默认 100）
+            fetch_realtime_fn: 可选，异步函数用于获取当日实时行情
+                             签名: async fn(stock_code) -> {open, high, low, close, volume, amount}
+                             如果不传，盘中时段不会获取实时数据
+
+        Returns:
+            Dict[stock_code, pd.DataFrame] — 每只股票 lookback 条 K 线
+        """
+        trading = is_trading_hours()
+
+        if not trading:
+            # 盘后：本地数据已包含当日完整数据，直接返回
+            return self.get_batch_kline(stock_codes, limit=lookback)
+
+        # 盘中：需要拼接当日实时数据
+        realtime_quotes = {}
+        if fetch_realtime_fn is not None:
+            import asyncio
+            loop = asyncio.new_event_loop()
+            try:
+                for code in stock_codes:
+                    try:
+                        quote = loop.run_until_complete(fetch_realtime_fn(code))
+                        if quote:
+                            realtime_quotes[code] = quote
+                    except Exception:
+                        pass
+            finally:
+                loop.close()
+
+        return self.get_kline_spliced(stock_codes, lookback=lookback, realtime_quotes=realtime_quotes)
 
 
 # 全局单例
 _local_data_service: Optional[LocalKlineDataService] = None
+
+
+def is_trading_hours() -> bool:
+    """
+    判断当前是否处于交易时段（用于决定数据源策略）
+
+    规则：
+    - 交易日 09:00 - 16:00 → True（需要实时数据拼接）
+    - 其他时间 → False（可用本地因子表）
+
+    注意：此处简化处理，不考虑节假日精确判断。
+    如需精确交易日判断，调用方应使用 SDK 日历。
+    """
+    now = get_china_time()
+    weekday = now.weekday()  # 0=周一, 6=周日
+    if weekday >= 5:
+        return False
+    hour = now.hour
+    return 9 <= hour < 16
 
 
 def get_local_data_service() -> LocalKlineDataService:

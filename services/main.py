@@ -134,6 +134,11 @@ async def lifespan(app: FastAPI):
         print("数据库迁移: strategies.function_name 已添加")
     except Exception:
         pass
+    try:
+        await db_manager.execute("ALTER TABLE strategies ADD COLUMN code_scope TEXT DEFAULT 'screening'")
+        print("数据库迁移: strategies.code_scope 已添加")
+    except Exception:
+        pass
 
     # 创建 strategy_tasks 表
     try:
