@@ -16,6 +16,7 @@ from typing import Dict, List, Optional, Any
 
 from services.common.database import get_db_manager
 from services.common.stock_code import normalize_stock_code
+from services.common.kronos_service import get_kronos_service
 
 
 # 白名单：允许在策略代码中使用的模块和函数
@@ -229,16 +230,37 @@ class StrategyEngine:
             return {"valid": False, "error": "；".join(errors[:3]), "warnings": warnings, "info": info}
 
         # 4. 推荐检查（不阻塞，只警告）
-        recommended = {"get_kline_smart": "智能K线获取", "get_batch_kline": "批量K线", "get_factors": "日频因子"}
+        recommended = {
+            "get_kline_smart": "智能K线获取",
+            "get_batch_kline": "批量K线",
+            "get_factors": "日频因子",
+            "kronos_predict": "Kronos预测（无需 import 模型模块）",
+        }
         has_recommended = False
+        found_recommended = []
         for node in ast.walk(tree):
             if isinstance(node, ast.Call):
                 if isinstance(node.func, ast.Name) and node.func.id in recommended:
                     has_recommended = True
-                    break
+                    found_recommended.append(recommended[node.func.id])
 
         if not has_recommended:
             warnings.append("未检测到推荐的数据获取函数调用（get_kline_smart / get_batch_kline / get_factors），请确保不使用 SDK 直调")
+        elif found_recommended:
+            info.append(f"检测到推荐函数: {', '.join(found_recommended)}")
+
+        # 5. Kronos 专用提示：如果检测到旧的模型导入模式
+        old_kronos_patterns = {"safetensors", "torch", "Kronos", "KronosTokenizer", "KronosPredictor"}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module:
+                base = node.module.split(".")[0]
+                if base in old_kronos_patterns:
+                    errors.append(f"第 {node.lineno} 行: 禁止直接导入模型模块 '{node.module}'，请使用沙盒注入的 kronos_predict()")
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    base = alias.name.split(".")[0]
+                    if base in old_kronos_patterns:
+                        errors.append(f"第 {node.lineno} 行: 禁止直接导入模型模块 '{alias.name}'，请使用沙盒注入的 kronos_predict()")
 
         return {"valid": True, "error": None, "warnings": warnings, "info": info}
 
@@ -272,6 +294,14 @@ class StrategyEngine:
         # 注意：_get_kline 和 _get_market_data 是异步函数，策略代码中直接调用会返回协程对象
         env["get_market_data"] = context.get("get_market_data", lambda *a, **k: None)
         env["get_realtime_quote"] = context.get("get_realtime_quote", lambda *a, **k: None)
+
+        # 注入 Kronos 预测函数（同步，封装了模型加载/路径/环境变量等细节）
+        kronos_service = get_kronos_service()
+        def _kronos_predict(df_hist, pred_len=5, future_dates=None, **kwargs):
+            """Kronos 时间序列预测（封装版，策略无需 import 任何模型相关模块）"""
+            return kronos_service.predict(df_hist, pred_len=pred_len, future_dates=future_dates, **kwargs)
+        env["kronos_predict"] = _kronos_predict
+        env["kronos_available"] = kronos_service.is_available
 
         return env
 

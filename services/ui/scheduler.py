@@ -250,6 +250,19 @@ async def list_strategy_tasks(account_id: str = Path(..., description="账户 ID
     return {"success": True, "tasks": tasks}
 
 
+@router.get("/api/v1/ui/kronos/status")
+async def get_kronos_status() -> Dict:
+    """获取 Kronos 模型加载状态"""
+    from services.common.kronos_service import get_kronos_service
+    svc = get_kronos_service()
+    return {
+        "success": True,
+        "available": svc.is_available,
+        "error": svc.error,
+        "device": getattr(svc, "_device", "unknown") if svc.is_available else None,
+    }
+
+
 @router.post("/api/v1/ui/{account_id}/strategy-tasks")
 async def create_strategy_task(
     account_id: str = Path(..., description="账户 ID"),

@@ -185,6 +185,13 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"数据库迁移: 任务插件扫描失败: {e}")
 
+    # 预加载 Kronos 模型（非阻塞，失败不影响启动）
+    try:
+        from services.common.kronos_service import load_kronos_on_startup
+        load_kronos_on_startup()
+    except Exception as e:
+        print(f"Kronos 预加载跳过: {e}")
+
     yield
 
     # 关闭时清理

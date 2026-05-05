@@ -8,21 +8,9 @@
 - 盘中（09:00-16:00）：本地历史K线 + TGW当日实时OHLCV拼接 → 重算指标
 - 盘后（≥16:00/非交易日）：纯本地kline.db数据（当日数据已下载完成）
 - 技术指标（RSI/MACD/BOLL/ADX）：从K线自行计算
-- Kronos预测：仅对初筛通过的 top 候选执行
+- Kronos预测：通过沙盒注入的 kronos_predict() 调用，无需 import 任何模型模块
 """
-import sys, os, json, statistics, datetime
-
-# ── Kronos 路径 ──────────────────────────────────────────
-KRONOS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "deps", "Kronos")
-if KRONOS_DIR not in sys.path:
-    sys.path.insert(0, KRONOS_DIR)
-
-os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
-
-import pandas as pd
-import numpy as np
-import safetensors, torch
-from model import Kronos, KronosTokenizer, KronosPredictor
+import json, statistics, datetime
 
 # ── 指标函数 ─────────────────────────────────────────
 def calc_rsi_wilder(closes, period=14):
@@ -103,54 +91,6 @@ def get_tail_score(res):
     return score, reasons
 
 
-# ── Kronos 加载 ───────────────────────────────────────────
-WEIGHTS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "deps", "Kronos", "weights")
-
-def find_safetensors_cached(repo_name):
-    """在本地权重目录查找模型文件"""
-    weight_path = os.path.join(WEIGHTS_DIR, repo_name)
-    if os.path.exists(weight_path):
-        for f in os.listdir(weight_path):
-            if f.endswith('.safetensors'):
-                return os.path.join(weight_path, f)
-    return None
-
-def load_kronos(use_base=False):
-    """加载 Kronos 模型"""
-    TOKENIZER_CONFIG = {
-        'd_in': 6, 'd_model': 256, 'n_heads': 4, 'ff_dim': 512,
-        'n_enc_layers': 4, 'n_dec_layers': 4, 'ffn_dropout_p': 0.0,
-        'attn_dropout_p': 0.0, 'resid_dropout_p': 0.0,
-        's1_bits': 10, 's2_bits': 10, 'beta': 0.05,
-        'gamma0': 1.0, 'gamma': 1.1, 'zeta': 0.05, 'group_size': 4
-    }
-    MODEL_CONFIG = {
-        's1_bits': 10, 's2_bits': 10, 'n_layers': 6,
-        'd_model': 512, 'n_heads': 8, 'ff_dim': 1024,
-        'ffn_dropout_p': 0.0, 'attn_dropout_p': 0.0,
-        'resid_dropout_p': 0.0, 'token_dropout_p': 0.0, 'learn_te': False
-    }
-
-    tok_path = find_safetensors_cached('Kronos-Tokenizer-base')
-    model_name = 'Kronos-base' if use_base else 'Kronos-small'
-    model_path = find_safetensors_cached(model_name)
-    print(f'  Tokenizer: {tok_path}')
-    print(f'  Model: {model_path}')
-
-    tokenizer = KronosTokenizer(**TOKENIZER_CONFIG)
-    model = Kronos(**MODEL_CONFIG)
-    if tok_path:
-        tokenizer.load_state_dict(safetensors.torch.load_file(tok_path), strict=False)
-    if model_path:
-        model.load_state_dict(safetensors.torch.load_file(model_path), strict=False)
-
-    device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
-    model, tokenizer = model.to(device), tokenizer.to(device)
-    predictor = KronosPredictor(model, tokenizer, max_context=512)
-    print(f'  Kronos loaded on {device}')
-    return predictor
-
-
 # ── 主策略函数 ──────────────────────────────────────────
 def run(context):
     """
@@ -193,16 +133,17 @@ def run(context):
     kline_data = get_kline_smart(stock_codes, lookback=100)
     print(f'尾盘策略：获取到 {len(kline_data)} 只股票的K线')
 
-    # 加载 Kronos
-    try:
-        predictor = load_kronos()
-        future_dates = pd.bdate_range(
-            start=pd.Timestamp(str(today_int)) + pd.Timedelta(days=1),
-            periods=5
-        )
-    except Exception as e:
-        print(f"  Kronos 加载失败: {e}")
-        predictor = None
+    # Kronos 准备
+    if kronos_available:
+        try:
+            future_dates = pd.bdate_range(
+                start=pd.Timestamp(str(today_int)) + pd.Timedelta(days=1),
+                periods=5
+            )
+        except Exception:
+            future_dates = None
+    else:
+        print("  Kronos 模型未加载，将跳过预测部分")
         future_dates = None
 
     # ── 计算指标 ─────────────────────────────────────
@@ -294,7 +235,7 @@ def run(context):
     print(f'尾盘策略：初筛通过 {len(prelim)} 只，对 top 候选进行 Kronos 预测')
 
     # ── Kronos 预测（仅对初筛通过的 top 候选）──────────
-    if predictor is not None and future_dates is not None and prelim:
+    if future_dates is not None and prelim:
         for item in prelim[:10]:  # 最多对前10只做Kronos
             try:
                 daily = item['daily']
@@ -303,24 +244,20 @@ def run(context):
                     item['kronos_pred'] = None
                     continue
 
-                df_hist = daily.loc[:lookback-1, ['open','high','low','close','volume','amount']]
-                x_ts = pd.Series(daily.loc[:lookback-1, 'timestamps'].values, dtype='datetime64[ns]')
-                y_ts = pd.Series(pd.to_datetime(future_dates), dtype='datetime64[ns]')
-
-                pred_df = predictor.predict(
-                    df=df_hist.reset_index(drop=True),
-                    x_timestamp=x_ts.reset_index(drop=True),
-                    y_timestamp=y_ts.reset_index(drop=True),
-                    pred_len=5, T=1.0, top_p=0.9, sample_count=10
+                pred_df = kronos_predict(
+                    df_hist=daily,
+                    pred_len=5,
+                    future_dates=future_dates,
                 )
 
                 if pred_df is not None and len(pred_df) > 0:
-                    last_close = float(daily['close'].iloc[lookback-1])
+                    last_close = float(daily['close'].iloc[lookback - 1])
                     avg_pred = pred_df['close'].mean()
                     item['kronos_pred'] = (avg_pred - last_close) / last_close * 100
                 else:
                     item['kronos_pred'] = None
             except Exception as e:
+                print(f"  {item['code']} Kronos预测失败: {e}")
                 item['kronos_pred'] = None
 
     kronos_count = sum(1 for p in prelim if p.get('kronos_pred') is not None)

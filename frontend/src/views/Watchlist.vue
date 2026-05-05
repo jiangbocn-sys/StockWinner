@@ -449,6 +449,9 @@
                 <el-tag v-if="row.last_status" :type="{success:'success',error:'danger',running:'warning'}[row.last_status] || 'info'" size="small">
                   {{ {success:'成功',error:'失败',running:'运行中'}[row.last_status] || row.last_status }}
                 </el-tag>
+                <el-tooltip v-if="row.last_status === 'error' && row.last_output" :content="parseTaskError(row)" placement="top" :show-after="0">
+                  <el-icon style="color: #F56C6C; cursor: pointer; margin-left: 4px"><WarningFilled /></el-icon>
+                </el-tooltip>
               </template>
             </el-table-column>
             <el-table-column label="操作" width="200">
@@ -551,7 +554,7 @@
 <script setup>
 import { ref, reactive, onMounted, computed, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Search, Refresh, Plus, MoreFilled, Upload, Loading } from '@element-plus/icons-vue'
+import { Search, Refresh, Plus, MoreFilled, Upload, Loading, WarningFilled } from '@element-plus/icons-vue'
 import { useAccountStore } from '../stores/account'
 import NavBar from '../components/NavBar.vue'
 
@@ -903,6 +906,18 @@ const createTask = async () => {
     ElMessage.error('创建失败')
   } finally {
     creatingTask.value = false
+  }
+}
+
+// 解析任务执行错误信息
+const parseTaskError = (task) => {
+  try {
+    const output = JSON.parse(task.last_output)
+    if (output.error) return output.error
+    if (output.warnings && output.warnings.length > 0) return output.warnings.join('; ')
+    return '执行失败，无详细错误信息'
+  } catch {
+    return '错误信息解析失败'
   }
 }
 

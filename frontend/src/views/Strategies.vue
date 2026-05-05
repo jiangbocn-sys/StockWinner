@@ -565,6 +565,9 @@
             <el-tag v-if="codeValidationResult" :type="codeValidationResult.valid ? 'success' : 'danger'" style="margin-left: 8px">
               {{ codeValidationResult.valid ? '语法正确' : codeValidationResult.error }}
             </el-tag>
+            <el-tag v-if="kronosStatus !== null" :type="kronosStatus.available ? 'success' : 'warning'" style="margin-left: 8px">
+              {{ kronosStatus.available ? `Kronos可用(${kronosStatus.device})` : 'Kronos不可用' }}
+            </el-tag>
           </el-form-item>
         </el-form>
         <template #footer>
@@ -669,6 +672,12 @@
           <template #title>{{ testRunResult.error }}</template>
         </el-alert>
 
+        <!-- Kronos 不可用警告 -->
+        <el-alert v-if="testRunResult.kronos_unavailable" type="warning" :closable="false" class="margin-top-10">
+          <template #title>⚠ Kronos 模型未加载，策略中的预测功能已跳过</template>
+          <template v-if="testRunResult.kronos_error" #default>{{ testRunResult.kronos_error }}</template>
+        </el-alert>
+
         <!-- 验证警告 -->
         <el-alert v-if="testRunResult.validation_warnings?.length" type="warning" :closable="false" class="margin-top-10">
           <template #title>代码警告：</template>
@@ -757,6 +766,7 @@ const editingCodeId = ref(null)
 const validatingCode = ref(false)
 const savingCodeStrategy = ref(false)
 const codeValidationResult = ref(null)
+const kronosStatus = ref(null)  // { available, error, device }
 const codeFileInput = ref(null)
 const importedFileName = ref(null)
 const codeStrategyForm = reactive({ name: '', description: '', code: '', function_name: 'run', code_scope: 'screening' })
@@ -792,6 +802,8 @@ const testRunResult = reactive({
   error: null,
   duration_ms: 0,
   validation_warnings: [],
+  kronos_unavailable: false,
+  kronos_error: null,
 })
 
 // LLM生成
@@ -1168,6 +1180,19 @@ const loadCodeStrategies = async () => {
   }
 }
 
+// 加载 Kronos 状态
+const loadKronosStatus = async () => {
+  try {
+    const res = await fetch('/api/v1/ui/kronos/status')
+    const data = await res.json()
+    if (data.success) {
+      kronosStatus.value = { available: data.available, error: data.error, device: data.device }
+    }
+  } catch (e) {
+    kronosStatus.value = { available: false, error: '无法连接服务器', device: null }
+  }
+}
+
 // 加载候选分组
 const loadCandidateGroups = async () => {
   try {
@@ -1540,6 +1565,7 @@ const formatFilter = (value) => {
 
 onMounted(() => {
   loadAllData()
+  loadKronosStatus()
 })
 </script>
 

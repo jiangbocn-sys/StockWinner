@@ -644,6 +644,9 @@ async def test_run_strategy(
 
     start_time = time.time()
     try:
+        from services.common.kronos_service import get_kronos_service
+        kronos_svc = get_kronos_service()
+
         strategy = {"code": code, "function_name": function_name or "run", "name": "test_run"}
         signals = engine.execute_strategy(strategy, context)
         duration_ms = int((time.time() - start_time) * 1000)
@@ -657,8 +660,12 @@ async def test_run_strategy(
             "error": None,
             "duration_ms": duration_ms,
             "validation_warnings": validation.get("warnings", []),
+            "kronos_unavailable": not kronos_svc.is_available,
+            "kronos_error": kronos_svc.error if not kronos_svc.is_available else None,
         }
     except Exception as e:
+        from services.common.kronos_service import get_kronos_service
+        kronos_svc = get_kronos_service()
         duration_ms = int((time.time() - start_time) * 1000)
         output = captured_output.getvalue()
         __import__("sys").stdout = old_stdout
@@ -670,6 +677,8 @@ async def test_run_strategy(
             "error": f"{type(e).__name__}: {str(e)}",
             "duration_ms": duration_ms,
             "validation_warnings": validation.get("warnings", []),
+            "kronos_unavailable": not kronos_svc.is_available,
+            "kronos_error": kronos_svc.error if not kronos_svc.is_available else None,
         }
     finally:
         __import__("sys").stdout = old_stdout
