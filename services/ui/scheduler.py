@@ -373,17 +373,61 @@ async def create_strategy_task(
     module: Optional[str] = Body(None, description="内置任务模块名（builtin 类型必填）"),
     strategy_id: Optional[int] = Body(None, description="策略 ID（strategy 类型必填）"),
     group_id: Optional[int] = Body(None, description="候选组 ID"),
-    cron_expression: str = Body(..., description="Cron 表达式"),
+    cron_expression: str = Body(..., description="Cron 表达式或自然语言描述"),
     enabled: int = Body(1, description="是否启用"),
 ):
     """创建调度任务"""
     from services.common.database import get_db_manager
     from services.tasks import get_task
+    import re
     db = get_db_manager()
 
     account = await db.fetchone("SELECT * FROM accounts WHERE account_id = ? AND is_active = 1", (account_id,))
     if not account:
         raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
+
+    # 自动翻译中文 cron → 标准 cron
+    cron_re = re.compile(r'^[0-9*,/\-]+$')
+    if not cron_re.match(cron_expression):
+        # 看起来不是标准 cron，尝试翻译
+        try:
+            config_path = Path(__file__).parent.parent.parent / "config" / "llm.json"
+            if config_path.exists():
+                with open(config_path) as f:
+                    cfg = json.load(f)
+                if cfg.get("api_key") and cfg.get("base_url") and cfg.get("model"):
+                    from services.llm.strategy_generator import LLM_PROVIDERS
+                    provider = cfg.get("provider", "custom")
+                    preset = LLM_PROVIDERS.get(provider, {})
+                    api_format = preset.get("format", "openai")
+                    custom_url = cfg.get("base_url", "")
+                    if custom_url and "/chat/completions" not in custom_url and "/messages" not in custom_url:
+                        custom_url = custom_url.rstrip("/") + "/chat/completions"
+                    auth_header = preset.get("auth_header", "Authorization")
+                    headers = {"Content-Type": "application/json"}
+                    if auth_header == "x-api-key":
+                        headers["x-api-key"] = cfg["api_key"]
+                    else:
+                        headers[auth_header] = f"{preset.get('auth_prefix', '')}{cfg['api_key']}"
+                    if preset.get("api_version_header"):
+                        headers[preset["api_version_header"]] = preset.get("api_version", "")
+                    system_prompt = "你是一个 cron 表达式翻译助手。将用户的中文自然语言描述转换为标准 cron 表达式（5位格式: 分 时 日 月 周）。只返回 JSON 格式: {\"cron\": \"表达式\", \"description\": \"中文解释\"}。"
+                    data = {"model": cfg["model"], "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": f"翻译: {cron_expression}"}], "temperature": 0.1, "max_tokens": 256} if api_format != "anthropic" else {"model": cfg["model"], "max_tokens": 256, "system": system_prompt, "messages": [{"role": "user", "content": f"翻译: {cron_expression}"}]}
+                    import urllib.request
+                    req = urllib.request.Request(custom_url, data=json.dumps(data).encode("utf-8"), headers=headers, method="POST")
+                    with urllib.request.urlopen(req, timeout=15) as resp:
+                        llm_result = json.loads(resp.read().decode("utf-8"))
+                        if api_format == "anthropic":
+                            content = llm_result["content"][0]["text"]
+                        else:
+                            content = llm_result["choices"][0]["message"]["content"]
+                        content = content.strip()
+                        if content.startswith("```"):
+                            content = content.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+                        parsed = json.loads(content)
+                        cron_expression = parsed.get("cron", cron_expression)
+        except Exception:
+            pass  # 翻译失败，保留原文
 
     if task_type == "builtin":
         # 验证内置任务存在
