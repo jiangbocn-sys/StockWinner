@@ -1240,6 +1240,9 @@ const doTestRun = async () => {
       code: strategy.code,
       function_name: strategy.function_name || 'run',
     }
+    if (testRunForm.groupId) {
+      body.group_id = testRunForm.groupId
+    }
     if (testRunForm.stockCodes.trim()) {
       body.test_stocks = testRunForm.stockCodes.split(/[,，\s]+/).map(s => s.trim()).filter(s => s)
     }

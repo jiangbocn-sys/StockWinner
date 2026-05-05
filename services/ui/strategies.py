@@ -514,7 +514,8 @@ async def test_run_strategy(
     account_id: str = Path(..., description="账户 ID"),
     code: str = Body(..., embed=True, description="策略代码"),
     function_name: Optional[str] = Body(None, description="入口函数名，默认 run"),
-    test_stocks: Optional[List[str]] = Body(None, description="测试用股票代码列表，不提供则从 watchlist 取前5只"),
+    group_id: Optional[int] = Body(None, description="候选组 ID，指定后使用该组全部股票"),
+    test_stocks: Optional[List[str]] = Body(None, description="测试用股票代码列表，不提供则从候选组取"),
 ):
     """
     试运行策略代码：用真实数据执行一次，不写入 watchlist
@@ -559,11 +560,18 @@ async def test_run_strategy(
     # 2. 准备测试数据
     if test_stocks:
         stocks = [{"stock_code": c, "stock_name": c} for c in test_stocks]
-    else:
-        # 从该账户的 watchlist 取前5只作为测试数据
+    elif group_id:
+        # 从指定候选组取全部股票
         watchlist_rows = await db.fetchall(
-            "SELECT DISTINCT stock_code, stock_name FROM watchlist WHERE account_id = ? LIMIT 5",
-            (account_id,)
+            "SELECT DISTINCT stock_code, stock_name FROM watchlist WHERE account_id = ? AND group_id = ?",
+            (account_id, group_id),
+        )
+        stocks = [dict(r) for r in watchlist_rows] if watchlist_rows else []
+    else:
+        # 从该账户的 watchlist 取全部股票作为测试数据
+        watchlist_rows = await db.fetchall(
+            "SELECT DISTINCT stock_code, stock_name FROM watchlist WHERE account_id = ?",
+            (account_id,),
         )
         stocks = [dict(r) for r in watchlist_rows] if watchlist_rows else [
             {"stock_code": "600000.SH", "stock_name": "浦发银行"},
