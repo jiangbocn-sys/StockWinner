@@ -250,6 +250,88 @@ async def list_strategy_tasks(account_id: str = Path(..., description="账户 ID
     return {"success": True, "tasks": tasks}
 
 
+@router.post("/api/v1/ui/scheduler/translate-cron")
+async def translate_cron(text: str = Body(..., embed=True, description="自然语言描述，如：每个交易日14:30执行")):
+    """将自然语言翻译为 cron 表达式"""
+    from pathlib import Path
+    import json
+
+    # 加载 LLM 配置
+    config_path = Path(__file__).parent.parent.parent / "config" / "llm.json"
+    if not config_path.exists():
+        return {"success": False, "error": "LLM 未配置，请在设置中配置 API 密钥"}
+
+    with open(config_path) as f:
+        config = json.load(f)
+
+    api_key = config.get("api_key", "")
+    if not api_key:
+        return {"success": False, "error": "LLM API 密钥未配置"}
+
+    base_url = config.get("base_url", "")
+    model = config.get("model", "")
+    if not base_url or not model:
+        return {"success": False, "error": "LLM 地址或模型未配置"}
+
+    from services.llm.strategy_generator import LLM_PROVIDERS
+    provider = config.get("provider", "custom")
+    preset = LLM_PROVIDERS.get(provider, {})
+    api_format = preset.get("format", "openai")
+
+    headers = {"Content-Type": "application/json"}
+    auth_header = preset.get("auth_header", "Authorization")
+    auth_prefix = preset.get("auth_prefix", "")
+    if auth_header == "x-api-key":
+        headers["x-api-key"] = api_key
+    else:
+        headers[auth_header] = f"{auth_prefix}{api_key}"
+    if preset.get("api_version_header"):
+        headers[preset["api_version_header"]] = preset.get("api_version", "")
+
+    system_prompt = "你是一个 cron 表达式翻译助手。将用户的中文自然语言描述转换为标准 cron 表达式（5位格式: 分 时 日 月 周）。只返回 JSON，格式: {\"cron\": \"表达式\", \"description\": \"中文解释\"}。交易日用 1-5 表示周一至周五。"
+
+    if api_format == "anthropic":
+        data = {
+            "model": model,
+            "max_tokens": 256,
+            "system": system_prompt,
+            "messages": [{"role": "user", "content": f"翻译: {text}"}]
+        }
+    else:
+        data = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"翻译: {text}"}
+            ],
+            "temperature": 0.1,
+            "max_tokens": 256
+        }
+
+    import urllib.request
+    import urllib.error
+    try:
+        req = urllib.request.Request(
+            base_url,
+            data=json.dumps(data).encode("utf-8"),
+            headers=headers,
+            method="POST"
+        )
+        with urllib.request.urlopen(req, timeout=30) as response:
+            result = json.loads(response.read().decode("utf-8"))
+            if api_format == "anthropic":
+                content = result["content"][0]["text"]
+            else:
+                content = result["choices"][0]["message"]["content"]
+            content = content.strip()
+            if content.startswith("```"):
+                content = content.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+            parsed = json.loads(content)
+            return {"success": True, "cron": parsed.get("cron"), "description": parsed.get("description")}
+    except Exception as e:
+        return {"success": False, "error": f"LLM 调用失败: {str(e)}"}
+
+
 @router.post("/api/v1/ui/scheduler/reload-tasks")
 async def reload_strategy_tasks():
     """重新加载策略任务到 APScheduler，不重启后端"""

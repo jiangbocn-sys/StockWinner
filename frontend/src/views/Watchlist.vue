@@ -513,13 +513,25 @@
               />
             </el-select>
           </el-form-item>
+          <el-form-item label="执行频率">
+            <div style="display: flex; gap: 8px; width: 100%">
+              <el-input v-model="newTaskForm.cronText" placeholder="自然语言描述，如：每个交易日14:30执行" clearable style="flex: 1" @clear="newTaskForm.cron = ''">
+                <template #append>
+                  <el-button @click="translateCron" :loading="translatingCron">LLM 转译</el-button>
+                </template>
+              </el-input>
+            </div>
+          </el-form-item>
           <el-form-item label="Cron 表达式">
             <el-input v-model="newTaskForm.cron" placeholder="如: 0 14 * * 1-5" />
+            <div v-if="cronDescription" class="hint" style="color: #67C23A">
+              已转译：{{ cronDescription }}
+            </div>
             <div class="hint">
-              快捷模板：<br/>
-              每个交易日14:00 → <code>0 14 * * 1-5</code><br/>
-              每天14:00 → <code>0 14 * * *</code><br/>
-              每小时 → <code>0 * * * *</code>
+              快捷模板（可直接点击）：<br/>
+              <span class="cron-quick-btn" @click="newTaskForm.cron = '0 14 * * 1-5'; newTaskForm.cronText = '每个交易日14:00'" style="cursor: pointer; color: #409EFF; text-decoration: underline">每个交易日14:00</span> |
+              <span class="cron-quick-btn" @click="newTaskForm.cron = '0 14 * * *'; newTaskForm.cronText = '每天14:00'" style="cursor: pointer; color: #409EFF; text-decoration: underline">每天14:00</span> |
+              <span class="cron-quick-btn" @click="newTaskForm.cron = '0 * * * *'; newTaskForm.cronText = '每小时'" style="cursor: pointer; color: #409EFF; text-decoration: underline">每小时</span>
             </div>
           </el-form-item>
           <el-form-item label="启用">
@@ -645,10 +657,12 @@ const strategyTasks = ref([])
 const runningTask = ref(null)
 const creatingTask = ref(false)
 const scanningTasks = ref(false)
+const translatingCron = ref(false)
 const taskRegistry = ref([])
 const editingTaskId = ref(null)
+const cronDescription = ref('')
 const scheduleForm = reactive({ groupId: null, groupName: '' })
-const newTaskForm = reactive({ taskType: 'builtin', module: null, strategyId: null, cron: '', enabled: 1 })
+const newTaskForm = reactive({ taskType: 'builtin', module: null, strategyId: null, cron: '', cronText: '', enabled: 1 })
 
 // 表单
 const createGroupForm = reactive({ name: '', screeningStrategyId: null })
@@ -937,7 +951,36 @@ const cancelEditTask = () => {
   newTaskForm.module = null
   newTaskForm.strategyId = null
   newTaskForm.cron = ''
+  newTaskForm.cronText = ''
   newTaskForm.enabled = 1
+  cronDescription.value = ''
+}
+
+const translateCron = async () => {
+  if (!newTaskForm.cronText.trim()) {
+    ElMessage.warning('请输入自然语言描述')
+    return
+  }
+  translatingCron.value = true
+  try {
+    const res = await fetch('/api/v1/ui/scheduler/translate-cron', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: newTaskForm.cronText.trim() })
+    })
+    const data = await res.json()
+    if (data.success && data.cron) {
+      newTaskForm.cron = data.cron
+      cronDescription.value = data.description || '转译成功'
+      ElMessage.success('Cron 表达式已生成')
+    } else {
+      ElMessage.error(data.error || '转译失败，请检查 LLM 配置')
+    }
+  } catch (e) {
+    ElMessage.error('转译请求失败')
+  } finally {
+    translatingCron.value = false
+  }
 }
 
 // 解析任务执行错误信息
@@ -1654,4 +1697,6 @@ onMounted(async () => {
 /* 调度设置 */
 .hint { font-size: 12px; color: #909399; margin-top: 8px; line-height: 1.6; }
 .hint code { background: #f5f7fa; padding: 1px 4px; border-radius: 3px; font-family: monospace; color: #606266; }
+.cron-quick-btn { transition: color 0.2s; }
+.cron-quick-btn:hover { color: #66b1ff !important; }
 </style>
