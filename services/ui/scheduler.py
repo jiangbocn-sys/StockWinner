@@ -278,6 +278,18 @@ async def translate_cron(text: str = Body(..., embed=True, description="自然�
     preset = LLM_PROVIDERS.get(provider, {})
     api_format = preset.get("format", "openai")
 
+    # 使用 preset 的 base_url（含完整路径），仅覆盖 model 和 api_key
+    base_url = preset.get("base_url", "")
+    if config.get("base_url"):
+        # 如果用户自定义了 base_url 但缺少路径，自动补全
+        custom = config["base_url"]
+        if "/chat/completions" not in custom and "/messages" not in custom:
+            custom = custom.rstrip("/") + "/chat/completions"
+        base_url = custom
+    model = config.get("model", "")
+    if not model:
+        return {"success": False, "error": "LLM 模型未配置"}
+
     headers = {"Content-Type": "application/json"}
     auth_header = preset.get("auth_header", "Authorization")
     auth_prefix = preset.get("auth_prefix", "")
@@ -335,8 +347,8 @@ async def translate_cron(text: str = Body(..., embed=True, description="自然�
 @router.post("/api/v1/ui/scheduler/reload-tasks")
 async def reload_strategy_tasks():
     """重新加载策略任务到 APScheduler，不重启后端"""
-    from services.common.scheduler_service import get_scheduler_service
-    svc = get_scheduler_service()
+    from services.common.scheduler_service import get_scheduler
+    svc = get_scheduler()
     result = svc.reload_strategy_tasks()
     return result
 
@@ -408,8 +420,8 @@ async def create_strategy_task(
         "enabled": enabled,
     })
 
-    from services.common.scheduler_service import get_scheduler_service
-    get_scheduler_service().reload_strategy_tasks()
+    from services.common.scheduler_service import get_scheduler
+    get_scheduler().reload_strategy_tasks()
     return {"success": True, "message": f"任务已创建: {task_name}", "task_id": task_id}
 
 
@@ -440,8 +452,8 @@ async def update_strategy_task(
 
     if len(update_data) > 1:
         await db.update("strategy_tasks", update_data, "id = ?", (task_id,))
-        from services.common.scheduler_service import get_scheduler_service
-        get_scheduler_service().reload_strategy_tasks()
+        from services.common.scheduler_service import get_scheduler
+        get_scheduler().reload_strategy_tasks()
 
     return {"success": True, "message": "任务已更新"}
 
@@ -464,8 +476,8 @@ async def delete_strategy_task(
         raise HTTPException(status_code=404, detail="任务不存在")
 
     await db.delete("strategy_tasks", "id = ?", (task_id,))
-    from services.common.scheduler_service import get_scheduler_service
-    get_scheduler_service().reload_strategy_tasks()
+    from services.common.scheduler_service import get_scheduler
+    get_scheduler().reload_strategy_tasks()
     return {"success": True, "message": "任务已删除"}
 
 

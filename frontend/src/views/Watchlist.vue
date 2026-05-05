@@ -896,8 +896,33 @@ const createTask = async () => {
     return
   }
   if (!newTaskForm.cron.trim()) {
-    ElMessage.warning('请输入 Cron 表达式')
-    return
+    if (newTaskForm.cronText.trim()) {
+      // 自动翻译自然语言
+      translatingCron.value = true
+      try {
+        const res = await fetch('/api/v1/ui/scheduler/translate-cron', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text: newTaskForm.cronText.trim() })
+        })
+        const data = await res.json()
+        if (data.success && data.cron) {
+          newTaskForm.cron = data.cron
+          cronDescription.value = data.description || '转译成功'
+        } else {
+          ElMessage.error(data.error || 'Cron 表达式转译失败，请检查 LLM 配置或直接输入 cron 表达式')
+          return
+        }
+      } catch (e) {
+        ElMessage.error('Cron 表达式自动转译失败')
+        return
+      } finally {
+        translatingCron.value = false
+      }
+    } else {
+      ElMessage.warning('请输入 Cron 表达式或自然语言描述')
+      return
+    }
   }
   creatingTask.value = true
   try {
