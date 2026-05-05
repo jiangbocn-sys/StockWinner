@@ -454,8 +454,12 @@
                 </el-tooltip>
               </template>
             </el-table-column>
-            <el-table-column label="操作" width="200">
+            <el-table-column label="操作" width="260">
               <template #default="{ row }">
+                <el-button type="primary" size="small" @click="editTask(row)">编辑</el-button>
+                <el-button :type="row.enabled ? 'warning' : 'success'" size="small" @click="toggleTask(row)">
+                  {{ row.enabled ? '停用' : '启用' }}
+                </el-button>
                 <el-button type="success" size="small" @click="runTask(row)" :disabled="runningTask === row.id">手动执行</el-button>
                 <el-button type="danger" size="small" @click="deleteTask(row)">删除</el-button>
               </template>
@@ -518,8 +522,14 @@
               每小时 → <code>0 * * * *</code>
             </div>
           </el-form-item>
+          <el-form-item label="启用">
+            <el-switch v-model="newTaskForm.enabled" :active-value="1" :inactive-value="0" />
+          </el-form-item>
           <el-form-item>
-            <el-button type="primary" @click="createTask" :loading="creatingTask">创建任务</el-button>
+            <el-button type="primary" @click="createTask" :loading="creatingTask">
+              {{ editingTaskId ? '更新任务' : '创建任务' }}
+            </el-button>
+            <el-button v-if="editingTaskId" @click="cancelEditTask">取消编辑</el-button>
           </el-form-item>
         </el-form>
       </el-dialog>
@@ -636,8 +646,9 @@ const runningTask = ref(null)
 const creatingTask = ref(false)
 const scanningTasks = ref(false)
 const taskRegistry = ref([])
+const editingTaskId = ref(null)
 const scheduleForm = reactive({ groupId: null, groupName: '' })
-const newTaskForm = reactive({ taskType: 'builtin', module: null, strategyId: null, cron: '' })
+const newTaskForm = reactive({ taskType: 'builtin', module: null, strategyId: null, cron: '', enabled: 1 })
 
 // 表单
 const createGroupForm = reactive({ name: '', screeningStrategyId: null })
@@ -880,33 +891,53 @@ const createTask = async () => {
       task_type: newTaskForm.taskType,
       group_id: scheduleForm.groupId,
       cron_expression: newTaskForm.cron,
-      enabled: 1,
+      enabled: newTaskForm.enabled,
     }
     if (newTaskForm.taskType === 'builtin') {
       body.module = newTaskForm.module
     } else {
       body.strategy_id = newTaskForm.strategyId
     }
-    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/strategy-tasks`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body)
-    })
+
+    let res
+    if (editingTaskId.value) {
+      res = await fetch(`/api/v1/ui/${currentAccountId.value}/strategy-tasks/${editingTaskId.value}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      })
+    } else {
+      res = await fetch(`/api/v1/ui/${currentAccountId.value}/strategy-tasks`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      })
+    }
     const data = await res.json()
     if (res.ok) {
-      ElMessage.success(data.message || '任务已创建，重启后端服务生效')
+      ElMessage.success(editingTaskId.value ? '任务已更新，立即生效' : (data.message || '任务已创建'))
+      editingTaskId.value = null
       newTaskForm.module = null
       newTaskForm.strategyId = null
       newTaskForm.cron = ''
+      newTaskForm.enabled = 1
       await loadTasks()
     } else {
       ElMessage.error(data.detail || '创建失败')
     }
   } catch (e) {
-    ElMessage.error('创建失败')
+    ElMessage.error(editingTaskId.value ? '更新失败' : '创建失败')
   } finally {
     creatingTask.value = false
   }
+}
+
+const cancelEditTask = () => {
+  editingTaskId.value = null
+  newTaskForm.module = null
+  newTaskForm.strategyId = null
+  newTaskForm.cron = ''
+  newTaskForm.enabled = 1
 }
 
 // 解析任务执行错误信息
@@ -951,6 +982,37 @@ const deleteTask = async (task) => {
     }
   } catch (e) {
     if (e !== 'cancel') ElMessage.error('删除失败')
+  }
+}
+
+const editTask = (task) => {
+  editingTaskId.value = task.id
+  newTaskForm.taskType = task.task_type || 'strategy'
+  newTaskForm.module = task.module || null
+  newTaskForm.strategyId = task.strategy_id || null
+  newTaskForm.cron = task.cron_expression || ''
+  newTaskForm.enabled = task.enabled
+  // 打开调度设置对话框（编辑模式）
+  showScheduleDialog.value = true
+}
+
+const toggleTask = async (task) => {
+  try {
+    const newEnabled = task.enabled ? 0 : 1
+    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/strategy-tasks/${task.id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: newEnabled })
+    })
+    if (res.ok) {
+      ElMessage.success(newEnabled ? '任务已启用，立即生效' : '任务已停用')
+      await loadTasks()
+    } else {
+      const data = await res.json()
+      ElMessage.error(data.detail || '操作失败')
+    }
+  } catch (e) {
+    ElMessage.error('操作失败')
   }
 }
 

@@ -250,6 +250,15 @@ async def list_strategy_tasks(account_id: str = Path(..., description="账户 ID
     return {"success": True, "tasks": tasks}
 
 
+@router.post("/api/v1/ui/scheduler/reload-tasks")
+async def reload_strategy_tasks():
+    """重新加载策略任务到 APScheduler，不重启后端"""
+    from services.common.scheduler_service import get_scheduler_service
+    svc = get_scheduler_service()
+    result = svc.reload_strategy_tasks()
+    return result
+
+
 @router.get("/api/v1/ui/kronos/status")
 async def get_kronos_status() -> Dict:
     """获取 Kronos 模型加载状态"""
@@ -317,6 +326,8 @@ async def create_strategy_task(
         "enabled": enabled,
     })
 
+    from services.common.scheduler_service import get_scheduler_service
+    get_scheduler_service().reload_strategy_tasks()
     return {"success": True, "message": f"任务已创建: {task_name}", "task_id": task_id}
 
 
@@ -347,6 +358,8 @@ async def update_strategy_task(
 
     if len(update_data) > 1:
         await db.update("strategy_tasks", update_data, "id = ?", (task_id,))
+        from services.common.scheduler_service import get_scheduler_service
+        get_scheduler_service().reload_strategy_tasks()
 
     return {"success": True, "message": "任务已更新"}
 
@@ -369,6 +382,8 @@ async def delete_strategy_task(
         raise HTTPException(status_code=404, detail="任务不存在")
 
     await db.delete("strategy_tasks", "id = ?", (task_id,))
+    from services.common.scheduler_service import get_scheduler_service
+    get_scheduler_service().reload_strategy_tasks()
     return {"success": True, "message": "任务已删除"}
 
 

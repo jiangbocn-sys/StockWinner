@@ -10,6 +10,8 @@
 - 技术指标（RSI/MACD/BOLL/ADX）：从K线自行计算
 - Kronos预测：通过沙盒注入的 kronos_predict() 调用，无需 import 任何模型模块
 """
+import pandas as pd
+import numpy as np
 import json, statistics, datetime
 
 # ── 指标函数 ─────────────────────────────────────────

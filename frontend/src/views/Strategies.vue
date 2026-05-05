@@ -171,7 +171,7 @@
                 <template #header>
                   <div class="card-header">
                     <span>Python 代码选股策略</span>
-                    <el-button type="primary" size="small" @click="showCreateCodeDialog = true; codeStrategyForm.code_scope = 'screening'">
+                    <el-button type="primary" size="small" @click="resetCodeForm(); codeStrategyForm.code_scope = 'screening'; showCreateCodeDialog = true">
                       <el-icon><Plus /></el-icon>
                       新建策略
                     </el-button>
@@ -212,7 +212,7 @@
                 <template #header>
                   <div class="card-header">
                     <span>Python 代码交易策略</span>
-                    <el-button type="primary" size="small" @click="showCreateCodeDialog = true; codeStrategyForm.code_scope = 'trading'">
+                    <el-button type="primary" size="small" @click="resetCodeForm(); codeStrategyForm.code_scope = 'trading'; showCreateCodeDialog = true">
                       <el-icon><Plus /></el-icon>
                       新建策略
                     </el-button>
@@ -534,6 +534,34 @@
             <span class="hint" style="margin-left: 8px">策略代码中的主函数名，默认 run</span>
           </el-form-item>
           <el-form-item label="Python 代码">
+            <el-collapse style="margin-bottom: 8px">
+              <el-collapse-item title="📖 编写规则" name="rules">
+                <div class="code-hints">
+                  <p><b>基本要求：</b></p>
+                  <ul>
+                    <li>必须包含 <code>def run(context):</code> 入口函数</li>
+                    <li>不能使用 <code>async def</code>，必须是同步函数</li>
+                  </ul>
+                  <p><b>允许的模块：</b></p>
+                  <ul>
+                    <li><code>import pandas as pd</code>、<code>import numpy as np</code></li>
+                    <li><code>import datetime</code>、<code>import json</code>、<code>import math</code>、<code>import time</code></li>
+                    <li>禁止 <code>os</code>、<code>sys</code>、<code>subprocess</code> 等系统模块</li>
+                  </ul>
+                  <p><b>沙盒注入的函数（直接调用，无需 import）：</b></p>
+                  <ul>
+                    <li><code>get_kline_smart(codes, lookback=100)</code> — 智能 K 线（盘中自动拼接实时数据）</li>
+                    <li><code>get_batch_kline(codes, limit=100)</code> — 批量获取 K 线</li>
+                    <li><code>get_factors(code, date)</code> — 获取日频因子</li>
+                    <li><code>get_kline_spliced(codes, lookback=100)</code> — 本地历史+实时拼接</li>
+                    <li><code>kronos_predict(df_hist, pred_len=5)</code> — Kronos 时间序列预测</li>
+                    <li><code>kronos_available</code> — 布尔值，Kronos 模型是否已加载</li>
+                  </ul>
+                  <p><b>返回值：</b>返回信号列表，每条信号包含 <code>action</code>（'buy'/'sell'/'watch'）、<code>stock_code</code>、<code>buy_price</code>、<code>reason</code> 等字段</p>
+                  <p><b>禁止：</b>直接调用 SDK、使用 <code>open()</code> 文件操作、<code>eval()</code>/<code>exec()</code></p>
+                </div>
+              </el-collapse-item>
+            </el-collapse>
             <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 8px">
               <el-button type="primary" link size="small" @click="codeFileInput?.click()">
                 从 .py 文件导入
@@ -1025,6 +1053,16 @@ const deleteRule = async (rule) => {
       ElMessage.error('删除失败')
     }
   }
+}
+
+const resetCodeForm = () => {
+  editingCodeId.value = null
+  codeStrategyForm.name = ''
+  codeStrategyForm.description = ''
+  codeStrategyForm.code = ''
+  codeStrategyForm.function_name = 'run'
+  codeValidationResult.value = null
+  importedFileName.value = null
 }
 
 // 代码型策略
@@ -1649,5 +1687,21 @@ onMounted(() => {
   max-height: 300px;
   overflow-y: auto;
   white-space: pre-wrap;
+}
+
+.code-hints {
+  font-size: 12px;
+  color: #606266;
+  line-height: 1.6;
+}
+.code-hints p { margin: 6px 0 4px; }
+.code-hints ul { margin: 0 0 4px 16px; padding: 0; }
+.code-hints code {
+  background: #f0f2f5;
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-family: 'Consolas', 'Monaco', monospace;
+  font-size: 11px;
+  color: #E6A23C;
 }
 </style>

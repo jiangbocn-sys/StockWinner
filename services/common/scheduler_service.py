@@ -724,6 +724,52 @@ class SchedulerService:
         except Exception as e:
             logger.error(f"注册任务失败: {e}", exc_info=True)
 
+    def reload_strategy_tasks(self):
+        """重新加载策略任务：移除已有 job，重新注册"""
+        try:
+            import sqlite3
+            from services.tasks import get_task
+
+            # 移除所有 task_ 前缀的 job
+            for job in list(self._scheduler.get_jobs()):
+                if job.id.startswith('task_'):
+                    self._scheduler.remove_job(job.id)
+
+            db_path = Path(__file__).parent.parent.parent / "data" / "stockwinner.db"
+            conn = sqlite3.connect(str(db_path))
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute("SELECT * FROM strategy_tasks WHERE enabled = 1").fetchall()
+            conn.close()
+
+            count = 0
+            for task in rows:
+                job_id = f'task_{task["id"]}'
+                task_type = task.get("task_type", "strategy")
+
+                if task_type == "builtin" and task.get("module"):
+                    info = get_task(task["module"])
+                    job_name = f"内置任务: {info['name']}" if info else f"内置任务: {task['module']}"
+                else:
+                    job_name = f'策略任务: {task["account_id"]}/{task["group_id"]}'
+
+                self._scheduler.add_job(
+                    self._execute_strategy_task_job,
+                    CronTrigger.from_crontab(task["cron_expression"], timezone=CHINA_TZ),
+                    id=job_id,
+                    name=job_name,
+                    args=[task["id"]],
+                    replace_existing=True,
+                )
+                count += 1
+                logger.info(f"  重新注册任务: {job_id} (cron={task['cron_expression']})")
+
+            logger.info(f"策略任务重新加载完成，共 {count} 个任务")
+            return {"success": True, "count": count}
+
+        except Exception as e:
+            logger.error(f"重新加载任务失败: {e}", exc_info=True)
+            return {"success": False, "error": str(e)}
+
     def _execute_strategy_task_job(self, task_id: int):
         """执行策略任务（在线程中运行）"""
         logger.info(f"开始执行策略任务 ID={task_id}")
