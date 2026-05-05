@@ -18,6 +18,8 @@ from pathlib import Path
 from typing import Optional, Dict
 import sqlite3
 
+from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.cron import CronTrigger
 from services.common.timezone import get_china_time, CHINA_TZ
 
 # 配置日志
@@ -57,9 +59,6 @@ class SchedulerService:
             return
 
         try:
-            from apscheduler.schedulers.background import BackgroundScheduler
-            from apscheduler.triggers.cron import CronTrigger
-
             # 配置 APScheduler 使用中国时区
             self._scheduler = BackgroundScheduler(timezone=CHINA_TZ)
             self._running = True
@@ -699,12 +698,13 @@ class SchedulerService:
             count = 0
             for task in rows:
                 job_id = f'task_{task["id"]}'
-                task_type = task.get("task_type", "strategy")
+                task_type = task["task_type"] if "task_type" in task.keys() else "strategy"
+                module = task["module"] if task["module"] else None
 
                 # 生成可读任务名
-                if task_type == "builtin" and task.get("module"):
-                    info = get_task(task["module"])
-                    job_name = f"内置任务: {info['name']}" if info else f"内置任务: {task['module']}"
+                if task_type == "builtin" and module:
+                    info = get_task(module)
+                    job_name = f"内置任务: {info['name']}" if info else f"内置任务: {module}"
                 else:
                     job_name = f'策略任务: {task["account_id"]}/{task["group_id"]}'
 
@@ -744,11 +744,12 @@ class SchedulerService:
             count = 0
             for task in rows:
                 job_id = f'task_{task["id"]}'
-                task_type = task.get("task_type", "strategy")
+                task_type = task["task_type"] if "task_type" in task.keys() else "strategy"
+                module = task["module"] if task["module"] else None
 
-                if task_type == "builtin" and task.get("module"):
-                    info = get_task(task["module"])
-                    job_name = f"内置任务: {info['name']}" if info else f"内置任务: {task['module']}"
+                if task_type == "builtin" and module:
+                    info = get_task(module)
+                    job_name = f"内置任务: {info['name']}" if info else f"内置任务: {module}"
                 else:
                     job_name = f'策略任务: {task["account_id"]}/{task["group_id"]}'
 
