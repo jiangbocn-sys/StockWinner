@@ -4,8 +4,8 @@
 提供调度状态查询和手动触发功能
 """
 
-from fastapi import APIRouter, Query
-from typing import Dict
+from fastapi import APIRouter, Query, Path, Body, HTTPException
+from typing import Dict, List, Optional, Any
 
 router = APIRouter()
 
@@ -154,3 +154,228 @@ async def get_data_status() -> Dict:
 
     conn.close()
     return status
+
+
+# ============== 任务插件管理 ==============
+
+@router.get("/api/v1/ui/scheduler/task-registry")
+async def get_task_registry():
+    """
+    获取已注册的任务插件列表
+
+    扫描 services/tasks/ 和 services/tasks/user_custom/ 目录，
+    返回所有带元数据头的可调度任务。
+
+    Returns:
+        任务插件列表，按 category 分组
+    """
+    from services.tasks import scan_tasks
+    registry = scan_tasks()
+    tasks = []
+    for info in registry.values():
+        tasks.append({
+            "module": info["module"],
+            "name": info["name"],
+            "description": info["description"],
+            "category": info["category"],
+            "source": info["source"],
+            "available": info["handler"] is not None,
+        })
+    # 按 category 排序
+    tasks.sort(key=lambda x: (x["category"], x["name"]))
+    return {"success": True, "tasks": tasks}
+
+
+@router.post("/api/v1/ui/scheduler/scan-tasks")
+async def scan_task_registry():
+    """
+    手动触发任务插件扫描
+
+    适用于在 user_custom/ 目录中新增文件后，
+    不重启后端的情况下刷新注册表。
+
+    Returns:
+        最新注册的任务列表
+    """
+    from services.tasks import scan_tasks
+    registry = scan_tasks()
+    tasks = []
+    for info in registry.values():
+        tasks.append({
+            "module": info["module"],
+            "name": info["name"],
+            "description": info["description"],
+            "category": info["category"],
+            "source": info["source"],
+            "available": info["handler"] is not None,
+        })
+    tasks.sort(key=lambda x: (x["category"], x["name"]))
+    return {"success": True, "message": f"已扫描到 {len(tasks)} 个任务", "tasks": tasks}
+
+
+# ============== 策略任务管理 ==============
+
+@router.get("/api/v1/ui/{account_id}/strategy-tasks")
+async def list_strategy_tasks(account_id: str = Path(..., description="账户 ID")):
+    """列出该账户下所有策略任务"""
+    from services.common.database import get_db_manager
+    db = get_db_manager()
+
+    account = await db.fetchone("SELECT * FROM accounts WHERE account_id = ? AND is_active = 1", (account_id,))
+    if not account:
+        raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
+
+    rows = await db.fetchall("""
+        SELECT t.*, s.name as strategy_name, g.name as group_name
+        FROM strategy_tasks t
+        LEFT JOIN strategies s ON t.strategy_id = s.id
+        LEFT JOIN candidate_groups g ON t.group_id = g.id
+        WHERE t.account_id = ?
+        ORDER BY t.created_at DESC
+    """, (account_id,))
+
+    # 为 builtin 任务添加可读名称
+    tasks = []
+    for r in rows:
+        task = dict(r)
+        if task.get("task_type") == "builtin" and task.get("module"):
+            from services.tasks import get_task
+            info = get_task(task["module"])
+            if info:
+                task["task_name"] = info["name"]
+        elif not task.get("task_name"):
+            task["task_name"] = task.get("strategy_name") or "未知策略"
+        tasks.append(task)
+
+    return {"success": True, "tasks": tasks}
+
+
+@router.post("/api/v1/ui/{account_id}/strategy-tasks")
+async def create_strategy_task(
+    account_id: str = Path(..., description="账户 ID"),
+    task_type: str = Body("strategy", description="任务类型: builtin / strategy"),
+    module: Optional[str] = Body(None, description="内置任务模块名（builtin 类型必填）"),
+    strategy_id: Optional[int] = Body(None, description="策略 ID（strategy 类型必填）"),
+    group_id: Optional[int] = Body(None, description="候选组 ID"),
+    cron_expression: str = Body(..., description="Cron 表达式"),
+    enabled: int = Body(1, description="是否启用"),
+):
+    """创建调度任务"""
+    from services.common.database import get_db_manager
+    from services.tasks import get_task
+    db = get_db_manager()
+
+    account = await db.fetchone("SELECT * FROM accounts WHERE account_id = ? AND is_active = 1", (account_id,))
+    if not account:
+        raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
+
+    if task_type == "builtin":
+        # 验证内置任务存在
+        if not module:
+            raise HTTPException(status_code=400, detail="builtin 类型任务需指定 module")
+        task_info = get_task(module)
+        if not task_info or task_info.get("handler") is None:
+            raise HTTPException(status_code=404, detail=f"任务模块不存在或加载失败: {module}")
+        task_name = task_info["name"]
+    elif task_type == "strategy":
+        # 验证策略存在
+        if not strategy_id:
+            raise HTTPException(status_code=400, detail="strategy 类型任务需指定 strategy_id")
+        strategy = await db.fetchone("SELECT id, name FROM strategies WHERE id = ?", (strategy_id,))
+        if not strategy:
+            raise HTTPException(status_code=404, detail="策略不存在")
+        task_name = strategy["name"]
+        module = None
+    else:
+        raise HTTPException(status_code=400, detail=f"不支持的任务类型: {task_type}")
+
+    if group_id:
+        group = await db.fetchone("SELECT id FROM candidate_groups WHERE id = ? AND account_id = ?", (group_id, account_id))
+        if not group:
+            raise HTTPException(status_code=404, detail="候选组不存在")
+
+    task_id = await db.insert("strategy_tasks", {
+        "task_type": task_type,
+        "module": module,
+        "strategy_id": strategy_id if task_type == "strategy" else None,
+        "group_id": group_id,
+        "account_id": account_id,
+        "cron_expression": cron_expression,
+        "enabled": enabled,
+    })
+
+    return {"success": True, "message": f"任务已创建: {task_name}", "task_id": task_id}
+
+
+@router.put("/api/v1/ui/{account_id}/strategy-tasks/{task_id}")
+async def update_strategy_task(
+    account_id: str = Path(..., description="账户 ID"),
+    task_id: int = Path(..., description="任务 ID"),
+    cron_expression: Optional[str] = Body(None, description="Cron 表达式"),
+    enabled: Optional[int] = Body(None, description="是否启用"),
+):
+    """更新策略任务"""
+    from services.common.database import get_db_manager
+    db = get_db_manager()
+
+    account = await db.fetchone("SELECT * FROM accounts WHERE account_id = ? AND is_active = 1", (account_id,))
+    if not account:
+        raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
+
+    task = await db.fetchone("SELECT * FROM strategy_tasks WHERE id = ? AND account_id = ?", (task_id, account_id))
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+
+    update_data = {"updated_at": __import__("services.common.timezone", fromlist=["get_china_time"]).get_china_time().isoformat()}
+    if cron_expression is not None:
+        update_data["cron_expression"] = cron_expression
+    if enabled is not None:
+        update_data["enabled"] = enabled
+
+    if len(update_data) > 1:
+        await db.update("strategy_tasks", update_data, "id = ?", (task_id,))
+
+    return {"success": True, "message": "任务已更新"}
+
+
+@router.delete("/api/v1/ui/{account_id}/strategy-tasks/{task_id}")
+async def delete_strategy_task(
+    account_id: str = Path(..., description="账户 ID"),
+    task_id: int = Path(..., description="任务 ID"),
+):
+    """删除策略任务"""
+    from services.common.database import get_db_manager
+    db = get_db_manager()
+
+    account = await db.fetchone("SELECT * FROM accounts WHERE account_id = ? AND is_active = 1", (account_id,))
+    if not account:
+        raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
+
+    task = await db.fetchone("SELECT id FROM strategy_tasks WHERE id = ? AND account_id = ?", (task_id, account_id))
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+
+    await db.delete("strategy_tasks", "id = ?", (task_id,))
+    return {"success": True, "message": "任务已删除"}
+
+
+@router.post("/api/v1/ui/{account_id}/strategy-tasks/{task_id}/run")
+async def run_strategy_task_manual(
+    account_id: str = Path(..., description="账户 ID"),
+    task_id: int = Path(..., description="任务 ID"),
+):
+    """手动执行一次策略任务"""
+    from services.common.scheduler_service import get_scheduler
+    from services.common.database import get_db_manager
+    db = get_db_manager()
+
+    account = await db.fetchone("SELECT * FROM accounts WHERE account_id = ? AND is_active = 1", (account_id,))
+    if not account:
+        raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
+
+    task = await db.fetchone("SELECT id FROM strategy_tasks WHERE id = ? AND account_id = ?", (task_id, account_id))
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+
+    scheduler = get_scheduler()
+    return scheduler.run_manual_strategy_task(task_id)

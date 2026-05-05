@@ -396,3 +396,73 @@ async def generate_strategy_by_llm(
             "message": f"LLM 策略生成失败：{str(e)}",
             "error": str(e)
         }
+
+
+# ============== 代码型策略 ==============
+
+@router.post("/api/v1/ui/{account_id}/strategies/validate-code")
+async def validate_strategy_code(
+    account_id: str = Path(..., description="账户 ID"),
+    code: str = Body(..., description="策略代码"),
+):
+    """验证策略代码语法"""
+    from services.strategy.engine import get_strategy_engine
+    db = get_db_manager()
+
+    account = await db.fetchone(
+        "SELECT 1 FROM accounts WHERE account_id = ? AND is_active = 1",
+        (account_id,)
+    )
+    if not account:
+        raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
+
+    engine = get_strategy_engine()
+    return engine.validate_code(code)
+
+
+@router.put("/api/v1/ui/{account_id}/strategies/{strategy_id}")
+async def update_strategy(
+    account_id: str = Path(..., description="账户 ID"),
+    strategy_id: int = Path(..., description="策略 ID"),
+    name: Optional[str] = Body(None, description="策略名称"),
+    description: Optional[str] = Body(None, description="策略描述"),
+    strategy_type: Optional[str] = Body(None, description="策略类型"),
+    config: Optional[Dict[str, Any]] = Body(None, description="策略配置"),
+    status: Optional[str] = Body(None, description="策略状态"),
+    code: Optional[str] = Body(None, description="策略代码"),
+    code_type: Optional[str] = Body(None, description="代码类型"),
+    target_scope: Optional[str] = Body(None, description="作用域"),
+    function_name: Optional[str] = Body(None, description="入口函数名"),
+):
+    """更新策略"""
+    db = get_db_manager()
+
+    account = await db.fetchone(
+        "SELECT 1 FROM accounts WHERE account_id = ? AND is_active = 1",
+        (account_id,)
+    )
+    if not account:
+        raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
+
+    strategy = await db.fetchone(
+        "SELECT id FROM strategies WHERE id = ? AND account_id = ?",
+        (strategy_id, account_id)
+    )
+    if not strategy:
+        raise HTTPException(status_code=404, detail="策略不存在")
+
+    update_data = {"updated_at": get_china_time().isoformat()}
+    if name is not None: update_data["name"] = name
+    if description is not None: update_data["description"] = description
+    if strategy_type is not None: update_data["strategy_type"] = strategy_type
+    if config is not None: update_data["config"] = json.dumps(config, ensure_ascii=False)
+    if status is not None: update_data["status"] = status
+    if code is not None: update_data["code"] = code
+    if code_type is not None: update_data["code_type"] = code_type
+    if target_scope is not None: update_data["target_scope"] = target_scope
+    if function_name is not None: update_data["function_name"] = function_name
+
+    if len(update_data) > 1:
+        await db.update("strategies", update_data, "id = ?", (strategy_id,))
+
+    return {"success": True, "message": "策略已更新"}

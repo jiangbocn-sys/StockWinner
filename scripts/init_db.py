@@ -109,7 +109,12 @@ def init_database():
             status TEXT DEFAULT 'draft',
             is_active INTEGER DEFAULT 1,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            match_score_threshold REAL,
+            code TEXT,
+            code_type TEXT DEFAULT 'config',
+            target_scope TEXT DEFAULT 'group',
+            function_name TEXT DEFAULT 'run'
         )
     """)
 
@@ -124,12 +129,49 @@ def init_database():
         )
     """)
 
-    # 7. 创建-watchlist 表（候选股票池）
+    # 7. 创建候选组表（支持多组候选管理）
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS candidate_groups (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            account_id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            group_type TEXT NOT NULL DEFAULT 'manual',  -- 'manual' | 'screening'
+            screening_strategy_id INTEGER,              -- FK → strategies(id)
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (screening_strategy_id) REFERENCES strategies(id)
+        )
+    """)
+
+    # 7b. 创建策略任务表（支持内置功能和代码型策略）
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS strategy_tasks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_type TEXT DEFAULT 'strategy',
+            module TEXT DEFAULT NULL,
+            strategy_id INTEGER,
+            group_id INTEGER,
+            account_id TEXT NOT NULL,
+            cron_expression TEXT NOT NULL,
+            enabled INTEGER DEFAULT 1,
+            last_run_at TIMESTAMP,
+            last_status TEXT,
+            last_output TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (strategy_id) REFERENCES strategies(id),
+            FOREIGN KEY (group_id) REFERENCES candidate_groups(id)
+        )
+    """)
+
+    # 8. 创建 watchlist 表（候选股票池）
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS watchlist (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             account_id TEXT NOT NULL,
             strategy_id INTEGER,
+            group_id INTEGER,
+            source_type TEXT DEFAULT 'screening',  -- 'screening' | 'manual'
             stock_code TEXT NOT NULL,
             stock_name TEXT,
             reason TEXT,
@@ -140,7 +182,8 @@ def init_database():
             status TEXT DEFAULT 'pending',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (strategy_id) REFERENCES strategies(id)
+            FOREIGN KEY (strategy_id) REFERENCES strategies(id),
+            FOREIGN KEY (group_id) REFERENCES candidate_groups(id)
         )
     """)
 
@@ -169,8 +212,11 @@ def init_database():
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_account_trades ON trade_records(account_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_account_orders ON orders(account_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_account_strategies ON strategies(account_id)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_account_watchlist ON watchlist(account_id, status)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_candidate_groups_account ON candidate_groups(account_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_watchlist_account ON watchlist(account_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_watchlist_group ON watchlist(group_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_watchlist_account_status ON watchlist(account_id, status)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_watchlist_source ON watchlist(account_id, source_type)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_signals_account ON trading_signals(account_id, status)")
 
     conn.commit()

@@ -47,6 +47,139 @@ async def lifespan(app: FastAPI):
     start_scheduler()
     print("调度服务已启动")
 
+    # 数据库迁移：为 watchlist 表添加新列
+    try:
+        await db_manager.execute(
+            "ALTER TABLE watchlist ADD COLUMN source_type TEXT DEFAULT 'screening'"
+        )
+        print("数据库迁移: watchlist.source_type 已添加")
+    except Exception:
+        pass  # 列已存在
+
+    try:
+        await db_manager.execute(
+            "ALTER TABLE watchlist ADD COLUMN group_id INTEGER"
+        )
+        print("数据库迁移: watchlist.group_id 已添加")
+    except Exception:
+        pass  # 列已存在
+
+    # 创建 candidate_groups 表
+    try:
+        await db_manager.execute("""
+            CREATE TABLE IF NOT EXISTS candidate_groups (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                account_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                group_type TEXT NOT NULL DEFAULT 'manual',
+                screening_strategy_id INTEGER,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (screening_strategy_id) REFERENCES strategies(id)
+            )
+        """)
+        await db_manager.execute("CREATE INDEX IF NOT EXISTS idx_candidate_groups_account ON candidate_groups(account_id)")
+        print("数据库迁移: candidate_groups 表已创建")
+    except Exception:
+        pass  # 表已存在
+
+    # 创建「未分组」默认组，归集所有 group_id 为 NULL 的记录
+    try:
+        # 为每个有未分组记录的账户创建默认组
+        accounts_with_ungrouped = await db_manager.fetchall(
+            "SELECT DISTINCT account_id FROM watchlist WHERE group_id IS NULL"
+        )
+        for row in accounts_with_ungrouped:
+            aid = row['account_id']
+            # 检查是否已有未分组组
+            existing = await db_manager.fetchone(
+                "SELECT id FROM candidate_groups WHERE account_id = ? AND name = '未分组'",
+                (aid,)
+            )
+            if not existing:
+                group_id = await db_manager.insert("candidate_groups", {
+                    "account_id": aid,
+                    "name": "未分组",
+                    "group_type": "manual",
+                    "screening_strategy_id": None,
+                })
+            else:
+                group_id = existing['id']
+            await db_manager.execute(
+                "UPDATE watchlist SET group_id = ? WHERE group_id IS NULL AND account_id = ?",
+                (group_id, aid)
+            )
+        print("数据库迁移: 「未分组」默认组已创建，未分组记录已归集")
+    except Exception as e:
+        print(f"数据库迁移: 未分组归集跳过 ({e})")
+
+    # 扩展 strategies 表：支持代码型策略
+    try:
+        await db_manager.execute("ALTER TABLE strategies ADD COLUMN code TEXT")
+        print("数据库迁移: strategies.code 已添加")
+    except Exception:
+        pass
+    try:
+        await db_manager.execute("ALTER TABLE strategies ADD COLUMN code_type TEXT DEFAULT 'config'")
+        print("数据库迁移: strategies.code_type 已添加")
+    except Exception:
+        pass
+    try:
+        await db_manager.execute("ALTER TABLE strategies ADD COLUMN target_scope TEXT DEFAULT 'group'")
+        print("数据库迁移: strategies.target_scope 已添加")
+    except Exception:
+        pass
+    try:
+        await db_manager.execute("ALTER TABLE strategies ADD COLUMN function_name TEXT DEFAULT 'run'")
+        print("数据库迁移: strategies.function_name 已添加")
+    except Exception:
+        pass
+
+    # 创建 strategy_tasks 表
+    try:
+        await db_manager.execute("""
+            CREATE TABLE IF NOT EXISTS strategy_tasks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                strategy_id INTEGER NOT NULL,
+                group_id INTEGER NOT NULL,
+                account_id TEXT NOT NULL,
+                cron_expression TEXT NOT NULL,
+                enabled INTEGER DEFAULT 1,
+                last_run_at TIMESTAMP,
+                last_status TEXT,
+                last_output TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (strategy_id) REFERENCES strategies(id),
+                FOREIGN KEY (group_id) REFERENCES candidate_groups(id)
+            )
+        """)
+        await db_manager.execute("CREATE INDEX IF NOT EXISTS idx_strategy_tasks_account ON strategy_tasks(account_id)")
+        await db_manager.execute("CREATE INDEX IF NOT EXISTS idx_strategy_tasks_enabled ON strategy_tasks(enabled)")
+        print("数据库迁移: strategy_tasks 表已创建")
+    except Exception:
+        pass  # 表已存在
+
+    # 扩展 strategy_tasks 支持内置功能任务
+    try:
+        await db_manager.execute("ALTER TABLE strategy_tasks ADD COLUMN task_type TEXT DEFAULT 'strategy'")
+        print("数据库迁移: strategy_tasks.task_type 已添加")
+    except Exception:
+        pass
+    try:
+        await db_manager.execute("ALTER TABLE strategy_tasks ADD COLUMN module TEXT DEFAULT NULL")
+        print("数据库迁移: strategy_tasks.module 已添加")
+    except Exception:
+        pass
+
+    # 扫描并注册任务插件
+    try:
+        from services.tasks import scan_tasks
+        scan_tasks()
+        print("数据库迁移: 任务插件扫描完成")
+    except Exception as e:
+        print(f"数据库迁移: 任务插件扫描失败: {e}")
+
     yield
 
     # 关闭时清理

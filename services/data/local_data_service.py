@@ -2004,11 +2004,22 @@ async def download_all_kline_data(
         batch_codes = [f"{s.get('code')}.{s.get('market')}" for s in batch]
 
         progress = min(i + batch_size, total_stocks)
+        progress_pct = progress / total_stocks * 100
         tracker.update_sync(
             processed=progress,
             current_stock=batch_codes[0] if batch_codes else "",
             message=f"下载批次 {i//batch_size + 1}/{(total_stocks-1)//batch_size + 1}"
         )
+
+        # 同步更新 task_manager 进度（供 DataManagement 页面使用）
+        try:
+            from services.common.task_manager import get_task_manager, TaskType
+            task_manager = get_task_manager()
+            if task_manager.is_running(TaskType.DATA_DOWNLOAD):
+                task_manager.update_progress(TaskType.DATA_DOWNLOAD, round(progress_pct, 1),
+                    message=f"下载批次 {i//batch_size + 1}/{(total_stocks-1)//batch_size + 1} ({progress}/{total_stocks})")
+        except Exception:
+            pass
 
         try:
             # 批量获取K线数据（日期需要转换为 YYYYMMDD 格式）

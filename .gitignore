@@ -45,6 +45,9 @@ frontend/.env
 # SDK local data cache (Windows mount point on Linux - directory named "D:")
 "D:"/
 
+# Kronos model weights (large binary files, download separately)
+deps/Kronos/weights/
+
 # Claude Code local settings
 .claude/settings.local.json
 .claude/scheduled_tasks.json

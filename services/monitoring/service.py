@@ -11,6 +11,7 @@
 """
 
 import asyncio
+import json
 from typing import Dict, List, Optional, Any
 from services.common.database import get_db_manager
 from services.common.timezone import get_china_time
@@ -83,17 +84,46 @@ class TradingMonitor:
         """执行一次交易监控"""
         db = get_db_manager()
 
-        # 获取 watchlist 中的股票
-        watchlist = await db.fetchall(
-            "SELECT * FROM watchlist WHERE account_id = ? AND status IN ('pending', 'watching')",
-            (account_id,)
-        )
+        # 获取 watchlist 中的股票（JOIN 候选组和策略以获取动态参数）
+        watchlist = await db.fetchall("""
+            SELECT w.*, g.screening_strategy_id, s.config as strategy_config
+            FROM watchlist w
+            LEFT JOIN candidate_groups g ON w.group_id = g.id
+            LEFT JOIN strategies s ON g.screening_strategy_id = s.id
+            WHERE w.account_id = ? AND w.status IN ('pending', 'watching')
+        """, (account_id,))
 
         if watchlist:
             print(f"[Monitor] 监控 {len(watchlist)} 只股票")
 
         for stock in watchlist:
             await self._check_stock_signals(account_id, stock)
+
+    def _resolve_trade_params(self, stock: Dict) -> tuple:
+        """从策略 config 解析止损止盈参数，无策略时回退 watchlist 行值
+
+        Returns:
+            (stop_loss_price, take_profit_price)
+        """
+        current_price = stock.get('buy_price', 0)  # 作为基准价
+        fallback_stop = stock.get('stop_loss_price', 0)
+        fallback_take = stock.get('take_profit_price', 0)
+
+        strategy_config_raw = stock.get('strategy_config')
+        if not strategy_config_raw:
+            return fallback_stop, fallback_take
+
+        try:
+            config = json.loads(strategy_config_raw) if isinstance(strategy_config_raw, str) else strategy_config_raw
+        except (json.JSONDecodeError, TypeError):
+            return fallback_stop, fallback_take
+
+        stop_loss_pct = config.get('stop_loss_pct', 0.05)
+        take_profit_pct = config.get('take_profit_pct', 0.15)
+
+        if current_price > 0:
+            return round(current_price * (1 - stop_loss_pct), 2), round(current_price * (1 + take_profit_pct), 2)
+        return fallback_stop, fallback_take
 
     async def _check_stock_signals(self, account_id: str, stock: Dict):
         """
@@ -102,10 +132,11 @@ class TradingMonitor:
         """
         stock_code = stock.get('stock_code')
         buy_price = stock.get('buy_price', 0)
-        stop_loss = stock.get('stop_loss_price', 0)
-        take_profit = stock.get('take_profit_price', 0)
         target_quantity = stock.get('target_quantity', 100)
         status = stock.get('status')
+
+        # 从策略 config 解析止损止盈（优先），无策略时回退 watchlist 行值
+        stop_loss, take_profit = self._resolve_trade_params(stock)
 
         # 获取交易网关
         gateway = None

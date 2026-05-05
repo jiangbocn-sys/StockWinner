@@ -9,11 +9,15 @@
             <el-icon><Search /></el-icon>
             选股
           </el-button>
-          <el-button type="danger" @click="confirmClearWatchlist" :disabled="watchlist.length === 0">
-            <el-icon><Delete /></el-icon>
-            清空已选
+          <el-button type="success" @click="showCreateGroupDialog = true">
+            <el-icon><Plus /></el-icon>
+            新建候选组
           </el-button>
-          <el-button @click="loadWatchlist">
+          <el-button :disabled="!selectedGroupId" @click="startImport">
+            <el-icon><Upload /></el-icon>
+            导入文件
+          </el-button>
+          <el-button @click="loadAll">
             <el-icon><Refresh /></el-icon>
             刷新
           </el-button>
@@ -32,25 +36,16 @@
           <span>已处理：{{ screeningProgress.processed }}/{{ screeningProgress.total }}</span>
           <span>已匹配：{{ screeningProgress.matched }} 只</span>
           <span v-if="screeningProgress.currentStock">当前：{{ screeningProgress.currentStock }}</span>
-          <span v-if="screeningProgress.estimatedRemaining">预计剩余：{{ formatTime(screeningProgress.estimatedRemaining) }}</span>
         </div>
       </el-card>
 
       <!-- 本地数据状态 -->
       <el-card class="status-card">
         <el-descriptions :column="5" border>
-          <el-descriptions-item label="本地股票数">
-            {{ dataStats.total_stocks || 0 }}
-          </el-descriptions-item>
-          <el-descriptions-item label="K 线数据量">
-            {{ dataStats.total_records || 0 }}
-          </el-descriptions-item>
-          <el-descriptions-item label="最新日期">
-            {{ dataStats.latest_date || '无数据' }}
-          </el-descriptions-item>
-          <el-descriptions-item label="最早日期">
-            {{ dataStats.earliest_date || '无数据' }}
-          </el-descriptions-item>
+          <el-descriptions-item label="本地股票数">{{ dataStats.total_stocks || 0 }}</el-descriptions-item>
+          <el-descriptions-item label="K 线数据量">{{ dataStats.total_records || 0 }}</el-descriptions-item>
+          <el-descriptions-item label="最新日期">{{ dataStats.latest_date || '无数据' }}</el-descriptions-item>
+          <el-descriptions-item label="最早日期">{{ dataStats.earliest_date || '无数据' }}</el-descriptions-item>
           <el-descriptions-item label="数据源">
             <el-tag :type="dataStats.total_stocks > 0 ? 'success' : 'warning'" size="small">
               {{ dataStats.total_stocks > 0 ? '本地' : 'SDK' }}
@@ -67,80 +62,228 @@
               {{ monitoringRunning ? '运行中' : '已停止' }}
             </el-tag>
           </el-descriptions-item>
-          <el-descriptions-item label="Watchlist 数量">
-            {{ watchlist.length }}
-          </el-descriptions-item>
-          <el-descriptions-item label="待处理">
-            {{ watchlist.filter(w => w.status === 'pending').length }}
-          </el-descriptions-item>
+          <el-descriptions-item label="当前候选组">{{ currentGroup?.label || '未选择' }}</el-descriptions-item>
+          <el-descriptions-item label="候选股票数">{{ currentStocks.length }}</el-descriptions-item>
         </el-descriptions>
       </el-card>
 
-      <!-- Watchlist 列表 -->
-      <el-card>
-        <template #header>
-          <div class="card-header">
-            <span>候选股票池</span>
-            <el-radio-group v-model="filterStatus" size="small" @change="loadWatchlist">
-              <el-radio-button label="">全部</el-radio-button>
-              <el-radio-button label="pending">待观察</el-radio-button>
-              <el-radio-button label="watching">观察中</el-radio-button>
-              <el-radio-button label="bought">已买入</el-radio-button>
-              <el-radio-button label="sold">已卖出</el-radio-button>
-            </el-radio-group>
-          </div>
-        </template>
-
-        <el-table :data="watchlist" stripe style="width: 100%" v-loading="loading">
-          <el-table-column prop="stock_code" label="股票代码" width="120" />
-          <el-table-column prop="stock_name" label="股票名称" width="120" />
-          <el-table-column prop="reason" label="入选原因" min-width="180" show-overflow-tooltip />
-          <el-table-column prop="buy_price" label="买入价" width="90" align="right">
-            <template #default="{ row }">¥{{ row.buy_price?.toFixed(2) }}</template>
-          </el-table-column>
-          <el-table-column prop="stop_loss_price" label="止损价" width="90" align="right">
-            <template #default="{ row }">¥{{ row.stop_loss_price?.toFixed(2) }}</template>
-          </el-table-column>
-          <el-table-column prop="take_profit_price" label="止盈价" width="90" align="right">
-            <template #default="{ row }">¥{{ row.take_profit_price?.toFixed(2) }}</template>
-          </el-table-column>
-          <el-table-column prop="target_quantity" label="数量" width="80" align="right" />
-          <el-table-column prop="status" label="状态" width="90">
-            <template #default="{ row }">
-              <el-tag :type="getStatusType(row.status)" size="small">
-                {{ getStatusText(row.status) }}
-              </el-tag>
+      <!-- 左右分栏：候选组 + 股票列表 -->
+      <el-row :gutter="16" class="main-row">
+        <!-- 左侧：候选组列表 -->
+        <el-col :span="5">
+          <el-card class="group-card">
+            <template #header>
+              <div class="card-header">
+                <span>候选组</span>
+              </div>
             </template>
-          </el-table-column>
-          <el-table-column prop="created_at" label="入选时间" width="160" />
-          <el-table-column label="操作" fixed="right" width="200">
-            <template #default="{ row }">
-              <el-button type="primary" size="small" @click="editStock(row)">
-                编辑
-              </el-button>
-              <el-button type="danger" size="small" @click="removeStock(row)">
-                移除
-              </el-button>
+
+            <div class="group-list" v-loading="groupsLoading">
+              <div
+                v-for="group in candidateGroups"
+                :key="group.id"
+                class="group-item"
+                :class="{ active: selectedGroupId === group.id }"
+                @click="selectGroup(group)"
+              >
+                <div class="group-info">
+                  <el-tag :type="group.group_type === 'manual' ? 'success' : 'primary'" size="small" class="group-tag">
+                    {{ group.group_type === 'manual' ? '自建' : '策略' }}
+                  </el-tag>
+                  <span class="group-name">{{ group.name }}</span>
+                </div>
+                <span class="group-count">{{ group.stock_count }} 只</span>
+                <el-dropdown v-if="group.group_type === 'manual'" trigger="click" class="group-actions" @command="(cmd) => handleGroupAction(cmd, group)">
+                  <el-icon><MoreFilled /></el-icon>
+                  <template #dropdown>
+                    <el-dropdown-menu>
+                      <el-dropdown-item command="rename">重命名</el-dropdown-item>
+                      <el-dropdown-item command="associate">关联策略</el-dropdown-item>
+                      <el-dropdown-item command="schedule">调度设置</el-dropdown-item>
+                      <el-dropdown-item command="delete" divided>删除</el-dropdown-item>
+                    </el-dropdown-menu>
+                  </template>
+                </el-dropdown>
+              </div>
+
+              <el-empty v-if="!groupsLoading && candidateGroups.length === 0" description="暂无候选组" :image-size="60" />
+            </div>
+          </el-card>
+        </el-col>
+
+        <!-- 右侧：候选股列表 -->
+        <el-col :span="19">
+          <el-card>
+            <template #header>
+              <div class="card-header">
+                <span>{{ currentGroup?.label || '候选股票' }}</span>
+                <el-space>
+                  <el-radio-group v-model="filterStatus" size="small" @change="loadCurrentGroupStocks">
+                    <el-radio-button value="">全部</el-radio-button>
+                    <el-radio-button value="pending">待交易</el-radio-button>
+                    <el-radio-button value="watching">观察中</el-radio-button>
+                    <el-radio-button value="bought">已买入</el-radio-button>
+                    <el-radio-button value="sold">已卖出</el-radio-button>
+                  </el-radio-group>
+                  <el-button v-if="selectedGroupId" type="primary" size="small" @click="showAddStockDialog = true">
+                    <el-icon><Plus /></el-icon>
+                    添加股票
+                  </el-button>
+                  <el-button v-if="selectedStocks.length > 0" type="warning" size="small" @click="showBatchStatusDialog = true">
+                    批量修改状态 ({{ selectedStocks.length }})
+                  </el-button>
+                </el-space>
+              </div>
             </template>
-          </el-table-column>
-        </el-table>
 
-        <el-empty v-if="!loading && watchlist.length === 0" description="暂无候选股票，运行选股服务添加股票" />
-      </el-card>
+            <el-table :data="currentStocks" stripe style="width: 100%" v-loading="stocksLoading" @selection-change="handleStockSelectionChange">
+              <el-table-column type="selection" width="50" />
+              <el-table-column prop="stock_code" label="股票代码" width="120" />
+              <el-table-column prop="stock_name" label="股票名称" width="120" />
+              <el-table-column prop="reason" label="入选原因" min-width="180" show-overflow-tooltip />
+              <el-table-column prop="buy_price" label="买入价" width="90" align="right">
+                <template #default="{ row }">¥{{ row.buy_price?.toFixed(2) }}</template>
+              </el-table-column>
+              <el-table-column prop="stop_loss_price" label="止损价" width="90" align="right">
+                <template #default="{ row }">¥{{ row.stop_loss_price?.toFixed(2) }}</template>
+              </el-table-column>
+              <el-table-column prop="take_profit_price" label="止盈价" width="90" align="right">
+                <template #default="{ row }">¥{{ row.take_profit_price?.toFixed(2) }}</template>
+              </el-table-column>
+              <el-table-column prop="target_quantity" label="数量" width="80" align="right" />
+              <el-table-column prop="status" label="状态" width="90">
+                <template #default="{ row }">
+                  <el-tag :type="getStatusType(row.status)" size="small">{{ getStatusText(row.status) }}</el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column prop="created_at" label="入选时间" width="160" />
+              <el-table-column label="操作" fixed="right" width="200">
+                <template #default="{ row }">
+                  <el-button type="primary" size="small" @click="editStock(row)">编辑</el-button>
+                  <el-button type="danger" size="small" @click="removeStock(row)">移除</el-button>
+                </template>
+              </el-table-column>
+            </el-table>
 
-      <!-- 清空确认对话框 -->
-      <el-dialog v-model="showClearDialog" title="确认清空" width="400px">
-        <el-alert
-          :title="`确定要清空所有已选股票吗？（共 ${watchlist.length} 只）`"
-          description="此操作不可恢复，清空后需要重新选股添加"
-          type="warning"
-          :closable="false"
-        />
+            <el-empty v-if="!stocksLoading && currentStocks.length === 0" description="暂无候选股票，请添加或运行选股" />
+          </el-card>
+        </el-col>
+      </el-row>
+
+      <!-- 新建候选组对话框 -->
+      <el-dialog v-model="showCreateGroupDialog" title="新建候选组" width="450px">
+        <el-form :model="createGroupForm" label-width="100px">
+          <el-form-item label="组名" required>
+            <el-input v-model="createGroupForm.name" placeholder="如：关注组A、科技股" />
+          </el-form-item>
+          <el-form-item label="关联策略">
+            <el-select v-model="createGroupForm.screeningStrategyId" placeholder="可选" clearable style="width: 100%">
+              <el-option
+                v-for="s in screeningStrategies"
+                :key="s.id"
+                :label="s.name"
+                :value="s.id"
+              />
+            </el-select>
+          </el-form-item>
+        </el-form>
         <template #footer>
-          <el-button @click="showClearDialog = false">取消</el-button>
-          <el-button type="danger" @click="clearWatchlist" :loading="clearing">
-            {{ clearing ? '清空中...' : '确认清空' }}
-          </el-button>
+          <el-button @click="showCreateGroupDialog = false">取消</el-button>
+          <el-button type="primary" @click="createGroup" :loading="creatingGroup">创建</el-button>
+        </template>
+      </el-dialog>
+
+      <!-- 重命名对话框 -->
+      <el-dialog v-model="showRenameDialog" title="重命名候选组" width="400px">
+        <el-form :model="renameForm" label-width="80px">
+          <el-form-item label="新名称" required>
+            <el-input v-model="renameForm.name" />
+          </el-form-item>
+        </el-form>
+        <template #footer>
+          <el-button @click="showRenameDialog = false">取消</el-button>
+          <el-button type="primary" @click="renameGroup" :loading="renamingGroup">保存</el-button>
+        </template>
+      </el-dialog>
+
+      <!-- 关联策略对话框 -->
+      <el-dialog v-model="showAssociateDialog" title="关联选股策略" width="450px">
+        <el-form :model="associateForm" label-width="100px">
+          <el-form-item label="选股策略">
+            <el-select v-model="associateForm.screeningStrategyId" placeholder="选择策略" clearable style="width: 100%">
+              <el-option
+                v-for="s in screeningStrategies"
+                :key="s.id"
+                :label="s.name"
+                :value="s.id"
+              />
+            </el-select>
+          </el-form-item>
+        </el-form>
+        <template #footer>
+          <el-button @click="showAssociateDialog = false">取消</el-button>
+          <el-button type="primary" @click="associateStrategy" :loading="associatingStrategy">确认</el-button>
+        </template>
+      </el-dialog>
+
+      <!-- 手动添加股票对话框 -->
+      <el-dialog v-model="showAddStockDialog" title="添加候选股票" width="550px">
+        <el-form :model="addStockForm" label-width="100px">
+          <el-form-item label="添加方式">
+            <el-radio-group v-model="addStockForm.mode">
+              <el-radio value="code">输入代码</el-radio>
+              <el-radio value="pick">从市场选择</el-radio>
+            </el-radio-group>
+          </el-form-item>
+
+          <template v-if="addStockForm.mode === 'code'">
+            <el-form-item label="股票代码" required>
+              <el-input v-model="addStockForm.stockCode" placeholder="如 600000.SH 或 000001.SZ" />
+            </el-form-item>
+            <el-form-item label="股票名称">
+              <el-input v-model="addStockForm.stockName" placeholder="可选" />
+            </el-form-item>
+          </template>
+
+          <template v-if="addStockForm.mode === 'pick'">
+            <el-form-item label="选择股票" required>
+              <el-select
+                v-model="addStockForm.selectedStock"
+                filterable remote
+                :remote-method="searchStocks"
+                :loading="searchingStocks"
+                placeholder="输入代码或名称搜索"
+                style="width: 100%"
+              >
+                <el-option
+                  v-for="s in stockSearchResults"
+                  :key="s.stock_code"
+                  :label="`${s.stock_code} - ${s.stock_name}`"
+                  :value="s"
+                />
+              </el-select>
+            </el-form-item>
+          </template>
+
+          <el-form-item label="买入价格">
+            <el-input-number v-model="addStockForm.buyPrice" :precision="2" :step="0.1" :min="0" />
+          </el-form-item>
+          <el-form-item label="止损价格">
+            <el-input-number v-model="addStockForm.stopLoss" :precision="2" :step="0.1" :min="0" />
+          </el-form-item>
+          <el-form-item label="止盈价格">
+            <el-input-number v-model="addStockForm.takeProfit" :precision="2" :step="0.1" :min="0" />
+          </el-form-item>
+          <el-form-item label="目标数量">
+            <el-input-number v-model="addStockForm.quantity" :min="100" :step="100" />
+          </el-form-item>
+          <el-form-item label="原因">
+            <el-input v-model="addStockForm.reason" type="textarea" :rows="2" />
+          </el-form-item>
+        </el-form>
+        <template #footer>
+          <el-button @click="showAddStockDialog = false">取消</el-button>
+          <el-button type="primary" @click="submitAddStock" :loading="addingStock">添加</el-button>
         </template>
       </el-dialog>
 
@@ -148,12 +291,11 @@
       <el-dialog v-model="showStrategySelectDialog" title="选择选股策略" width="500px">
         <el-alert
           title="选择策略进行选股"
-          description="选股结果将暂存到候选列表，经确认后才会添加到 watchlist"
+          description="选股结果将添加到对应候选组"
           type="info"
           :closable="false"
           style="margin-bottom: 20px"
         />
-
         <el-form :model="strategySelectForm" label-width="120px">
           <el-form-item label="选择策略" required>
             <el-select v-model="strategySelectForm.strategyId" placeholder="请选择策略" style="width: 100%">
@@ -166,32 +308,16 @@
               />
             </el-select>
           </el-form-item>
-
           <el-form-item label="数据源">
             <el-radio-group v-model="strategySelectForm.useLocal">
-              <el-radio :label="true">本地数据（快）</el-radio>
-              <el-radio :label="false">SDK 实时（慢）</el-radio>
+              <el-radio :value="true">本地数据（快）</el-radio>
+              <el-radio :value="false">SDK 实时（慢）</el-radio>
             </el-radio-group>
           </el-form-item>
-
-          <el-divider />
-
-          <div style="font-size: 13px; color: #606266;">
-            <p style="margin: 0 0 8px 0;"><strong>当前激活策略：</strong></p>
-            <ul style="margin: 0; padding-left: 20px;">
-              <li v-for="s in activeStrategies" :key="s.id">
-                <strong>{{ s.name }}</strong> - {{ s.description || '无描述' }}
-              </li>
-              <li v-if="activeStrategies.length === 0">暂无激活策略，请先在策略管理页面激活策略</li>
-            </ul>
-          </div>
         </el-form>
-
         <template #footer>
           <el-button @click="showStrategySelectDialog = false">取消</el-button>
-          <el-button type="primary" @click="runScreeningWithStrategy" :loading="screeningProgress.processing">
-            开始选股
-          </el-button>
+          <el-button type="primary" @click="runScreeningWithStrategy" :loading="screeningProgress.processing">开始选股</el-button>
         </template>
       </el-dialog>
 
@@ -204,7 +330,6 @@
           :closable="false"
           style="margin-bottom: 20px"
         />
-
         <el-table :data="candidates" stripe style="width: 100%" @selection-change="handleSelectionChange">
           <el-table-column type="selection" width="50" />
           <el-table-column prop="stock_code" label="股票代码" width="120" />
@@ -218,45 +343,26 @@
           </el-table-column>
           <el-table-column prop="created_at" label="时间" width="160" />
         </el-table>
-
         <template #footer>
           <el-button @click="cancelCandidates">取消</el-button>
-          <el-button type="danger" @click="rejectCandidates(false)" :loading="confirming">
-            拒绝未选
-          </el-button>
-          <el-button type="warning" @click="rejectCandidates(true)" :loading="confirming">
-            全部拒绝
-          </el-button>
-          <el-button type="primary" @click="confirmCandidates" :loading="confirming">
-            确认已选 ({{ selectedCandidates.length }})
-          </el-button>
+          <el-button type="danger" @click="rejectCandidates(false)" :loading="confirming">拒绝未选</el-button>
+          <el-button type="warning" @click="rejectCandidates(true)" :loading="confirming">全部拒绝</el-button>
+          <el-button type="primary" @click="confirmCandidates" :loading="confirming">确认已选 ({{ selectedCandidates.length }})</el-button>
         </template>
       </el-dialog>
 
       <!-- 编辑对话框 -->
       <el-dialog v-model="showEditDialog" title="编辑股票" width="500px">
         <el-form :model="editingStock" label-width="100px">
-          <el-form-item label="股票代码">
-            <el-input v-model="editingStock.stock_code" disabled />
-          </el-form-item>
-          <el-form-item label="股票名称">
-            <el-input v-model="editingStock.stock_name" />
-          </el-form-item>
-          <el-form-item label="买入价格">
-            <el-input-number v-model="editingStock.buy_price" :precision="2" :step="0.1" />
-          </el-form-item>
-          <el-form-item label="止损价格">
-            <el-input-number v-model="editingStock.stop_loss_price" :precision="2" :step="0.1" />
-          </el-form-item>
-          <el-form-item label="止盈价格">
-            <el-input-number v-model="editingStock.take_profit_price" :precision="2" :step="0.1" />
-          </el-form-item>
-          <el-form-item label="目标数量">
-            <el-input-number v-model="editingStock.target_quantity" :min="100" :step="100" />
-          </el-form-item>
+          <el-form-item label="股票代码"><el-input v-model="editingStock.stock_code" disabled /></el-form-item>
+          <el-form-item label="股票名称"><el-input v-model="editingStock.stock_name" /></el-form-item>
+          <el-form-item label="买入价格"><el-input-number v-model="editingStock.buy_price" :precision="2" :step="0.1" /></el-form-item>
+          <el-form-item label="止损价格"><el-input-number v-model="editingStock.stop_loss_price" :precision="2" :step="0.1" /></el-form-item>
+          <el-form-item label="止盈价格"><el-input-number v-model="editingStock.take_profit_price" :precision="2" :step="0.1" /></el-form-item>
+          <el-form-item label="目标数量"><el-input-number v-model="editingStock.target_quantity" :min="100" :step="100" /></el-form-item>
           <el-form-item label="状态">
             <el-select v-model="editingStock.status">
-              <el-option label="待观察" value="pending" />
+              <el-option label="待交易" value="pending" />
               <el-option label="观察中" value="watching" />
               <el-option label="已买入" value="bought" />
               <el-option label="已卖出" value="sold" />
@@ -269,14 +375,183 @@
           <el-button type="primary" @click="saveStock">保存</el-button>
         </template>
       </el-dialog>
+
+      <!-- 文件导入对话框 -->
+      <el-dialog v-model="showImportDialog" title="导入股票文件" width="700px" :close-on-click-modal="false">
+        <!-- Step 1: 选择文件 -->
+        <div v-if="importStep === 'select'" class="import-select">
+          <el-alert title="支持 .txt / .csv / .json / .md 文件" :closable="false" type="info" style="margin-bottom: 16px" />
+          <div class="file-upload-area" @click="$refs.fileInput.click()" @dragover.prevent @drop.prevent="handleFileDrop">
+            <el-icon :size="40" color="#909399"><Upload /></el-icon>
+            <p>点击选择文件或拖拽文件到此处</p>
+            <input ref="fileInput" type="file" accept=".md,.json,.csv,.txt" style="display: none" @change="handleFileSelect" />
+          </div>
+          <div v-if="importParsing" class="parsing-status">
+            <el-icon class="is-loading"><Loading /></el-icon>
+            <span>正在解析文件...</span>
+          </div>
+        </div>
+
+        <!-- Step 2: 预览确认 -->
+        <div v-if="importStep === 'preview'">
+          <el-alert :title="importSummaryText" type="info" :closable="false" style="margin-bottom: 12px" />
+          <el-table :data="importResults" stripe style="width: 100%" max-height="400" @selection-change="handleImportSelection">
+            <el-table-column type="selection" width="50" :selectable="r => r.status === 'new' || r.status === 'duplicate_other'" />
+            <el-table-column prop="raw_code" label="原始代码" width="100" />
+            <el-table-column prop="stock_code" label="股票代码" width="120" />
+            <el-table-column prop="stock_name" label="股票名称" width="120" />
+            <el-table-column prop="existing_groups" label="已存在于" width="120" show-overflow-tooltip />
+            <el-table-column label="状态" width="110">
+              <template #default="{ row }">
+                <el-tag :type="importStatusType(row.status)" size="small">{{ importStatusText(row.status) }}</el-tag>
+              </template>
+            </el-table-column>
+          </el-table>
+          <div class="import-confirm-footer">
+            <span>已选 {{ importSelected.length }} 只</span>
+            <el-button type="primary" @click="confirmImport" :loading="importingStocks">确认导入</el-button>
+          </div>
+        </div>
+      </el-dialog>
+
+      <!-- 调度设置对话框 -->
+      <el-dialog v-model="showScheduleDialog" title="任务调度设置" width="700px">
+        <el-alert :title="`当前组：${scheduleForm.groupName}`" :closable="false" type="info" style="margin-bottom: 16px" />
+
+        <div v-loading="tasksLoading">
+          <el-table :data="strategyTasks" stripe style="width: 100%">
+            <el-table-column label="类型" width="80">
+              <template #default="{ row }">
+                <el-tag :type="row.task_type === 'builtin' ? 'warning' : 'primary'" size="small">
+                  {{ row.task_type === 'builtin' ? '内置' : '策略' }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="名称" width="160">
+              <template #default="{ row }">
+                {{ row.task_name || row.strategy_name || '-' }}
+              </template>
+            </el-table-column>
+            <el-table-column prop="cron_expression" label="Cron" width="130" />
+            <el-table-column label="状态" width="80">
+              <template #default="{ row }">
+                <el-tag :type="row.enabled ? 'success' : 'info'" size="small">{{ row.enabled ? '启用' : '停用' }}</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="上次执行" width="170">
+              <template #default="{ row }">
+                <span v-if="row.last_run_at">{{ row.last_run_at?.split('.')[0] }}</span>
+                <span v-else style="color: #999">未执行</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="上次状态" width="90">
+              <template #default="{ row }">
+                <el-tag v-if="row.last_status" :type="{success:'success',error:'danger',running:'warning'}[row.last_status] || 'info'" size="small">
+                  {{ {success:'成功',error:'失败',running:'运行中'}[row.last_status] || row.last_status }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="操作" width="200">
+              <template #default="{ row }">
+                <el-button type="success" size="small" @click="runTask(row)" :disabled="runningTask === row.id">手动执行</el-button>
+                <el-button type="danger" size="small" @click="deleteTask(row)">删除</el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+          <el-empty v-if="!tasksLoading && strategyTasks.length === 0" description="暂无任务" />
+        </div>
+
+        <el-divider />
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px">
+          <span style="font-weight: 600">添加任务</span>
+          <el-button size="small" @click="scanTasks" :loading="scanningTasks">
+            <el-icon><Refresh /></el-icon>
+            扫描插件
+          </el-button>
+        </div>
+        <el-form :model="newTaskForm" label-width="100px">
+          <el-form-item label="任务类型">
+            <el-radio-group v-model="newTaskForm.taskType">
+              <el-radio value="builtin">内置功能</el-radio>
+              <el-radio value="strategy">策略任务</el-radio>
+            </el-radio-group>
+          </el-form-item>
+          <el-form-item v-if="newTaskForm.taskType === 'builtin'" label="选择功能">
+            <el-select v-model="newTaskForm.module" placeholder="选择功能" style="width: 100%">
+              <el-option-group
+                v-for="group in taskCategoryGroups"
+                :key="group.category"
+                :label="group.category"
+              >
+                <el-option
+                  v-for="t in group.tasks"
+                  :key="t.module"
+                  :label="t.name + (t.source === 'user' ? ' ★' : '')"
+                  :value="t.module"
+                >
+                  <span>{{ t.name }}</span>
+                  <span v-if="t.source === 'user'" style="color: #E6A23C; margin-left: 4px">★</span>
+                  <span v-if="!t.available" style="color: #F56C6C; margin-left: 4px">(加载失败)</span>
+                </el-option>
+              </el-option-group>
+            </el-select>
+          </el-form-item>
+          <el-form-item v-if="newTaskForm.taskType === 'strategy'" label="关联策略">
+            <el-select v-model="newTaskForm.strategyId" placeholder="选择策略" style="width: 100%">
+              <el-option
+                v-for="s in taskStrategies"
+                :key="s.id"
+                :label="s.name + (s.code_type === 'python' ? ' [代码]' : '')"
+                :value="s.id"
+              />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="Cron 表达式">
+            <el-input v-model="newTaskForm.cron" placeholder="如: 0 14 * * 1-5" />
+            <div class="hint">
+              快捷模板：<br/>
+              每个交易日14:00 → <code>0 14 * * 1-5</code><br/>
+              每天14:00 → <code>0 14 * * *</code><br/>
+              每小时 → <code>0 * * * *</code>
+            </div>
+          </el-form-item>
+          <el-form-item>
+            <el-button type="primary" @click="createTask" :loading="creatingTask">创建任务</el-button>
+          </el-form-item>
+        </el-form>
+      </el-dialog>
+
+      <!-- 批量修改状态对话框 -->
+      <el-dialog v-model="showBatchStatusDialog" title="批量修改状态" width="450px">
+        <el-alert :title="`已选中 ${selectedStocks.length} 只股票`" :closable="false" type="info" style="margin-bottom: 16px" />
+        <el-form label-width="100px">
+          <el-form-item label="目标状态">
+            <el-select v-model="batchStatusForm.status" style="width: 100%">
+              <el-option label="pending — 待交易" value="pending" />
+              <el-option label="watching — 观察中" value="watching" />
+              <el-option label="sold — 已卖出" value="sold" />
+              <el-option label="ignored — 已忽略" value="ignored" />
+              <el-option label="bought — 已买入" value="bought" />
+            </el-select>
+            <div class="hint">
+              <code>pending</code> → 待交易（监控服务会轮询）<br/>
+              <code>watching</code> → 监控中（持仓止损止盈）<br/>
+              <code>sold</code> / <code>ignored</code> → 解除监控，可安全删除组
+            </div>
+          </el-form-item>
+          <el-form-item>
+            <el-button type="primary" @click="executeBatchStatus" :loading="batchStatusRunning">确认修改</el-button>
+          </el-form-item>
+        </el-form>
+      </el-dialog>
     </el-main>
   </div>
 </template>
 
 <script setup>
-import { ref, reactive, onMounted, computed } from 'vue'
-import { ElMessage } from 'element-plus'
-import { Search, Refresh, Delete } from '@element-plus/icons-vue'
+import { ref, reactive, onMounted, computed, watch } from 'vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { Search, Refresh, Plus, MoreFilled, Upload, Loading } from '@element-plus/icons-vue'
 import { useAccountStore } from '../stores/account'
 import NavBar from '../components/NavBar.vue'
 
@@ -284,139 +559,814 @@ const accountStore = useAccountStore()
 const currentAccountId = computed(() => accountStore.currentAccountId)
 const currentAccount = computed(() => accountStore.currentAccount)
 
-const loading = ref(false)
-const watchlist = ref([])
+// 候选组
+const candidateGroups = ref([])
+const selectedGroupId = ref(null)
+const groupsLoading = ref(false)
+const currentGroup = computed(() => candidateGroups.value.find(g => g.id === selectedGroupId.value))
+
+// 当前组股票
+const currentStocks = ref([])
+const stocksLoading = ref(false)
 const filterStatus = ref('')
+
+// 服务状态
+const loading = ref(false)
 const monitoringRunning = ref(false)
-const showEditDialog = ref(false)
-const showClearDialog = ref(false)
+const dataStats = ref({ total_stocks: 0, total_records: 0, latest_date: null, earliest_date: null })
+
+// 策略
+const strategies = ref([])
+const screeningStrategies = computed(() => strategies.value.filter(s => s.strategy_type === 'screening'))
+// 调度任务可选：screening 类型或代码型策略
+const taskStrategies = computed(() => {
+  return strategies.value.filter(s => s.strategy_type === 'screening' || s.code_type === 'python')
+})
+
+// 任务插件按 category 分组
+const taskCategoryGroups = computed(() => {
+  const groups = {}
+  for (const t of taskRegistry.value) {
+    if (!groups[t.category]) groups[t.category] = []
+    groups[t.category].push(t)
+  }
+  return Object.entries(groups).map(([category, tasks]) => ({ category, tasks }))
+})
+
+// 对话框
+const showCreateGroupDialog = ref(false)
+const showRenameDialog = ref(false)
+const showAssociateDialog = ref(false)
+const showAddStockDialog = ref(false)
 const showStrategySelectDialog = ref(false)
 const showCandidatesDialog = ref(false)
+const showEditDialog = ref(false)
 const clearing = ref(false)
 const confirming = ref(false)
-const strategySelectForm = reactive({
-  strategyId: null,
-  useLocal: true
-})
+const creatingGroup = ref(false)
+const renamingGroup = ref(false)
+const associatingStrategy = ref(false)
+const addingStock = ref(false)
+const searchingStocks = ref(false)
 
-const strategies = ref([])
+// 文件导入
+const showImportDialog = ref(false)
+const importStep = ref('select') // select | preview
+const importParsing = ref(false)
+const importingStocks = ref(false)
+const importResults = ref([])
+const importSelected = ref([])
+const fileInput = ref(null)
+
+// 批量状态修改
+const showBatchStatusDialog = ref(false)
+const selectedStocks = ref([])
+const batchStatusRunning = ref(false)
+const batchStatusForm = reactive({ status: 'sold' })
+
+// 调度
+const showScheduleDialog = ref(false)
+const tasksLoading = ref(false)
+const strategyTasks = ref([])
+const runningTask = ref(null)
+const creatingTask = ref(false)
+const scanningTasks = ref(false)
+const taskRegistry = ref([])
+const scheduleForm = reactive({ groupId: null, groupName: '' })
+const newTaskForm = reactive({ taskType: 'builtin', module: null, strategyId: null, cron: '' })
+
+// 表单
+const createGroupForm = reactive({ name: '', screeningStrategyId: null })
+const renameForm = reactive({ groupId: null, name: '' })
+const associateForm = reactive({ groupId: null, screeningStrategyId: null })
+const addStockForm = reactive({
+  mode: 'code',
+  stockCode: '',
+  stockName: '',
+  selectedStock: null,
+  buyPrice: null,
+  stopLoss: null,
+  takeProfit: null,
+  quantity: 100,
+  reason: '手动添加'
+})
+const strategySelectForm = reactive({ strategyId: null, useLocal: true })
+const editingStock = reactive({ stock_code: '', stock_name: '', buy_price: 0, stop_loss_price: 0, take_profit_price: 0, target_quantity: 100, status: 'pending' })
+
+// 候选
 const candidates = ref([])
 const selectedCandidates = ref([])
-const dataStats = ref({
-  total_stocks: 0,
-  total_records: 0,
-  latest_date: null,
-  earliest_date: null
-})
-const screeningProgress = reactive({
-  processing: false,
-  total: 0,
-  processed: 0,
-  matched: 0,
-  currentStock: '',
-  estimatedRemaining: 0,
-  percent: 0,
-  status: ''
-})
 
+// 选股进度
+const screeningProgress = reactive({ processing: false, total: 0, processed: 0, matched: 0, currentStock: '', percent: 0, status: '' })
 let progressPollingTimer = null
 
-// 格式化进度显示
+const stockSearchResults = ref([])
+
 const formatProgress = (percent) => `${percent}%`
 
-// 格式化时间
-const formatTime = (seconds) => {
-  if (seconds < 60) return `${seconds}秒`
-  const mins = Math.floor(seconds / 60)
-  const secs = seconds % 60
-  return `${mins}分${secs}秒`
+// ========== 候选组管理 ==========
+
+const loadGroups = async () => {
+  groupsLoading.value = true
+  try {
+    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/candidate-groups`)
+    const data = await res.json()
+    candidateGroups.value = data.groups || []
+  } catch (e) {
+    console.error('加载候选组失败:', e)
+  } finally {
+    groupsLoading.value = false
+  }
 }
 
-// 轮询选股进度
-const pollProgress = async () => {
+const selectGroup = (group) => {
+  selectedGroupId.value = group.id
+  filterStatus.value = ''
+  loadCurrentGroupStocks()
+}
+
+const createGroup = async () => {
+  if (!createGroupForm.name.trim()) {
+    ElMessage.warning('请输入组名')
+    return
+  }
+  creatingGroup.value = true
   try {
-    const response = await fetch(`/api/v1/ui/${currentAccountId.value}/screening/status`)
-    const data = await response.json()
+    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/candidate-groups`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: createGroupForm.name,
+        screening_strategy_id: createGroupForm.screeningStrategyId || null
+      })
+    })
+    const data = await res.json()
+    if (res.ok) {
+      ElMessage.success(`候选组「${createGroupForm.name}」已创建`)
+      showCreateGroupDialog.value = false
+      createGroupForm.name = ''
+      createGroupForm.screeningStrategyId = null
+      await loadGroups()
+    } else {
+      ElMessage.error(data.detail || '创建失败')
+    }
+  } catch (e) {
+    ElMessage.error('创建失败')
+  } finally {
+    creatingGroup.value = false
+  }
+}
 
-    if (data.progress) {
-      const progress = data.progress
-      screeningProgress.total = progress.total_stocks || 0
-      screeningProgress.processed = progress.processed || 0
-      screeningProgress.matched = progress.matched || 0
-      screeningProgress.currentStock = progress.current_stock || ''
-      screeningProgress.estimatedRemaining = progress.estimated_remaining || 0
+const handleGroupAction = (cmd, group) => {
+  if (cmd === 'rename') {
+    renameForm.groupId = group.id
+    renameForm.name = group.name
+    showRenameDialog.value = true
+  } else if (cmd === 'associate') {
+    associateForm.groupId = group.id
+    associateForm.screeningStrategyId = group.screening_strategy_id
+    showAssociateDialog.value = true
+  } else if (cmd === 'schedule') {
+    scheduleForm.groupId = group.id
+    scheduleForm.groupName = group.name
+    showScheduleDialog.value = true
+    loadTasks()
+    loadTaskRegistry()
+  } else if (cmd === 'delete') {
+    handleDeleteGroup(group)
+  }
+}
 
-      if (screeningProgress.total > 0) {
-        screeningProgress.percent = Math.round((screeningProgress.processed / screeningProgress.total) * 100)
+const handleDeleteGroup = async (group, force = false) => {
+  try {
+    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/candidate-groups/${group.id}?force=${force}`, { method: 'DELETE' })
+    const data = await res.json()
+    if (res.ok && data.success) {
+      ElMessage.success('候选组已删除')
+      if (selectedGroupId.value === group.id) selectedGroupId.value = null
+      await loadGroups()
+    } else if (data.warning && !force) {
+      // 有监控中的股票，二次确认
+      ElMessageBox.confirm(
+        `候选组「${group.name}」包含以下监控中的股票：\n\n${data.details}\n\n删除后将解除这些股票的监控。是否继续？`,
+        '确认删除',
+        { type: 'warning', confirmButtonText: '确认删除', cancelButtonText: '取消' }
+      ).then(() => {
+        handleDeleteGroup(group, true)
+      }).catch(() => {})
+    } else {
+      ElMessage.error(data.message || data.detail || '删除失败')
+    }
+  } catch (e) {
+    ElMessage.error('删除失败')
+  }
+}
+
+const renameGroup = async () => {
+  if (!renameForm.name.trim()) {
+    ElMessage.warning('请输入组名')
+    return
+  }
+  renamingGroup.value = true
+  try {
+    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/candidate-groups/${renameForm.groupId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: renameForm.name })
+    })
+    if (res.ok) {
+      ElMessage.success('重命名成功')
+      showRenameDialog.value = false
+      await loadGroups()
+    } else {
+      const data = await res.json()
+      ElMessage.error(data.detail || '重命名失败')
+    }
+  } catch (e) {
+    ElMessage.error('重命名失败')
+  } finally {
+    renamingGroup.value = false
+  }
+}
+
+const associateStrategy = async () => {
+  associatingStrategy.value = true
+  try {
+    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/candidate-groups/${associateForm.groupId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ screening_strategy_id: associateForm.screeningStrategyId || null })
+    })
+    if (res.ok) {
+      ElMessage.success('策略关联成功')
+      showAssociateDialog.value = false
+      await loadGroups()
+    } else {
+      const data = await res.json()
+      ElMessage.error(data.detail || '关联失败')
+    }
+  } catch (e) {
+    ElMessage.error('关联失败')
+  } finally {
+    associatingStrategy.value = false
+  }
+}
+
+// ========== 策略任务 ==========
+
+const loadTasks = async () => {
+  tasksLoading.value = true
+  try {
+    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/strategy-tasks`)
+    const data = await res.json()
+    strategyTasks.value = data.tasks || []
+  } catch (e) {
+    console.error('加载任务失败:', e)
+  } finally {
+    tasksLoading.value = false
+  }
+}
+
+const loadTaskRegistry = async () => {
+  try {
+    const res = await fetch(`/api/v1/ui/scheduler/task-registry`)
+    const data = await res.json()
+    taskRegistry.value = data.tasks || []
+    // 默认选中第一个可用任务
+    if (taskRegistry.value.length > 0 && !newTaskForm.module) {
+      const first = taskRegistry.value.find(t => t.available)
+      if (first) newTaskForm.module = first.module
+    }
+  } catch (e) {
+    console.error('加载任务注册表失败:', e)
+  }
+}
+
+const scanTasks = async () => {
+  scanningTasks.value = true
+  try {
+    const res = await fetch(`/api/v1/ui/scheduler/scan-tasks`, { method: 'POST' })
+    const data = await res.json()
+    taskRegistry.value = data.tasks || []
+    ElMessage.success(data.message || '扫描完成')
+  } catch (e) {
+    ElMessage.error('扫描失败')
+  } finally {
+    scanningTasks.value = false
+  }
+}
+
+const createTask = async () => {
+  if (newTaskForm.taskType === 'builtin' && !newTaskForm.module) {
+    ElMessage.warning('请选择功能')
+    return
+  }
+  if (newTaskForm.taskType === 'strategy' && !newTaskForm.strategyId) {
+    ElMessage.warning('请选择策略')
+    return
+  }
+  if (!newTaskForm.cron.trim()) {
+    ElMessage.warning('请输入 Cron 表达式')
+    return
+  }
+  creatingTask.value = true
+  try {
+    const body = {
+      task_type: newTaskForm.taskType,
+      group_id: scheduleForm.groupId,
+      cron_expression: newTaskForm.cron,
+      enabled: 1,
+    }
+    if (newTaskForm.taskType === 'builtin') {
+      body.module = newTaskForm.module
+    } else {
+      body.strategy_id = newTaskForm.strategyId
+    }
+    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/strategy-tasks`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    })
+    const data = await res.json()
+    if (res.ok) {
+      ElMessage.success(data.message || '任务已创建，重启后端服务生效')
+      newTaskForm.module = null
+      newTaskForm.strategyId = null
+      newTaskForm.cron = ''
+      await loadTasks()
+    } else {
+      ElMessage.error(data.detail || '创建失败')
+    }
+  } catch (e) {
+    ElMessage.error('创建失败')
+  } finally {
+    creatingTask.value = false
+  }
+}
+
+const runTask = async (task) => {
+  runningTask.value = task.id
+  try {
+    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/strategy-tasks/${task.id}/run`, {
+      method: 'POST'
+    })
+    const data = await res.json()
+    if (res.ok) {
+      ElMessage.success('任务已启动')
+      setTimeout(() => loadTasks(), 2000)
+    } else {
+      ElMessage.error(data.detail || '执行失败')
+    }
+  } catch (e) {
+    ElMessage.error('执行失败')
+  } finally {
+    runningTask.value = null
+  }
+}
+
+const deleteTask = async (task) => {
+  try {
+    await ElMessageBox.confirm('确定删除该任务？', '确认删除', { type: 'warning' })
+    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/strategy-tasks/${task.id}`, { method: 'DELETE' })
+    if (res.ok) {
+      ElMessage.success('任务已删除，重启后端服务生效')
+      await loadTasks()
+    }
+  } catch (e) {
+    if (e !== 'cancel') ElMessage.error('删除失败')
+  }
+}
+
+// ========== 股票管理 ==========
+
+const loadCurrentGroupStocks = async () => {
+  if (!selectedGroupId.value) {
+    currentStocks.value = []
+    return
+  }
+  stocksLoading.value = true
+  try {
+    let url = `/api/v1/ui/${currentAccountId.value}/watchlist?group_id=${selectedGroupId.value}`
+    if (filterStatus.value) url += `&status=${filterStatus.value}`
+    const res = await fetch(url)
+    const data = await res.json()
+    currentStocks.value = data.watchlist || []
+  } catch (e) {
+    console.error('加载股票失败:', e)
+  } finally {
+    stocksLoading.value = false
+  }
+}
+
+// 搜索股票（从 stock_base_info）
+const searchStocks = async (query) => {
+  if (!query || query.length < 2) {
+    stockSearchResults.value = []
+    return
+  }
+  searchingStocks.value = true
+  try {
+    const res = await fetch(`/api/v1/ui/databases/kline/tables/stock_base_info/data?stock_code=${encodeURIComponent(query)}&page=1&page_size=20`)
+    const data = await res.json()
+    if (data.success && data.data) {
+      stockSearchResults.value = data.data
+    } else {
+      stockSearchResults.value = []
+    }
+  } catch (e) {
+    console.error('搜索股票失败:', e)
+  } finally {
+    searchingStocks.value = false
+  }
+}
+
+const submitAddStock = async () => {
+  let stockCode = addStockForm.stockCode
+  let stockName = addStockForm.stockName
+  if (addStockForm.mode === 'pick') {
+    if (!addStockForm.selectedStock) {
+      ElMessage.warning('请选择股票')
+      return
+    }
+    stockCode = addStockForm.selectedStock.stock_code
+    stockName = addStockForm.selectedStock.stock_name
+  }
+  if (!stockCode) {
+    ElMessage.warning('请输入股票代码')
+    return
+  }
+
+  addingStock.value = true
+  try {
+    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/watchlist`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        stock_code: stockCode,
+        stock_name: stockName || stockCode,
+        group_id: selectedGroupId.value,
+        buy_price: addStockForm.buyPrice,
+        stop_loss_price: addStockForm.stopLoss,
+        take_profit_price: addStockForm.takeProfit,
+        target_quantity: addStockForm.quantity,
+        reason: addStockForm.reason || '手动添加'
+      })
+    })
+    const data = await res.json()
+    if (res.ok) {
+      ElMessage.success(`已添加 ${stockCode}`)
+      showAddStockDialog.value = false
+      resetAddStockForm()
+      await loadCurrentGroupStocks()
+      await loadGroups()
+    } else {
+      ElMessage.error(data.detail || '添加失败')
+    }
+  } catch (e) {
+    ElMessage.error('添加失败')
+  } finally {
+    addingStock.value = false
+  }
+}
+
+const resetAddStockForm = () => {
+  addStockForm.stockCode = ''
+  addStockForm.stockName = ''
+  addStockForm.selectedStock = null
+  addStockForm.buyPrice = null
+  addStockForm.stopLoss = null
+  addStockForm.takeProfit = null
+  addStockForm.quantity = 100
+  addStockForm.reason = '手动添加'
+}
+
+// ========== 文件导入 ==========
+
+const importSummaryText = computed(() => {
+  const s = importResults.value
+  const newCount = s.filter(r => r.status === 'new').length
+  const dupInGroup = s.filter(r => r.status === 'duplicate_in_group').length
+  const dupOther = s.filter(r => r.status === 'duplicate_other').length
+  const invalid = s.filter(r => r.status === 'invalid').length
+  return `共解析 ${s.length} 项：${newCount} 只可添加，${dupInGroup} 只本组已有，${dupOther} 只其他组有，${invalid} 项无效`
+})
+
+const importStatusType = (status) => ({ new: 'success', duplicate_in_group: 'warning', duplicate_other: 'info', invalid: 'danger' }[status] || 'info')
+const importStatusText = (status) => ({ new: '可添加', duplicate_in_group: '本组已有', duplicate_other: '其他组有', invalid: '无效' }[status] || status)
+
+const startImport = () => {
+  if (!selectedGroupId.value) {
+    ElMessage.warning('请先选择候选组')
+    return
+  }
+  importStep.value = 'select'
+  importResults.value = []
+  importSelected.value = []
+  showImportDialog.value = true
+}
+
+const handleFileSelect = (e) => {
+  const file = e.target.files[0]
+  if (file) parseFile(file)
+  // reset input so same file can be selected again
+  e.target.value = ''
+}
+
+const handleFileDrop = (e) => {
+  const file = e.dataTransfer.files[0]
+  if (file) parseFile(file)
+}
+
+const parseFile = (file) => {
+  const ext = file.name.split('.').pop().toLowerCase()
+  if (!['txt', 'csv', 'json', 'md'].includes(ext)) {
+    ElMessage.warning('不支持的文件格式，请上传 .txt/.csv/.json/.md 文件')
+    return
+  }
+  importParsing.value = true
+  const reader = new FileReader()
+  reader.onload = (e) => {
+    try {
+      const text = e.target.result
+      let items = []
+      switch (ext) {
+        case 'txt': items = parseTxt(text); break
+        case 'csv': items = parseCsv(text); break
+        case 'json': items = parseJson(text); break
+        case 'md': items = parseMd(text); break
       }
+      // 限制 5000 条
+      if (items.length > 5000) {
+        items = items.slice(0, 5000)
+        ElMessage.warning('文件超过 5000 条，已截取前 5000 条')
+      }
+      if (items.length === 0) {
+        ElMessage.warning('未解析到有效数据')
+        importParsing.value = false
+        return
+      }
+      // 请求服务端预览
+      previewImport(items)
+    } catch (err) {
+      ElMessage.error('文件解析失败：' + err.message)
+      importParsing.value = false
+    }
+  }
+  reader.readAsText(file)
+}
 
-      // 选股完成的判断：phase 为 done 或者已处理数量等于总数
-      const isCompleted = progress.current_phase === 'done' ||
-                          (progress.total_stocks > 0 && progress.processed >= progress.total_stocks)
+// 解析 .txt: 每行一个，支持 "code name" 空格/tab 分隔
+const parseTxt = (text) => {
+  const items = []
+  for (const line of text.split('\n')) {
+    const trimmed = line.trim()
+    if (!trimmed || trimmed.startsWith('#')) continue
+    const parts = trimmed.split(/\s+/)
+    items.push({ code: parts[0] || '', name: parts[1] || '' })
+  }
+  return items
+}
 
-      if (isCompleted) {
-        screeningProgress.processing = false
-        screeningProgress.status = 'success'
-        if (progressPollingTimer) {
-          clearInterval(progressPollingTimer)
-          progressPollingTimer = null
+// 解析 .csv: 逗号分隔，自动跳过表头
+const parseCsv = (text) => {
+  const items = []
+  const lines = text.split('\n').filter(l => l.trim())
+  if (lines.length === 0) return items
+
+  // 尝试检测表头行
+  let startIdx = 0
+  const firstLine = lines[0]
+  const hasHeader = /代码|名称|code|name/i.test(firstLine)
+  if (hasHeader) startIdx = 1
+
+  for (let i = startIdx; i < lines.length; i++) {
+    const cols = lines[i].split(/[,，\t]/).map(c => c.trim())
+    if (cols.length === 0) continue
+    // 找 6 位数字列作为代码
+    let code = '', name = ''
+    for (const col of cols) {
+      if (/^\d{6}$/.test(col)) { code = col; continue }
+      if (!code && /^\d{6}\.(SH|SZ|BJ)$/i.test(col)) { code = col; continue }
+      // 非数字非空的作为名称
+      if (col && !/^\d+$/.test(col) && !name) name = col
+    }
+    if (code) items.push({ code, name })
+  }
+  return items
+}
+
+// 解析 .json: 字符串数组或对象数组
+const parseJson = (text) => {
+  const data = JSON.parse(text)
+  if (!Array.isArray(data)) return []
+  const items = []
+  for (const item of data) {
+    if (typeof item === 'string') {
+      items.push({ code: item.trim(), name: '' })
+    } else if (typeof item === 'object') {
+      const code = item.code || item.stock_code || item.Code || item.CODE || ''
+      const name = item.name || item.stock_name || item.Name || item.NAME || ''
+      if (code) items.push({ code: String(code).trim(), name: String(name).trim() })
+    }
+  }
+  return items
+}
+
+// 解析 .md: 提取表格行，跳过表头和分隔线
+const parseMd = (text) => {
+  const items = []
+  for (const line of text.split('\n')) {
+    const trimmed = line.trim()
+    if (!trimmed || trimmed.startsWith('|---') || trimmed.startsWith('| ---')) continue
+    // 跳过含"代码""名称"的表头行
+    if (/代码.*名称|名称.*代码/i.test(trimmed)) continue
+    if (trimmed.startsWith('|') && trimmed.endsWith('|')) {
+      const cells = trimmed.split('|').map(c => c.trim()).filter(c => c)
+      if (cells.length >= 1) {
+        let code = '', name = ''
+        for (const cell of cells) {
+          if (/^\d{6}$/.test(cell) || /^\d{6}\.(SH|SZ|BJ)$/i.test(cell)) { code = cell; continue }
+          if (!code) {
+            // 尝试作为代码
+            if (/^\d+$/.test(cell)) { code = cell; continue }
+          }
+          if (!name && cell && cell !== code) name = cell
         }
-        // 选股完成，检查临时候选
-        await checkTempCandidates()
-        if (candidates.value.length === 0) {
-          // 如果没有候选，直接刷新列表
-          await loadWatchlist()
-          ElMessage.success(`选股完成，共匹配 ${screeningProgress.matched} 只股票`)
+        // 如果第一列就是代码，第二列是名称
+        if (!code && cells[0]) {
+          if (/^\d{6}$/.test(cells[0]) || /^\d{6}\.(SH|SZ|BJ)$/i.test(cells[0])) {
+            code = cells[0]
+            name = cells[1] || ''
+          }
         }
-      } else if (progress.current_phase === 'scanning') {
-        screeningProgress.status = ''
-        screeningProgress.processing = true
+        if (code) items.push({ code, name })
       }
     }
-  } catch (error) {
-    console.error('获取进度失败:', error)
+  }
+  return items
+}
+
+const previewImport = async (items) => {
+  try {
+    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/watchlist/import-preview`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ group_id: selectedGroupId.value, items })
+    })
+    const data = await res.json()
+    if (res.ok) {
+      importResults.value = data.results || []
+      importStep.value = 'preview'
+    } else {
+      ElMessage.error(data.detail || '预览失败')
+    }
+  } catch (e) {
+    ElMessage.error('预览失败')
+  } finally {
+    importParsing.value = false
   }
 }
 
-const editingStock = reactive({
-  stock_code: '',
-  stock_name: '',
-  buy_price: 0,
-  stop_loss_price: 0,
-  take_profit_price: 0,
-  target_quantity: 100,
-  status: 'pending'
-})
+const handleImportSelection = (selection) => {
+  importSelected.value = selection
+}
 
-// 加载策略列表
+const confirmImport = async () => {
+  if (importSelected.value.length === 0) {
+    ElMessage.warning('请至少选择一只股票')
+    return
+  }
+  importingStocks.value = true
+  try {
+    const items = importSelected.value.map(r => ({ stock_code: r.stock_code, stock_name: r.stock_name }))
+    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/watchlist/batch-add`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ group_id: selectedGroupId.value, items })
+    })
+    const data = await res.json()
+    if (res.ok) {
+      ElMessage.success(data.message || `成功导入 ${data.added} 只股票`)
+      showImportDialog.value = false
+      await loadCurrentGroupStocks()
+      await loadGroups()
+    } else {
+      ElMessage.error(data.detail || '导入失败')
+    }
+  } catch (e) {
+    ElMessage.error('导入失败')
+  } finally {
+    importingStocks.value = false
+  }
+}
+
+const editStock = (row) => {
+  Object.assign(editingStock, row)
+  showEditDialog.value = true
+}
+
+const saveStock = async () => {
+  try {
+    await fetch(`/api/v1/ui/${currentAccountId.value}/watchlist/${editingStock.stock_code}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        group_id: selectedGroupId.value,
+        stock_name: editingStock.stock_name,
+        buy_price: editingStock.buy_price,
+        stop_loss_price: editingStock.stop_loss_price,
+        take_profit_price: editingStock.take_profit_price,
+        target_quantity: editingStock.target_quantity,
+        status: editingStock.status
+      })
+    })
+    ElMessage.success('保存成功')
+    showEditDialog.value = false
+    await loadCurrentGroupStocks()
+  } catch (e) {
+    ElMessage.error('保存失败')
+  }
+}
+
+const removeStock = async (row) => {
+  try {
+    const url = `/api/v1/ui/${currentAccountId.value}/watchlist/${row.stock_code}?group_id=${selectedGroupId.value}`
+    const res = await fetch(url, { method: 'DELETE' })
+    if (res.ok) {
+      ElMessage.success('已移除')
+      await loadCurrentGroupStocks()
+      await loadGroups()
+    }
+  } catch (e) {
+    ElMessage.error('移除失败')
+  }
+}
+
+// ========== 批量状态 ==========
+
+const handleStockSelectionChange = (selection) => {
+  selectedStocks.value = selection
+}
+
+const executeBatchStatus = async () => {
+  if (!batchStatusForm.status) {
+    ElMessage.warning('请选择目标状态')
+    return
+  }
+  if (selectedStocks.value.length === 0) {
+    ElMessage.warning('请先勾选要修改的股票')
+    return
+  }
+  if (!selectedGroupId.value) {
+    ElMessage.error('请先选择候选组')
+    return
+  }
+  batchStatusRunning.value = true
+  try {
+    const codes = selectedStocks.value.map(s => s.stock_code)
+    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/candidate-groups/${selectedGroupId.value}/batch-status`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        status: batchStatusForm.status,
+        stock_codes: codes,
+      })
+    })
+    const data = await res.json()
+    if (res.ok) {
+      ElMessage.success(data.message || '状态已更新')
+      showBatchStatusDialog.value = false
+      selectedStocks.value = []
+      await loadCurrentGroupStocks()
+      await loadGroups()
+    } else {
+      ElMessage.error(data.detail || '修改失败')
+    }
+  } catch (e) {
+    ElMessage.error('修改失败')
+  } finally {
+    batchStatusRunning.value = false
+  }
+}
+
+// ========== 选股策略 ==========
+
 const loadStrategies = async () => {
   try {
-    const response = await fetch(`/api/v1/ui/${currentAccountId.value}/strategies`)
-    const data = await response.json()
+    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/strategies`)
+    const data = await res.json()
     strategies.value = data.strategies || []
-  } catch (error) {
-    console.error('加载策略失败:', error)
+  } catch (e) {
+    console.error('加载策略失败:', e)
   }
 }
 
-// 计算激活的策略
-const activeStrategies = computed(() => {
-  return strategies.value.filter(s => s.status === 'active')
-})
-
-// 显示策略选择对话框
-const showStrategySelect = () => {
-  loadStrategies()
-  showStrategySelectDialog.value = true
-}
-
-// 带策略选择的选股
 const runScreeningWithStrategy = async () => {
   if (!strategySelectForm.strategyId) {
     ElMessage.warning('请选择策略')
     return
   }
-
   screeningProgress.processing = true
   screeningProgress.status = ''
   screeningProgress.percent = 0
@@ -426,327 +1376,204 @@ const runScreeningWithStrategy = async () => {
   showStrategySelectDialog.value = false
 
   try {
-    const response = await fetch(`/api/v1/ui/${currentAccountId.value}/screening/run`, {
+    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/screening/run`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         strategy_id: strategySelectForm.strategyId,
         use_local: strategySelectForm.useLocal,
-        pending_to_temp: true  // 暂存到临时表
+        pending_to_temp: true
       })
     })
-    const data = await response.json()
-
+    const data = await res.json()
     if (data.success) {
-      // 开始轮询进度
       progressPollingTimer = setInterval(pollProgress, 2000)
     } else {
       ElMessage.error(data.message || '选股失败')
       screeningProgress.processing = false
     }
-  } catch (error) {
-    console.error('选股失败:', error)
+  } catch (e) {
     ElMessage.error('选股失败')
     screeningProgress.processing = false
   }
 }
 
-// 检查临时候选股票
+const pollProgress = async () => {
+  try {
+    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/screening/status`)
+    const data = await res.json()
+    if (data.progress) {
+      const p = data.progress
+      screeningProgress.total = p.total_stocks || 0
+      screeningProgress.processed = p.processed || 0
+      screeningProgress.matched = p.matched || 0
+      screeningProgress.currentStock = p.current_stock || ''
+      if (screeningProgress.total > 0) {
+        screeningProgress.percent = Math.round((screeningProgress.processed / screeningProgress.total) * 100)
+      }
+      const isCompleted = p.current_phase === 'done' || (p.total_stocks > 0 && p.processed >= p.total_stocks)
+      if (isCompleted) {
+        screeningProgress.processing = false
+        screeningProgress.status = 'success'
+        if (progressPollingTimer) { clearInterval(progressPollingTimer); progressPollingTimer = null }
+        await checkTempCandidates()
+        if (candidates.value.length === 0) {
+          await loadGroups()
+          if (selectedGroupId.value) await loadCurrentGroupStocks()
+          ElMessage.success(`选股完成，共匹配 ${screeningProgress.matched} 只股票`)
+        }
+      } else if (p.current_phase === 'scanning') {
+        screeningProgress.status = ''
+        screeningProgress.processing = true
+      }
+    }
+  } catch (e) {
+    console.error('获取进度失败:', e)
+  }
+}
+
 const checkTempCandidates = async () => {
   try {
-    const response = await fetch(`/api/v1/ui/${currentAccountId.value}/candidates`)
-    const data = await response.json()
+    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/candidates`)
+    const data = await res.json()
     if (data.candidates && data.candidates.length > 0) {
       candidates.value = data.candidates
       showCandidatesDialog.value = true
     }
-  } catch (error) {
-    console.error('加载候选股票失败:', error)
+  } catch (e) {
+    console.error('加载候选股票失败:', e)
   }
 }
 
-// 处理选择变化
-const handleSelectionChange = (selection) => {
-  selectedCandidates.value = selection.map(s => s.stock_code)
-}
+const handleSelectionChange = (selection) => { selectedCandidates.value = selection.map(s => s.stock_code) }
 
-// 确认候选股票
 const confirmCandidates = async () => {
   confirming.value = true
   try {
-    const response = await fetch(`/api/v1/ui/${currentAccountId.value}/candidates/confirm`, {
+    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/candidates/confirm`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        stock_codes: selectedCandidates.value.length > 0 ? selectedCandidates.value : null,
-        confirm: true
-      })
+      body: JSON.stringify({ stock_codes: selectedCandidates.value.length > 0 ? selectedCandidates.value : null, confirm: true })
     })
-    const data = await response.json()
-
+    const data = await res.json()
     if (data.success) {
       ElMessage.success(`已确认 ${data.confirmed} 只股票`)
       showCandidatesDialog.value = false
-      await loadWatchlist()
+      await loadGroups()
+      if (selectedGroupId.value) await loadCurrentGroupStocks()
     }
-  } catch (error) {
-    console.error('确认失败:', error)
+  } catch (e) {
     ElMessage.error('确认失败')
   } finally {
     confirming.value = false
   }
 }
 
-// 拒绝候选股票
 const rejectCandidates = async (rejectAll) => {
   confirming.value = true
   try {
-    const response = await fetch(`/api/v1/ui/${currentAccountId.value}/candidates/confirm`, {
+    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/candidates/confirm`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        stock_codes: rejectAll ? null : selectedCandidates.value,
-        confirm: false
-      })
+      body: JSON.stringify({ stock_codes: rejectAll ? null : selectedCandidates.value, confirm: false })
     })
-    const data = await response.json()
-
+    const data = await res.json()
     if (data.success) {
       ElMessage.success(`已拒绝 ${data.rejected} 只股票`)
       showCandidatesDialog.value = false
     }
-  } catch (error) {
-    console.error('拒绝失败:', error)
+  } catch (e) {
     ElMessage.error('拒绝失败')
   } finally {
     confirming.value = false
   }
 }
 
-// 取消候选对话框
-const cancelCandidates = () => {
-  showCandidatesDialog.value = false
-  screeningProgress.processing = false
-  screeningProgress.status = ''
-}
+const cancelCandidates = () => { showCandidatesDialog.value = false; screeningProgress.processing = false; screeningProgress.status = '' }
 
-// 清空 watchlist
-const clearWatchlist = async () => {
-  clearing.value = true
-  try {
-    const response = await fetch(`/api/v1/ui/${currentAccountId.value}/watchlist/clear`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' }
-    })
-    const data = await response.json()
-
-    if (data.success) {
-      ElMessage.success('已清空所有已选股票')
-      showClearDialog.value = false
-      await loadWatchlist()
-    } else {
-      ElMessage.error(data.message || '清空失败')
-    }
-  } catch (error) {
-    console.error('清空失败:', error)
-    ElMessage.error('清空失败')
-  } finally {
-    clearing.value = false
-  }
-}
-
-// 加载数据 stats
 const loadDataStats = async () => {
   try {
-    const response = await fetch(`/api/v1/ui/${currentAccountId.value}/data/stats`)
-    const data = await response.json()
-    if (data.success) {
-      dataStats.value = data.stats
-    }
-  } catch (error) {
-    console.error('加载数据统计失败:', error)
+    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/data/stats`)
+    const data = await res.json()
+    if (data.success) dataStats.value = data.stats
+  } catch (e) {
+    console.error('加载数据统计失败:', e)
   }
 }
 
-// 加载 watchlist
-const loadWatchlist = async () => {
-  loading.value = true
-  try {
-    const url = filterStatus.value
-      ? `/api/v1/ui/${currentAccountId.value}/watchlist?status=${filterStatus.value}`
-      : `/api/v1/ui/${currentAccountId.value}/watchlist`
-
-    const response = await fetch(url)
-    const data = await response.json()
-    watchlist.value = data.watchlist || []
-  } catch (error) {
-    console.error('加载 watchlist 失败:', error)
-    ElMessage.error('加载失败')
-  } finally {
-    loading.value = false
-  }
-}
-
-// 确认清空 watchlist
-const confirmClearWatchlist = () => {
-  showClearDialog.value = true
-}
-
-// 检查服务状态
 const checkServiceStatus = async () => {
   try {
-    const monitoringRes = await fetch(`/api/v1/ui/${currentAccountId.value}/monitoring/status`)
-    const monitoringData = await monitoringRes.json()
-    monitoringRunning.value = monitoringData.monitoring?.running || false
-
-    // 如果选股服务正在运行，开始轮询进度
-    if (screeningData.screening?.running && !screeningProgress.processing) {
-      screeningProgress.processing = true
-      progressPollingTimer = setInterval(pollProgress, 2000)
-    }
-  } catch (error) {
-    console.error('检查服务状态失败:', error)
+    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/monitoring/status`)
+    const data = await res.json()
+    monitoringRunning.value = data.monitoring?.running || false
+  } catch (e) {
+    console.error('检查服务状态失败:', e)
   }
 }
 
-// 编辑股票
-const editStock = (row) => {
-  Object.assign(editingStock, row)
-  showEditDialog.value = true
+const loadAll = async () => {
+  await loadGroups()
+  if (selectedGroupId.value) await loadCurrentGroupStocks()
+  await loadDataStats()
 }
 
-// 保存股票
-const saveStock = async () => {
-  try {
-    const response = await fetch(`/api/v1/ui/${currentAccountId.value}/watchlist/${editingStock.stock_code}/prices`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        buy_price: editingStock.buy_price,
-        stop_loss_price: editingStock.stop_loss_price,
-        take_profit_price: editingStock.take_profit_price,
-        target_quantity: editingStock.target_quantity
-      })
-    })
+const getStatusType = (status) => ({ pending: 'info', watching: 'warning', bought: 'success', sold: 'success', ignored: 'info' }[status] || 'info')
+const getStatusText = (status) => ({ pending: '待交易', watching: '观察中', bought: '已买入', sold: '已卖出', ignored: '已忽略' }[status] || status)
 
-    if (response.ok) {
-      // 更新状态
-      await fetch(`/api/v1/ui/${currentAccountId.value}/watchlist/${editingStock.stock_code}/status`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: editingStock.status })
-      })
-
-      ElMessage.success('保存成功')
-      showEditDialog.value = false
-      await loadWatchlist()
-    }
-  } catch (error) {
-    console.error('保存失败:', error)
-    ElMessage.error('保存失败')
-  }
-}
-
-// 移除股票
-const removeStock = async (row) => {
-  try {
-    const response = await fetch(`/api/v1/ui/${currentAccountId.value}/watchlist/${row.stock_code}`, {
-      method: 'DELETE'
-    })
-
-    if (response.ok) {
-      ElMessage.success('已移除')
-      await loadWatchlist()
-    }
-  } catch (error) {
-    console.error('移除失败:', error)
-    ElMessage.error('移除失败')
-  }
-}
-
-const getStatusType = (status) => {
-  const types = {
-    'pending': 'info',
-    'watching': 'warning',
-    'bought': 'success',
-    'sold': 'success',
-    'ignored': 'info'
-  }
-  return types[status] || 'info'
-}
-
-const getStatusText = (status) => {
-  const texts = {
-    'pending': '待观察',
-    'watching': '观察中',
-    'bought': '已买入',
-    'sold': '已卖出',
-    'ignored': '已忽略'
-  }
-  return texts[status] || status
-}
-
-// 组件卸载时清理定时器
 import { onUnmounted } from 'vue'
-onUnmounted(() => {
-  if (progressPollingTimer) {
-    clearInterval(progressPollingTimer)
-    progressPollingTimer = null
-  }
-})
+onUnmounted(() => { if (progressPollingTimer) { clearInterval(progressPollingTimer); progressPollingTimer = null } })
 
 onMounted(async () => {
   await checkServiceStatus()
   await loadDataStats()
-  await loadWatchlist()
   await loadStrategies()
-  // 检查是否有待确认的候选股票
+  await loadGroups()
+  // 默认选中第一个组
+  if (candidateGroups.value.length > 0) {
+    selectedGroupId.value = candidateGroups.value[0].id
+    await loadCurrentGroupStocks()
+  }
   await checkTempCandidates()
 })
 </script>
 
 <style scoped>
-.layout-container {
-  height: 100%;
-  display: flex;
-  flex-direction: column;
-}
+.layout-container { height: 100%; display: flex; flex-direction: column; }
+.main-content { padding: 20px; }
+.page-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+.page-header h2 { color: #303133; margin: 0; }
+.status-card { margin-bottom: 20px; }
+.card-header { display: flex; justify-content: space-between; align-items: center; }
+.progress-card { margin-bottom: 20px; }
+.progress-details { display: flex; justify-content: space-between; margin-top: 10px; font-size: 13px; color: #606266; }
+.main-row { margin-bottom: 20px; }
 
-.main-content {
-  padding: 20px;
+.group-card { height: 100%; }
+.group-list { min-height: 300px; }
+.group-item {
+  display: flex; align-items: center; padding: 10px 12px; cursor: pointer;
+  border-bottom: 1px solid #f0f0f0; transition: background-color 0.2s;
 }
+.group-item:hover { background-color: #f5f7fa; }
+.group-item.active { background-color: #ecf5ff; border-left: 3px solid #409EFF; }
+.group-info { flex: 1; display: flex; align-items: center; gap: 8px; min-width: 0; }
+.group-tag { flex-shrink: 0; }
+.group-name { font-size: 14px; color: #303133; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.group-count { font-size: 12px; color: #909399; margin-right: 8px; }
+.group-actions { cursor: pointer; color: #909399; }
 
-.page-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 20px;
+/* 文件导入 */
+.import-select { text-align: center; padding: 20px 0; }
+.file-upload-area {
+  border: 2px dashed #dcdfe6; border-radius: 8px; padding: 40px 20px;
+  cursor: pointer; transition: border-color 0.2s;
 }
+.file-upload-area:hover { border-color: #409EFF; }
+.file-upload-area p { color: #909399; margin: 12px 0 0; }
+.parsing-status { display: flex; align-items: center; justify-content: center; gap: 8px; margin-top: 16px; color: #409EFF; }
+.import-confirm-footer { display: flex; justify-content: space-between; align-items: center; margin-top: 12px; padding-top: 12px; border-top: 1px solid #ebeef5; }
 
-.page-header h2 {
-  color: #303133;
-  margin: 0;
-}
-
-.status-card {
-  margin-bottom: 20px;
-}
-
-.card-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-}
-
-.progress-card {
-  margin-bottom: 20px;
-}
-
-.progress-details {
-  display: flex;
-  justify-content: space-between;
-  margin-top: 10px;
-  font-size: 13px;
-  color: #606266;
-}
+/* 调度设置 */
+.hint { font-size: 12px; color: #909399; margin-top: 8px; line-height: 1.6; }
+.hint code { background: #f5f7fa; padding: 1px 4px; border-radius: 3px; font-family: monospace; color: #606266; }
 </style>

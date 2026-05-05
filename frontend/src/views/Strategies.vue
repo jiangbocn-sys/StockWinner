@@ -129,7 +129,7 @@
               </div>
             </template>
 
-            <el-table :data="screeningStrategies" stripe v-loading="loadingScreening">
+            <el-table :data="configScreeningStrategies" stripe v-loading="loadingScreening">
               <el-table-column prop="name" label="策略名称" width="180" />
               <el-table-column prop="description" label="描述" min-width="200" show-overflow-tooltip />
               <el-table-column prop="status" label="状态" width="80">
@@ -158,8 +158,89 @@
                 </template>
               </el-table-column>
             </el-table>
-            <el-empty v-if="!loadingScreening && screeningStrategies.length === 0" description="暂无选股策略" />
+            <el-empty v-if="!loadingScreening && configScreeningStrategies.length === 0" description="暂无选股策略" />
           </el-card>
+        </el-tab-pane>
+
+        <!-- 代码策略 -->
+        <el-tab-pane label="代码策略" name="code">
+          <el-tabs v-model="activeCodeTab" type="card">
+            <!-- 代码选股策略 -->
+            <el-tab-pane label="代码选股" name="screening_code">
+              <el-card>
+                <template #header>
+                  <div class="card-header">
+                    <span>Python 代码选股策略</span>
+                    <el-button type="primary" size="small" @click="showCreateCodeDialog = true; codeStrategyForm.code_scope = 'screening'">
+                      <el-icon><Plus /></el-icon>
+                      新建策略
+                    </el-button>
+                  </div>
+                </template>
+                <el-alert type="info" :closable="false" class="margin-bottom-15">
+                  用 Python 代码编写选股策略，在候选组股票池上运行，输出交易信号到 watchlist
+                </el-alert>
+                <el-table :data="screeningCodeStrategies" stripe v-loading="loadingScreening">
+                  <el-table-column prop="name" label="策略名称" width="180" />
+                  <el-table-column prop="description" label="描述" min-width="200" show-overflow-tooltip />
+                  <el-table-column prop="function_name" label="入口函数" width="100" />
+                  <el-table-column prop="status" label="状态" width="80">
+                    <template #default="{ row }">
+                      <el-tag :type="getStatusType(row.status)" size="small">{{ getStatusText(row.status) }}</el-tag>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="操作" width="240">
+                    <template #default="{ row }">
+                      <el-button type="primary" size="small" @click="editCodeStrategy(row)">编辑</el-button>
+                      <el-button :type="row.status === 'active' ? 'warning' : 'success'" size="small" @click="toggleScreeningStrategy(row)">
+                        {{ row.status === 'active' ? '停用' : '激活' }}
+                      </el-button>
+                      <el-button type="danger" size="small" @click="deleteScreeningStrategy(row)">删除</el-button>
+                    </template>
+                  </el-table-column>
+                </el-table>
+                <el-empty v-if="!loadingScreening && screeningCodeStrategies.length === 0" description="暂无代码选股策略" />
+              </el-card>
+            </el-tab-pane>
+
+            <!-- 代码交易策略 -->
+            <el-tab-pane label="代码交易" name="trading_code">
+              <el-card>
+                <template #header>
+                  <div class="card-header">
+                    <span>Python 代码交易策略</span>
+                    <el-button type="primary" size="small" @click="showCreateCodeDialog = true; codeStrategyForm.code_scope = 'trading'">
+                      <el-icon><Plus /></el-icon>
+                      新建策略
+                    </el-button>
+                  </div>
+                </template>
+                <el-alert type="info" :closable="false" class="margin-bottom-15">
+                  用 Python 代码编写交易策略，接收选股信号后自动执行买入卖出
+                </el-alert>
+                <el-table :data="tradingCodeStrategies" stripe v-loading="loadingScreening">
+                  <el-table-column prop="name" label="策略名称" width="180" />
+                  <el-table-column prop="description" label="描述" min-width="200" show-overflow-tooltip />
+                  <el-table-column prop="function_name" label="入口函数" width="100" />
+                  <el-table-column prop="status" label="状态" width="80">
+                    <template #default="{ row }">
+                      <el-tag :type="getStatusType(row.status)" size="small">{{ getStatusText(row.status) }}</el-tag>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="操作" width="240">
+                    <template #default="{ row }">
+                      <el-button type="primary" size="small" @click="editCodeStrategy(row)">编辑</el-button>
+                      <el-button :type="row.status === 'active' ? 'warning' : 'success'" size="small" @click="toggleScreeningStrategy(row)">
+                        {{ row.status === 'active' ? '停用' : '激活' }}
+                      </el-button>
+                      <el-button type="danger" size="small" @click="deleteScreeningStrategy(row)">删除</el-button>
+                    </template>
+                  </el-table-column>
+                </el-table>
+                <el-empty v-if="!loadingScreening && tradingCodeStrategies.length === 0" description="暂无代码交易策略" />
+              </el-card>
+            </el-tab-pane>
+          </el-tabs>
         </el-tab-pane>
 
         <!-- 交易策略 -->
@@ -426,6 +507,65 @@
           <el-descriptions-item label="更新时间">{{ selectedScreening.updated_at }}</el-descriptions-item>
         </el-descriptions>
       </el-dialog>
+
+      <!-- 新建/编辑代码型策略对话框 -->
+      <el-dialog v-model="showCreateCodeDialog" :title="editingCodeId ? '编辑代码策略' : '新建代码策略'" width="800px" :close-on-click-modal="false">
+        <el-form label-width="100px">
+          <el-form-item label="策略名称" required>
+            <el-input v-model="codeStrategyForm.name" placeholder="如：尾盘选股策略" />
+          </el-form-item>
+          <el-form-item label="策略类型" required>
+            <el-radio-group v-model="codeStrategyForm.code_scope">
+              <el-radio value="screening">选股型（输出信号到 watchlist）</el-radio>
+              <el-radio value="trading">交易型（自动执行买卖）</el-radio>
+            </el-radio-group>
+          </el-form-item>
+          <el-form-item label="描述">
+            <el-input v-model="codeStrategyForm.description" type="textarea" :rows="2" />
+          </el-form-item>
+          <el-form-item label="入口函数">
+            <el-input v-model="codeStrategyForm.function_name" style="width: 150px" />
+            <span class="hint" style="margin-left: 8px">策略代码中的主函数名，默认 run</span>
+          </el-form-item>
+          <el-form-item label="Python 代码">
+            <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 8px">
+              <el-button type="primary" link size="small" @click="codeFileInput?.click()">
+                从 .py 文件导入
+              </el-button>
+              <el-tag v-if="importedFileName" type="success" size="small">已导入：{{ importedFileName }}</el-tag>
+              <input
+                ref="codeFileInput"
+                type="file"
+                accept=".py,.pyw"
+                style="display: none"
+                @change="handleCodeFileImport"
+              />
+            </div>
+            <el-input
+              v-model="codeStrategyForm.code"
+              type="textarea"
+              :rows="20"
+              style="font-family: monospace; font-size: 13px"
+              :placeholder="codeStrategyForm.code_scope === 'trading'
+                ? 'def run(context):\n    # context.signals: 待处理的交易信号列表\n    # return [{action, stock_code, quantity, price, ...}]'
+                : 'def run(context):\n    # context.stocks: 候选组股票列表\n    # context.account_id: 账户ID\n    # return [{action, stock_code, buy_price, ...}]'
+              "
+            />
+          </el-form-item>
+          <el-form-item>
+            <el-button type="warning" size="small" @click="validateCode" :loading="validatingCode">
+              验证代码
+            </el-button>
+            <el-tag v-if="codeValidationResult" :type="codeValidationResult.valid ? 'success' : 'danger'" style="margin-left: 8px">
+              {{ codeValidationResult.valid ? '语法正确' : codeValidationResult.error }}
+            </el-tag>
+          </el-form-item>
+        </el-form>
+        <template #footer>
+          <el-button @click="showCreateCodeDialog = false">取消</el-button>
+          <el-button type="primary" @click="saveCodeStrategy" :loading="savingCodeStrategy">保存</el-button>
+        </template>
+      </el-dialog>
     </el-main>
   </div>
 </template>
@@ -443,6 +583,7 @@ const currentAccountId = computed(() => accountStore.currentAccountId)
 const currentAccount = computed(() => accountStore.currentAccount)
 
 const activeTab = ref('position')
+const activeCodeTab = ref('screening_code')
 
 // 持仓策略
 const positionStrategy = reactive({
@@ -469,10 +610,21 @@ const newRule = reactive({
 
 // 选股策略
 const screeningStrategies = ref([])
+const configScreeningStrategies = computed(() => screeningStrategies.value.filter(s => s.code_type !== 'python'))
+const screeningCodeStrategies = computed(() => screeningStrategies.value.filter(s => s.code_type === 'python' && s.code_scope !== 'trading'))
+const tradingCodeStrategies = computed(() => screeningStrategies.value.filter(s => s.code_type === 'python' && s.code_scope === 'trading'))
 const loadingScreening = ref(false)
 const showCreateScreeningDialog = ref(false)
 const showScreeningDetailDialog = ref(false)
 const selectedScreening = ref(null)
+const showCreateCodeDialog = ref(false)
+const editingCodeId = ref(null)
+const validatingCode = ref(false)
+const savingCodeStrategy = ref(false)
+const codeValidationResult = ref(null)
+const codeFileInput = ref(null)
+const importedFileName = ref('')
+const codeStrategyForm = reactive({ name: '', description: '', code: '', function_name: 'run', code_scope: 'screening' })
 
 // LLM生成
 const showLLMDialog = ref(false)
@@ -691,6 +843,122 @@ const deleteRule = async (rule) => {
       ElMessage.error('删除失败')
     }
   }
+}
+
+// 代码型策略
+const editCodeStrategy = (row) => {
+  editingCodeId.value = row.id
+  codeStrategyForm.name = row.name
+  codeStrategyForm.description = row.description || ''
+  codeStrategyForm.code = row.code || ''
+  codeStrategyForm.function_name = row.function_name || 'run'
+  codeStrategyForm.code_scope = row.code_scope || 'screening'
+  showCreateCodeDialog.value = true
+  codeValidationResult.value = null
+  importedFileName.value = ''
+  // Switch to the correct sub-tab
+  activeCodeTab.value = row.code_scope === 'trading' ? 'trading_code' : 'screening_code'
+}
+
+const validateCode = async () => {
+  if (!codeStrategyForm.code) {
+    ElMessage.warning('请先输入代码')
+    return
+  }
+  validatingCode.value = true
+  try {
+    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/strategies/validate-code`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code: codeStrategyForm.code })
+    })
+    codeValidationResult.value = await res.json()
+  } catch (e) {
+    codeValidationResult.value = { valid: false, error: '请求失败' }
+  } finally {
+    validatingCode.value = false
+  }
+}
+
+const saveCodeStrategy = async () => {
+  if (!codeStrategyForm.name.trim()) {
+    ElMessage.warning('请输入策略名称')
+    return
+  }
+  if (!codeStrategyForm.code.trim()) {
+    ElMessage.warning('请输入策略代码')
+    return
+  }
+  savingCodeStrategy.value = true
+  try {
+    const url = editingCodeId.value
+      ? `/api/v1/ui/${currentAccountId.value}/strategies/${editingCodeId.value}`
+      : `/api/v1/ui/${currentAccountId.value}/strategies`
+    const method = editingCodeId.value ? 'PUT' : 'POST'
+    const body = {
+      name: codeStrategyForm.name,
+      description: codeStrategyForm.description,
+      strategy_type: 'screening',
+      code_type: 'python',
+      code_scope: codeStrategyForm.code_scope,
+      code: codeStrategyForm.code,
+      function_name: codeStrategyForm.function_name,
+      target_scope: 'group',
+      status: 'draft',
+    }
+    const res = await fetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    const data = await res.json()
+    if (data.success || res.ok) {
+      ElMessage.success(editingCodeId.value ? '策略已更新' : '策略已创建')
+      showCreateCodeDialog.value = false
+      editingCodeId.value = null
+      codeStrategyForm.name = ''
+      codeStrategyForm.description = ''
+      codeStrategyForm.code = ''
+      codeStrategyForm.function_name = 'run'
+      codeStrategyForm.code_scope = 'screening'
+      codeValidationResult.value = null
+      importedFileName.value = ''
+      if (codeFileInput.value) codeFileInput.value.value = ''
+      await loadScreeningStrategies()
+    } else {
+      ElMessage.error(data.detail || '保存失败')
+    }
+  } catch (e) {
+    ElMessage.error('保存失败')
+  } finally {
+    savingCodeStrategy.value = false
+  }
+}
+
+// 代码型策略文件导入
+const handleCodeFileImport = async (event) => {
+  const file = event.target.files[0]
+  if (!file) return
+  if (!file.name.endsWith('.py') && !file.name.endsWith('.pyw')) {
+    ElMessage.warning('请选择 .py 或 .pyw 文件')
+    event.target.value = ''
+    return
+  }
+  try {
+    const text = await file.text()
+    codeStrategyForm.code = text
+    importedFileName.value = file.name
+    // 尝试从文件名提取函数名（如 tail_screener → run）
+    const baseName = file.name.replace(/\.(py|pyw)$/, '')
+    if (codeStrategyForm.function_name === 'run') {
+      // 检查文件中是否有 run 函数，没有则保持默认
+      if (!/def\s+run\s*\(/.test(text)) {
+        // 尝试找文件中第一个 def 函数
+        const match = text.match(/def\s+(\w+)\s*\(/)
+        if (match) codeStrategyForm.function_name = match[1]
+      }
+    }
+    ElMessage.success(`已导入 ${file.name}，${text.split('\n').length} 行`)
+  } catch (e) {
+    ElMessage.error('文件读取失败')
+  }
+  event.target.value = ''
 }
 
 // 加载选股策略

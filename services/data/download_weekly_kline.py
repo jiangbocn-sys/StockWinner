@@ -114,9 +114,19 @@ async def download_weekly_kline_data(
         batch_codes = [s.get('stock_code') for s in batch]
 
         processed += len(batch)
-        progress = processed / total_stocks * 100
+        progress_pct = processed / total_stocks * 100
 
-        print(f"[WeeklyKline] 进度：{progress:.1f}% ({processed}/{total_stocks}) - 下载 {len(batch_codes)} 只股票")
+        print(f"[WeeklyKline] 进度：{progress_pct:.1f}% ({processed}/{total_stocks}) - 下载 {len(batch_codes)} 只股票")
+
+        # 同步更新 task_manager 进度（供 DataManagement 页面使用）
+        try:
+            from services.common.task_manager import get_task_manager, TaskType
+            task_manager = get_task_manager()
+            if task_manager.is_running(TaskType.WEEKLY_KLINE_DOWNLOAD):
+                task_manager.update_progress(TaskType.WEEKLY_KLINE_DOWNLOAD, round(progress_pct, 1),
+                    message=f"下载批次 {i//batch_size + 1}/{(total_stocks-1)//batch_size + 1} ({processed}/{total_stocks})")
+        except Exception:
+            pass
 
         try:
             # 批量获取周K线数据

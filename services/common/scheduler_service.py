@@ -97,6 +97,9 @@ class SchedulerService:
             logger.info("  - 每月5日凌晨1点执行月频因子更新")
             logger.info("  - 每周六凌晨2点执行周K线数据下载")
 
+            # 注册策略任务
+            self._register_strategy_tasks()
+
         except ImportError:
             logger.warning("APScheduler 未安装，使用简单的定时检查方案")
             self._start_simple_scheduler()
@@ -245,7 +248,8 @@ class SchedulerService:
         year = now.year
         month = now.month
 
-        # 判断当前季度报告期
+        # 判断当前季度报告期（财报披露有延迟，取上上季度）
+        # 例：5月 → 期待 Q1（03-31），因为Q1财报4月才陆续披露
         if month <= 3:
             expected_report = f"{year-1}-12-31"
         elif month <= 6:
@@ -257,7 +261,7 @@ class SchedulerService:
         else:
             expected_report = f"{year}-12-31"
 
-        # 检查PE填充率
+        # 检查最新报告期的 PE 填充率
         cursor.execute("""
             SELECT COUNT(*) as total,
                    COUNT(CASE WHEN pe_ttm > 0 THEN 1 END) as has_pe
@@ -267,6 +271,7 @@ class SchedulerService:
         row = cursor.fetchone()
         total = row[0]
         has_pe = row[1]
+        pe_ratio = has_pe / total if total > 0 else 0
 
         conn.close()
 
@@ -278,6 +283,9 @@ class SchedulerService:
         elif latest_report < expected_report:
             need_update = True
             logger.info(f"最新报告期 {latest_report} < 应有报告期 {expected_report}")
+        elif pe_ratio < 0.85:  # PE填充率低于85%
+            need_update = True
+            logger.info(f"报告期 {expected_report} PE填充率仅 {pe_ratio*100:.1f}%（{has_pe}/{total}），需要更新")
         elif total > 0 and has_pe < total * 0.5:  # PE填充率低于50%
             need_update = True
             logger.info(f"报告期 {expected_report} PE填充率仅 {has_pe/total*100:.1f}%，需要补充")
@@ -410,6 +418,7 @@ class SchedulerService:
 
             # 启动下载任务
             task_manager.start_task(TaskType.DATA_DOWNLOAD)
+            task_manager.update_progress(TaskType.DATA_DOWNLOAD, 5, "正在初始化...")
 
             # 在当前线程执行（因为是后台任务）
             from services.data.local_data_service import download_incremental_kline_data_sync
@@ -422,6 +431,7 @@ class SchedulerService:
             )
 
             # 更新任务状态
+            task_manager.update_progress(TaskType.DATA_DOWNLOAD, 100, "下载完成")
             if result.get('success'):
                 task_manager.complete_task(TaskType.DATA_DOWNLOAD, result)
             else:
@@ -449,6 +459,7 @@ class SchedulerService:
 
             # 启动因子计算任务
             task_manager.start_task(TaskType.DAILY_FACTOR_CALC)
+            task_manager.update_progress(TaskType.DAILY_FACTOR_CALC, 5, "正在初始化...")
 
             # 执行因子计算
             from services.data.local_data_service import calculate_and_save_factors_for_dates
@@ -471,6 +482,7 @@ class SchedulerService:
                 'date_range': f'{calc_start} 至 {end_date}'
             }
 
+            task_manager.update_progress(TaskType.DAILY_FACTOR_CALC, 100, "计算完成")
             task_manager.complete_task(TaskType.DAILY_FACTOR_CALC, result)
             return result
 
@@ -528,6 +540,7 @@ class SchedulerService:
                 return {'success': False, 'message': '已有下载任务在运行'}
 
             task_manager.start_task(TaskType.DATA_DOWNLOAD)
+            task_manager.update_progress(TaskType.DATA_DOWNLOAD, 5, "正在初始化...")
 
             from services.data.local_data_service import download_all_kline_data_sync
             from dotenv import load_dotenv
@@ -535,6 +548,7 @@ class SchedulerService:
 
             result = download_all_kline_data_sync(show_progress=True)
 
+            task_manager.update_progress(TaskType.DATA_DOWNLOAD, 100, "下载完成")
             if result.get('success'):
                 task_manager.complete_task(TaskType.DATA_DOWNLOAD, result)
             else:
@@ -559,6 +573,7 @@ class SchedulerService:
                 return {'success': False, 'message': '已有周K线下载任务在运行'}
 
             task_manager.start_task(TaskType.WEEKLY_KLINE_DOWNLOAD)
+            task_manager.update_progress(TaskType.WEEKLY_KLINE_DOWNLOAD, 5, "正在初始化...")
 
             from services.data.download_weekly_kline import download_weekly_kline_sync
             from dotenv import load_dotenv
@@ -569,6 +584,7 @@ class SchedulerService:
                 batch_size=50
             )
 
+            task_manager.update_progress(TaskType.WEEKLY_KLINE_DOWNLOAD, 100, "下载完成")
             task_manager.complete_task(TaskType.WEEKLY_KLINE_DOWNLOAD, result)
             return result
 
@@ -668,6 +684,183 @@ class SchedulerService:
         thread = threading.Thread(target=self._run_industry_indices_download)
         thread.start()
         return {'success': True, 'message': '申万行业指数下载任务已启动'}
+
+    def _register_strategy_tasks(self):
+        """从 strategy_tasks 表读取 enabled 任务，注册到 APScheduler"""
+        try:
+            import sqlite3
+            from services.tasks import get_task
+            db_path = Path(__file__).parent.parent.parent / "data" / "stockwinner.db"
+            conn = sqlite3.connect(str(db_path))
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute("SELECT * FROM strategy_tasks WHERE enabled = 1").fetchall()
+            conn.close()
+
+            count = 0
+            for task in rows:
+                job_id = f'task_{task["id"]}'
+                task_type = task.get("task_type", "strategy")
+
+                # 生成可读任务名
+                if task_type == "builtin" and task.get("module"):
+                    info = get_task(task["module"])
+                    job_name = f"内置任务: {info['name']}" if info else f"内置任务: {task['module']}"
+                else:
+                    job_name = f'策略任务: {task["account_id"]}/{task["group_id"]}'
+
+                self._scheduler.add_job(
+                    self._execute_strategy_task_job,
+                    CronTrigger.from_crontab(task["cron_expression"], timezone=CHINA_TZ),
+                    id=job_id,
+                    name=job_name,
+                    args=[task["id"]],
+                    replace_existing=True,
+                )
+                count += 1
+                logger.info(f"  注册任务: {job_id} (cron={task['cron_expression']})")
+
+            logger.info(f"共注册 {count} 个任务")
+
+        except Exception as e:
+            logger.error(f"注册任务失败: {e}", exc_info=True)
+
+    def _execute_strategy_task_job(self, task_id: int):
+        """执行策略任务（在线程中运行）"""
+        logger.info(f"开始执行策略任务 ID={task_id}")
+
+        # 在新事件循环中运行异步代码
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(self._execute_strategy_task(task_id))
+        finally:
+            loop.close()
+
+    async def _execute_strategy_task(self, task_id: int):
+        """异步执行任务（支持 builtin 和 strategy 两种类型）"""
+        from services.common.database import get_db_manager
+        import json
+
+        db = get_db_manager()
+
+        # 获取任务信息
+        task = await db.fetchone("SELECT * FROM strategy_tasks WHERE id = ?", (task_id,))
+        if not task:
+            logger.error(f"任务 {task_id} 不存在")
+            return
+
+        task_type = task.get("task_type", "strategy")
+
+        try:
+            # 更新任务状态为 running
+            await db.execute(
+                "UPDATE strategy_tasks SET last_run_at = ?, last_status = 'running' WHERE id = ?",
+                (get_china_time().isoformat(), task_id)
+            )
+
+            if task_type == "builtin":
+                # 内置功能任务
+                module = task.get("module")
+                if not module:
+                    raise ValueError(f"builtin 任务缺少 module 字段")
+
+                from services.tasks import get_task
+                task_info = get_task(module)
+                if not task_info or task_info.get("handler") is None:
+                    raise ValueError(f"任务模块 {module} 未找到或加载失败")
+
+                handler = task_info["handler"]
+                result = await handler(
+                    account_id=task["account_id"],
+                    group_id=task.get("group_id"),
+                    task_id=task_id,
+                )
+
+            elif task_type == "strategy":
+                # 代码型策略任务
+                from services.strategy.engine import get_strategy_engine
+                from services.common import technical_indicators
+                from services.trading.gateway import get_gateway
+
+                strategy = await db.fetchone("SELECT * FROM strategies WHERE id = ?", (task["strategy_id"],))
+                if not strategy:
+                    raise ValueError(f"策略 {task['strategy_id']} 不存在")
+
+                # 获取候选组股票
+                stocks = await db.fetchall(
+                    "SELECT * FROM watchlist WHERE account_id = ? AND group_id = ? AND status IN ('pending', 'watching')",
+                    (task["account_id"], task["group_id"])
+                )
+
+                async def _get_kline(stock_code: str, period: str = "day", start_date: str = None):
+                    gateway = await get_gateway()
+                    return await gateway.get_kline_data(stock_code, period=period, start_date=start_date)
+
+                async def _get_market_data(stock_code: str):
+                    gateway = await get_gateway()
+                    return await gateway.get_market_data(stock_code)
+
+                context = {
+                    "stocks": [dict(s) for s in stocks],
+                    "account_id": task["account_id"],
+                    "today": get_china_time().strftime("%Y-%m-%d"),
+                    "strategy": strategy,
+                    "group_id": task["group_id"],
+                    "indicators": {
+                        "calculate_ma": technical_indicators.calculate_ma,
+                        "calculate_rsi": technical_indicators.calculate_rsi,
+                        "calculate_macd": technical_indicators.calculate_macd,
+                        "calculate_kdj": technical_indicators.calculate_kdj,
+                        "calculate_bollinger_bands": technical_indicators.calculate_bollinger_bands,
+                        "calculate_adx": technical_indicators.calculate_adx,
+                        "calculate_atr": technical_indicators.calculate_atr,
+                        "calculate_ema": technical_indicators.calculate_ema,
+                        "calculate_obv": technical_indicators.calculate_obv,
+                        "calculate_historical_volatility": technical_indicators.calculate_historical_volatility,
+                    },
+                    "get_kline": _get_kline,
+                    "get_market_data": _get_market_data,
+                }
+
+                engine = get_strategy_engine()
+                signals = engine.execute_strategy(strategy, context)
+                logger.info(f"策略 '{strategy['name']}' 返回 {len(signals)} 个信号")
+
+                # 写入 watchlist
+                result = await engine.write_signals_to_watchlist(
+                    signals, task["account_id"], task["strategy_id"], task["group_id"]
+                )
+            else:
+                raise ValueError(f"不支持的任务类型: {task_type}")
+            logger.info(f"策略 '{strategy['name']}' 返回 {len(signals)} 个信号")
+
+            # 写入 watchlist
+            result = await engine.write_signals_to_watchlist(
+                signals, task["account_id"], task["strategy_id"], task["group_id"]
+            )
+
+            # 更新任务状态为 success
+            await db.execute(
+                "UPDATE strategy_tasks SET last_status = 'success', last_output = ?, updated_at = ? WHERE id = ?",
+                (json.dumps(result, ensure_ascii=False), get_china_time().isoformat(), task_id)
+            )
+            logger.info(f"策略任务完成: {result}")
+
+        except Exception as e:
+            logger.error(f"策略任务执行失败: {e}", exc_info=True)
+            await db.execute(
+                "UPDATE strategy_tasks SET last_status = 'error', last_output = ?, updated_at = ? WHERE id = ?",
+                (json.dumps({"error": str(e)}, ensure_ascii=False), get_china_time().isoformat(), task_id)
+            )
+
+    def run_manual_strategy_task(self, task_id: int) -> Dict:
+        """手动触发策略任务"""
+        logger.info(f"手动触发策略任务 ID={task_id}")
+        thread = threading.Thread(
+            target=lambda: asyncio.run(self._execute_strategy_task(task_id))
+        )
+        thread.start()
+        return {'success': True, 'message': f'策略任务 {task_id} 已启动'}
 
 
 # 全局调度器实例

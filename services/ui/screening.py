@@ -5,6 +5,7 @@
 from fastapi import APIRouter, HTTPException, Path, Body, Query
 from typing import List, Optional, Dict, Any
 from fastapi.background import BackgroundTasks
+import os
 from services.common.database import get_db_manager
 from services.screening.service import get_screening_service
 from services.common.timezone import get_china_time
@@ -606,7 +607,9 @@ async def confirm_candidates(
 @router.get("/api/v1/ui/{account_id}/watchlist")
 async def get_watchlist(
     account_id: str = Path(..., description="账户 ID"),
-    status: Optional[str] = Query(None, description="状态筛选：pending/watching/bought/sold")
+    status: Optional[str] = Query(None, description="状态筛选：pending/watching/bought/sold"),
+    group_id: Optional[int] = Query(None, description="候选组筛选"),
+    grouped: Optional[bool] = Query(False, description="是否返回分组结构"),
 ):
     """获取 watchlist 列表"""
     db = get_db_manager()
@@ -618,16 +621,57 @@ async def get_watchlist(
 
     db = get_db_manager()
 
+    # JOIN 候选组和策略表，获取组名和策略名
+    base_sql = """
+        SELECT w.*, g.name as group_name, g.group_type, g.screening_strategy_id,
+               s.name as strategy_name
+        FROM watchlist w
+        LEFT JOIN candidate_groups g ON w.group_id = g.id
+        LEFT JOIN strategies s ON g.screening_strategy_id = s.id
+        WHERE w.account_id = ?
+    """
+    params: list = [account_id]
+
     if status:
-        watchlist = await db.fetchall(
-            "SELECT * FROM watchlist WHERE account_id = ? AND status = ? ORDER BY created_at DESC",
-            (account_id, status)
-        )
-    else:
-        watchlist = await db.fetchall(
-            "SELECT * FROM watchlist WHERE account_id = ? ORDER BY created_at DESC",
-            (account_id,)
-        )
+        base_sql += " AND w.status = ?"
+        params.append(status)
+    if group_id:
+        base_sql += " AND w.group_id = ?"
+        params.append(group_id)
+
+    base_sql += " ORDER BY w.group_id, w.created_at DESC"
+
+    watchlist = await db.fetchall(base_sql, tuple(params))
+
+    if grouped:
+        # 返回分组结构
+        groups = {}
+        for item in watchlist:
+            if item.get('source_type') == 'manual':
+                key = f"manual-{item.get('group_id', 'none')}"
+                label = item.get('group_name') or '自建候选'
+                gtype = 'manual'
+            else:
+                key = f"strategy-{item.get('group_id', 'none')}"
+                label = item.get('group_name') or item.get('strategy_name') or '未知策略'
+                gtype = 'screening'
+
+            if key not in groups:
+                groups[key] = {
+                    "type": gtype,
+                    "label": label,
+                    "group_id": item.get('group_id'),
+                    "screening_strategy_id": item.get('screening_strategy_id'),
+                    "group_type": item.get('group_type', gtype),
+                    "stocks": []
+                }
+            groups[key]["stocks"].append(item)
+
+        return {
+            "account_id": account_id,
+            "groups": list(groups.values()),
+            "total": len(watchlist)
+        }
 
     return {
         "account_id": account_id,
@@ -664,28 +708,34 @@ async def get_watchlist_stock(
 @router.delete("/api/v1/ui/{account_id}/watchlist/{stock_code}")
 async def remove_from_watchlist(
     account_id: str = Path(..., description="账户 ID"),
-    stock_code: str = Path(..., description="股票代码")
+    stock_code: str = Path(..., description="股票代码"),
+    group_id: Optional[int] = Query(None, description="候选组 ID，指定时只删除组内记录"),
 ):
-    """从 watchlist 移除股票"""
+    """从 watchlist 移除股票。指定 group_id 时只删除组内记录"""
     db = get_db_manager()
 
-    # 从数据库验证账户
     account = await db.fetchone("SELECT * FROM accounts WHERE account_id = ? AND is_active = 1", (account_id,))
     if not account:
         raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
 
-    db = get_db_manager()
-
-    # 检查是否存在
-    existing = await db.fetchone(
-        "SELECT id FROM watchlist WHERE account_id = ? AND stock_code = ?",
-        (account_id, stock_code)
-    )
-
-    if not existing:
-        raise HTTPException(status_code=404, detail="股票不在 watchlist 中")
-
-    await db.delete("watchlist", "account_id = ? AND stock_code = ?", (account_id, stock_code))
+    if group_id is not None:
+        # 组内删除：只删除指定组的记录
+        existing = await db.fetchone(
+            "SELECT id FROM watchlist WHERE account_id = ? AND stock_code = ? AND group_id = ?",
+            (account_id, stock_code, group_id)
+        )
+        if not existing:
+            raise HTTPException(status_code=404, detail="该股票不在当前候选组中")
+        await db.delete("watchlist", "account_id = ? AND stock_code = ? AND group_id = ?", (account_id, stock_code, group_id))
+    else:
+        # 全局删除（向后兼容）
+        existing = await db.fetchone(
+            "SELECT id FROM watchlist WHERE account_id = ? AND stock_code = ?",
+            (account_id, stock_code)
+        )
+        if not existing:
+            raise HTTPException(status_code=404, detail="股票不在 watchlist 中")
+        await db.delete("watchlist", "account_id = ? AND stock_code = ?", (account_id, stock_code))
 
     return {
         "success": True,
@@ -724,6 +774,57 @@ async def update_watchlist_status(
     return {
         "success": True,
         "message": f"已更新 {stock_code} 状态为 {status}"
+    }
+
+
+@router.put("/api/v1/ui/{account_id}/candidate-groups/{group_id}/batch-status")
+async def batch_update_watchlist_status(
+    account_id: str = Path(..., description="账户 ID"),
+    group_id: int = Path(..., description="候选组 ID"),
+    status: str = Body(..., description="新状态：pending/watching/bought/sold/ignored"),
+    stock_codes: Optional[List[str]] = Body(None, description="要更新的股票代码列表，为空则更新组内全部"),
+):
+    """批量更新候选组内股票状态
+
+    适用场景：
+    - 批量解除监控（watching → ignored/sold）
+    - 批量标记已处理（pending → watching/sold）
+    - 一键全部忽略
+    """
+    VALID_STATUSES = {"pending", "watching", "bought", "sold", "ignored"}
+    if status not in VALID_STATUSES:
+        raise HTTPException(status_code=400, detail=f"无效状态：{status}，可选：{', '.join(sorted(VALID_STATUSES))}")
+
+    db = get_db_manager()
+
+    account = await db.fetchone("SELECT * FROM accounts WHERE account_id = ? AND is_active = 1", (account_id,))
+    if not account:
+        raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
+
+    group = await db.fetchone("SELECT id FROM candidate_groups WHERE id = ? AND account_id = ?", (group_id, account_id))
+    if not group:
+        raise HTTPException(status_code=404, detail="候选组不存在")
+
+    # 构建 SQL
+    if stock_codes:
+        placeholders = ",".join(["?"] * len(stock_codes))
+        await db.execute(
+            f"UPDATE watchlist SET status = ?, updated_at = ? WHERE group_id = ? AND stock_code IN ({placeholders})",
+            [status, get_china_time(), group_id] + stock_codes
+        )
+        affected = len(stock_codes)
+    else:
+        await db.execute(
+            "UPDATE watchlist SET status = ?, updated_at = ? WHERE group_id = ?",
+            [status, get_china_time(), group_id]
+        )
+        affected = await db.fetchone("SELECT changes() as cnt")
+        affected = affected["cnt"] if affected else 0
+
+    return {
+        "success": True,
+        "message": f"已更新 {affected} 只股票状态为 {status}",
+        "affected": affected,
     }
 
 
@@ -770,6 +871,53 @@ async def update_watchlist_prices(
     }
 
 
+@router.put("/api/v1/ui/{account_id}/watchlist/{stock_code}")
+async def update_watchlist_stock(
+    account_id: str = Path(..., description="账户 ID"),
+    stock_code: str = Path(..., description="股票代码"),
+    group_id: int = Body(..., description="候选组 ID"),
+    stock_name: Optional[str] = Body(None, description="股票名称"),
+    buy_price: Optional[float] = Body(None, description="买入价格"),
+    stop_loss_price: Optional[float] = Body(None, description="止损价格"),
+    take_profit_price: Optional[float] = Body(None, description="止盈价格"),
+    target_quantity: Optional[int] = Body(None, description="目标数量"),
+    status: Optional[str] = Body(None, description="状态"),
+    reason: Optional[str] = Body(None, description="入选原因"),
+):
+    """更新候选组内指定股票的参数（组级别编辑）"""
+    db = get_db_manager()
+
+    account = await db.fetchone("SELECT * FROM accounts WHERE account_id = ? AND is_active = 1", (account_id,))
+    if not account:
+        raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
+
+    # 检查当前组内是否存在
+    existing = await db.fetchone(
+        "SELECT id FROM watchlist WHERE account_id = ? AND stock_code = ? AND group_id = ?",
+        (account_id, stock_code, group_id)
+    )
+    if not existing:
+        raise HTTPException(status_code=404, detail="该股票不在当前候选组中")
+
+    update_data = {"updated_at": get_china_time()}
+    if stock_name is not None: update_data["stock_name"] = stock_name
+    if buy_price is not None: update_data["buy_price"] = buy_price
+    if stop_loss_price is not None: update_data["stop_loss_price"] = stop_loss_price
+    if take_profit_price is not None: update_data["take_profit_price"] = take_profit_price
+    if target_quantity is not None: update_data["target_quantity"] = target_quantity
+    if status is not None: update_data["status"] = status
+    if reason is not None: update_data["reason"] = reason
+
+    if len(update_data) <= 1:
+        return {"success": False, "message": "未提供更新数据"}
+
+    await db.update("watchlist", update_data,
+                    "account_id = ? AND stock_code = ? AND group_id = ?",
+                    (account_id, stock_code, group_id))
+
+    return {"success": True, "message": f"已更新 {stock_code}"}
+
+
 @router.post("/api/v1/ui/{account_id}/watchlist/clear")
 async def clear_watchlist(
     account_id: str = Path(..., description="账户 ID"),
@@ -794,3 +942,396 @@ async def clear_watchlist(
         "success": True,
         "message": "watchlist 已清空"
     }
+
+
+# ============== 候选组管理 ==============
+
+@router.get("/api/v1/ui/{account_id}/candidate-groups")
+async def get_candidate_groups(
+    account_id: str = Path(..., description="账户 ID"),
+):
+    """获取该账户下所有候选组（含股票数）"""
+    db = get_db_manager()
+
+    account = await db.fetchone("SELECT * FROM accounts WHERE account_id = ? AND is_active = 1", (account_id,))
+    if not account:
+        raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
+
+    groups = await db.fetchall("""
+        SELECT g.*,
+               s.name as strategy_name,
+               (SELECT COUNT(*) FROM watchlist w WHERE w.group_id = g.id) as stock_count
+        FROM candidate_groups g
+        LEFT JOIN strategies s ON g.screening_strategy_id = s.id
+        WHERE g.account_id = ?
+        ORDER BY g.group_type, g.created_at DESC
+    """, (account_id,))
+
+    return {
+        "account_id": account_id,
+        "groups": groups,
+        "count": len(groups)
+    }
+
+
+@router.post("/api/v1/ui/{account_id}/candidate-groups")
+async def create_candidate_group(
+    account_id: str = Path(..., description="账户 ID"),
+    name: str = Body(..., description="候选组名称"),
+    screening_strategy_id: Optional[int] = Body(None, description="关联的选股策略 ID"),
+):
+    """创建手动候选组"""
+    db = get_db_manager()
+
+    account = await db.fetchone("SELECT * FROM accounts WHERE account_id = ? AND is_active = 1", (account_id,))
+    if not account:
+        raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
+
+    # 如果关联了策略，验证策略存在
+    if screening_strategy_id:
+        strategy = await db.fetchone(
+            "SELECT id FROM strategies WHERE id = ? AND account_id = ?",
+            (screening_strategy_id, account_id)
+        )
+        if not strategy:
+            raise HTTPException(status_code=404, detail="关联的选股策略不存在")
+
+    now = get_china_time().isoformat()
+    group_id = await db.insert("candidate_groups", {
+        "account_id": account_id,
+        "name": name,
+        "group_type": "manual",
+        "screening_strategy_id": screening_strategy_id,
+        "created_at": now,
+        "updated_at": now,
+    })
+
+    return {
+        "success": True,
+        "message": f"候选组「{name}」已创建",
+        "group_id": group_id
+    }
+
+
+@router.put("/api/v1/ui/{account_id}/candidate-groups/{group_id}")
+async def update_candidate_group(
+    account_id: str = Path(...),
+    group_id: int = Path(...),
+    name: Optional[str] = Body(None, description="新组名"),
+    screening_strategy_id: Optional[int] = Body(None, description="关联的选股策略 ID，None 表示取消关联"),
+):
+    """更新候选组（重命名 / 关联策略）"""
+    db = get_db_manager()
+
+    account = await db.fetchone("SELECT * FROM accounts WHERE account_id = ? AND is_active = 1", (account_id,))
+    if not account:
+        raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
+
+    # 检查组是否属于该账户
+    group = await db.fetchone(
+        "SELECT id, group_type FROM candidate_groups WHERE id = ? AND account_id = ?",
+        (group_id, account_id)
+    )
+    if not group:
+        raise HTTPException(status_code=404, detail="候选组不存在")
+
+    if group['group_type'] == 'screening':
+        raise HTTPException(status_code=400, detail="策略自动创建的候选组不可手动修改")
+
+    update_data = {"updated_at": get_china_time().isoformat()}
+    if name:
+        update_data["name"] = name
+    if screening_strategy_id is not None:
+        if screening_strategy_id:
+            strategy = await db.fetchone(
+                "SELECT id FROM strategies WHERE id = ? AND account_id = ?",
+                (screening_strategy_id, account_id)
+            )
+            if not strategy:
+                raise HTTPException(status_code=404, detail="关联的选股策略不存在")
+        update_data["screening_strategy_id"] = screening_strategy_id
+
+    await db.update("candidate_groups", update_data, "id = ? AND account_id = ?", (group_id, account_id))
+
+    return {"success": True, "message": "候选组已更新"}
+
+
+@router.delete("/api/v1/ui/{account_id}/candidate-groups/{group_id}")
+async def delete_candidate_group(
+    account_id: str = Path(...),
+    group_id: int = Path(...),
+    force: bool = Query(False, description="强制删除，忽略监控中警告"),
+):
+    """删除候选组（默认提示监控中股票，force=true 时直接删除）"""
+    db = get_db_manager()
+
+    account = await db.fetchone("SELECT * FROM accounts WHERE account_id = ? AND is_active = 1", (account_id,))
+    if not account:
+        raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
+
+    group = await db.fetchone(
+        "SELECT id, name, group_type FROM candidate_groups WHERE id = ? AND account_id = ?",
+        (group_id, account_id)
+    )
+    if not group:
+        raise HTTPException(status_code=404, detail="候选组不存在")
+
+    if group['group_type'] == 'screening':
+        raise HTTPException(status_code=400, detail="策略自动创建的候选组不可删除")
+
+    # 检查组内是否有 active 状态的股票（非 force 模式时提示）
+    active_rows = await db.fetchall(
+        "SELECT stock_code, stock_name, status FROM watchlist WHERE group_id = ? AND status IN ('pending', 'watching') LIMIT 10",
+        (group_id,)
+    )
+    if active_rows and not force:
+        details = ", ".join([f"{r['stock_code']}({r['stock_name']})-{r['status']}" for r in active_rows])
+        return {
+            "success": False,
+            "warning": True,
+            "message": f"组内存在 {len(active_rows)} 只监控中的股票，删除后将解除监控",
+            "details": details,
+        }
+
+    # 删除组内所有股票
+    await db.delete("watchlist", "group_id = ?", (group_id,))
+    # 删除组
+    await db.delete("candidate_groups", "id = ? AND account_id = ?", (group_id, account_id))
+
+    return {"success": True, "message": "候选组已删除"}
+
+
+@router.post("/api/v1/ui/{account_id}/watchlist")
+async def add_to_watchlist_manual(
+    account_id: str = Path(..., description="账户 ID"),
+    stock_code: str = Body(..., description="股票代码"),
+    group_id: int = Body(..., description="候选组 ID"),
+    stock_name: Optional[str] = Body(None, description="股票名称"),
+    buy_price: Optional[float] = Body(None, description="买入价格"),
+    stop_loss_price: Optional[float] = Body(None, description="止损价格"),
+    take_profit_price: Optional[float] = Body(None, description="止盈价格"),
+    target_quantity: Optional[int] = Body(100, description="目标数量"),
+    reason: Optional[str] = Body("手动添加", description="入选原因"),
+):
+    """手动添加候选股票到指定候选组"""
+    db = get_db_manager()
+
+    account = await db.fetchone("SELECT * FROM accounts WHERE account_id = ? AND is_active = 1", (account_id,))
+    if not account:
+        raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
+
+    # 验证候选组存在且属于该账户
+    group = await db.fetchone(
+        "SELECT id FROM candidate_groups WHERE id = ? AND account_id = ?",
+        (group_id, account_id)
+    )
+    if not group:
+        raise HTTPException(status_code=404, detail="候选组不存在")
+
+    # 重复检查
+    existing = await db.fetchone(
+        "SELECT id FROM watchlist WHERE account_id = ? AND stock_code = ? AND status IN ('pending', 'watching')",
+        (account_id, stock_code)
+    )
+    if existing:
+        raise HTTPException(status_code=409, detail="该股票已在候选列表中")
+
+    now = get_china_time().isoformat()
+    await db.insert("watchlist", {
+        "account_id": account_id,
+        "strategy_id": None,
+        "group_id": group_id,
+        "source_type": "manual",
+        "stock_code": stock_code,
+        "stock_name": stock_name or stock_code,
+        "reason": reason or "手动添加",
+        "buy_price": buy_price,
+        "stop_loss_price": stop_loss_price,
+        "take_profit_price": take_profit_price,
+        "target_quantity": target_quantity,
+        "status": "pending",
+        "created_at": now,
+        "updated_at": now,
+    })
+
+    return {"success": True, "message": f"已添加 {stock_code} 到候选组"}
+
+
+# ============== 文件导入 ==============
+
+@router.post("/api/v1/ui/{account_id}/watchlist/import-preview")
+async def preview_watchlist_import(
+    account_id: str = Path(..., description="账户 ID"),
+    group_id: int = Body(..., description="候选组 ID"),
+    items: List[Dict[str, Any]] = Body(..., description="待导入项列表 [{code, name}]"),
+):
+    """预览文件导入结果：规范化代码、查名称、检测组内重复"""
+    from services.common.stock_code import normalize_stock_code
+    import sqlite3
+
+    db = get_db_manager()
+
+    account = await db.fetchone("SELECT * FROM accounts WHERE account_id = ? AND is_active = 1", (account_id,))
+    if not account:
+        raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
+
+    group = await db.fetchone(
+        "SELECT id FROM candidate_groups WHERE id = ? AND account_id = ?",
+        (group_id, account_id)
+    )
+    if not group:
+        raise HTTPException(status_code=404, detail="候选组不存在")
+
+    # 当前组内已有的代码（组内不重复）
+    existing_in_group_rows = await db.fetchall(
+        "SELECT stock_code FROM watchlist WHERE account_id = ? AND group_id = ? AND status IN ('pending', 'watching')",
+        (account_id, group_id)
+    )
+    existing_in_group = {row['stock_code'] for row in existing_in_group_rows}
+
+    # 其他组中存在的代码及所在组名（用于提示）
+    other_group_rows = await db.fetchall("""
+        SELECT w.stock_code, GROUP_CONCAT(g.name, ',') as group_names
+        FROM watchlist w
+        LEFT JOIN candidate_groups g ON w.group_id = g.id
+        WHERE w.account_id = ? AND w.group_id != ? AND w.status IN ('pending', 'watching')
+        GROUP BY w.stock_code
+    """, (account_id, group_id))
+    existing_in_other_groups = {row['stock_code']: row['group_names'] for row in other_group_rows}
+
+    # 连接 kline.db 查 stock_base_info
+    kline_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "data", "kline.db")
+    name_map = {}
+    try:
+        conn = sqlite3.connect(kline_path)
+        conn.row_factory = sqlite3.Row
+        codes_to_lookup = []
+        for item in items:
+            raw_code = item.get("code", "").strip()
+            if not raw_code:
+                continue
+            normalized = normalize_stock_code(raw_code)
+            if normalized and "." in normalized:
+                codes_to_lookup.append(normalized)
+
+        if codes_to_lookup:
+            placeholders = ",".join("?" for _ in codes_to_lookup)
+            rows = conn.execute(
+                f"SELECT stock_code, stock_name FROM stock_base_info WHERE stock_code IN ({placeholders})",
+                codes_to_lookup
+            ).fetchall()
+            name_map = {row['stock_code']: row['stock_name'] for row in rows}
+        conn.close()
+    except Exception:
+        pass
+
+    results = []
+    for item in items:
+        raw_code = item.get("code", "").strip()
+        raw_name = item.get("name", "").strip()
+
+        if not raw_code:
+            results.append({"raw_code": raw_code, "stock_code": None, "stock_name": None, "status": "invalid", "existing_groups": None})
+            continue
+
+        normalized = normalize_stock_code(raw_code)
+        if not normalized or "." not in normalized:
+            results.append({"raw_code": raw_code, "stock_code": None, "stock_name": None, "status": "invalid", "existing_groups": None})
+            continue
+
+        stock_name = raw_name or name_map.get(normalized, normalized)
+
+        # 检查重复：组内 > 其他组 > 新
+        if normalized in existing_in_group:
+            status = "duplicate_in_group"
+        elif normalized in existing_in_other_groups:
+            status = "duplicate_other"
+        else:
+            status = "new"
+
+        results.append({
+            "raw_code": raw_code,
+            "stock_code": normalized,
+            "stock_name": stock_name,
+            "status": status,
+            "existing_groups": existing_in_other_groups.get(normalized),
+        })
+
+    summary = {
+        "total": len(results),
+        "new": sum(1 for r in results if r["status"] == "new"),
+        "duplicate_in_group": sum(1 for r in results if r["status"] == "duplicate_in_group"),
+        "duplicate_other": sum(1 for r in results if r["status"] == "duplicate_other"),
+        "invalid": sum(1 for r in results if r["status"] == "invalid"),
+    }
+
+    return {"results": results, "summary": summary}
+
+
+@router.post("/api/v1/ui/{account_id}/watchlist/batch-add")
+async def batch_add_to_watchlist(
+    account_id: str = Path(..., description="账户 ID"),
+    group_id: int = Body(..., description="候选组 ID"),
+    items: List[Dict[str, Any]] = Body(..., description="确认导入项 [{stock_code, stock_name}]"),
+):
+    """批量添加股票到候选组，只检查组内重复"""
+    db = get_db_manager()
+
+    account = await db.fetchone("SELECT * FROM accounts WHERE account_id = ? AND is_active = 1", (account_id,))
+    if not account:
+        raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
+
+    group = await db.fetchone(
+        "SELECT id FROM candidate_groups WHERE id = ? AND account_id = ?",
+        (group_id, account_id)
+    )
+    if not group:
+        raise HTTPException(status_code=404, detail="候选组不存在")
+
+    # 只检查当前组内的重复
+    existing_rows = await db.fetchall(
+        "SELECT stock_code FROM watchlist WHERE account_id = ? AND group_id = ? AND status IN ('pending', 'watching')",
+        (account_id, group_id)
+    )
+    existing_codes = {row['stock_code'] for row in existing_rows}
+
+    added = 0
+    skipped = 0
+    now = get_china_time().isoformat()
+
+    for item in items:
+        stock_code = item.get("stock_code", "").strip()
+        stock_name = (item.get("stock_name") or stock_code).strip()
+
+        if not stock_code or "." not in stock_code:
+            skipped += 1
+            continue
+
+        if stock_code in existing_codes:
+            skipped += 1
+            continue
+
+        await db.insert("watchlist", {
+            "account_id": account_id,
+            "strategy_id": None,
+            "group_id": group_id,
+            "source_type": "manual",
+            "stock_code": stock_code,
+            "stock_name": stock_name,
+            "reason": "文件导入",
+            "buy_price": None,
+            "stop_loss_price": None,
+            "take_profit_price": None,
+            "target_quantity": 100,
+            "status": "pending",
+            "created_at": now,
+            "updated_at": now,
+        })
+        existing_codes.add(stock_code)
+        added += 1
+
+    message = f"成功导入 {added} 只股票"
+    if skipped > 0:
+        message += f"，跳过 {skipped} 只（组内重复或无效）"
+
+    return {"success": True, "added": added, "skipped": skipped, "message": message}

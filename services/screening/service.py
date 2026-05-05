@@ -164,6 +164,11 @@ class ScreeningService:
             if not config:
                 continue
 
+            # 确保该策略有对应的候选组
+            group_id = await self._ensure_candidate_group(
+                account_id, strategy.get('id'), strategy.get('name')
+            )
+
             # 获取匹配度阈值（从数据库字段或 config 中读取，默认 50%）
             match_score_threshold = strategy.get('match_score_threshold', 0.5)
             if match_score_threshold is None:
@@ -195,7 +200,8 @@ class ScreeningService:
                         account_id,
                         strategy.get('id'),
                         candidate,
-                        config
+                        config,
+                        group_id=group_id
                     )
                 else:
                     # 直接加入 watchlist
@@ -203,7 +209,8 @@ class ScreeningService:
                         account_id,
                         strategy.get('id'),
                         candidate,
-                        config
+                        config,
+                        group_id=group_id
                     )
 
         self._progress["current_phase"] = "done"
@@ -713,12 +720,39 @@ class ScreeningService:
 
         return candidates
 
+    async def _ensure_candidate_group(
+        self,
+        account_id: str,
+        strategy_id: int,
+        strategy_name: str
+    ) -> int:
+        """确保策略有对应的候选组，无则自动创建"""
+        db = get_db_manager()
+
+        group = await db.fetchone(
+            "SELECT id FROM candidate_groups WHERE account_id = ? AND group_type = 'screening' AND screening_strategy_id = ?",
+            (account_id, strategy_id)
+        )
+
+        if group:
+            return group['id']
+
+        group_id = await db.insert("candidate_groups", {
+            "account_id": account_id,
+            "name": f"策略: {strategy_name or strategy_id}",
+            "group_type": "screening",
+            "screening_strategy_id": strategy_id,
+        })
+        print(f"[Screening] 自动创建候选组: 策略: {strategy_name} (id={group_id})")
+        return group_id
+
     async def _add_to_watchlist(
         self,
         account_id: str,
         strategy_id: int,
         candidate: Dict,
-        strategy_config: Optional[Dict] = None
+        strategy_config: Optional[Dict] = None,
+        group_id: Optional[int] = None
     ):
         """
         将候选股票添加到 watchlist
@@ -779,6 +813,8 @@ class ScreeningService:
         watchlist_data = {
             "account_id": account_id,
             "strategy_id": strategy_id,
+            "group_id": group_id,
+            "source_type": "screening",
             "stock_code": candidate['stock_code'],
             "stock_name": candidate.get('stock_name', ''),
             "reason": candidate.get('reason', ''),
@@ -799,7 +835,8 @@ class ScreeningService:
         account_id: str,
         strategy_id: int,
         candidate: Dict,
-        strategy_config: Optional[Dict] = None
+        strategy_config: Optional[Dict] = None,
+        group_id: Optional[int] = None
     ):
         """
         将候选股票暂存到临时表（待用户确认）
@@ -853,6 +890,7 @@ class ScreeningService:
         temp_data = {
             "account_id": account_id,
             "strategy_id": strategy_id,
+            "group_id": group_id,
             "stock_code": candidate['stock_code'],
             "stock_name": candidate.get('stock_name', ''),
             "reason": candidate.get('reason', ''),
@@ -902,6 +940,8 @@ class ScreeningService:
                     await db.insert("watchlist", {
                         "account_id": account_id,
                         "strategy_id": candidate['strategy_id'],
+                        "group_id": candidate.get('group_id'),
+                        "source_type": "screening",
                         "stock_code": stock_code,
                         "stock_name": candidate['stock_name'],
                         "reason": candidate['reason'],
@@ -931,6 +971,8 @@ class ScreeningService:
                     await db.insert("watchlist", {
                         "account_id": account_id,
                         "strategy_id": candidate['strategy_id'],
+                        "group_id": candidate.get('group_id'),
+                        "source_type": "screening",
                         "stock_code": candidate['stock_code'],
                         "stock_name": candidate['stock_name'],
                         "reason": candidate['reason'],
