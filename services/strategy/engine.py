@@ -58,10 +58,24 @@ ALLOWED_BUILTINS = {
     "IndexError": IndexError,
 }
 
+# 允许 import 的模块白名单
+ALLOWED_MODULES = {
+    "pandas", "numpy", "datetime", "statistics", "json", "math", "re",
+    "collections", "itertools", "functools", "dataclasses", "typing",
+}
+
 # 黑名单：禁止使用的函数
 FORBIDDEN = {"__import__", "import", "open", "eval", "exec", "compile",
              "getattr", "setattr", "delattr", "globals", "locals",
              "breakpoint", "input"}
+
+
+def _restricted_import(name, globals=None, locals=None, fromlist=(), level=0):
+    """受限的 import：只允许白名单模块"""
+    base = name.split(".")[0]
+    if base not in ALLOWED_MODULES:
+        raise ImportError(f"模块 '{name}' 不在允许列表中（可用: {', '.join(sorted(ALLOWED_MODULES))}）")
+    return __import__(name, globals, locals, fromlist, level)
 
 
 class StrategyEngine:
@@ -196,11 +210,16 @@ class StrategyEngine:
                     if node.func.attr in forbidden_patterns:
                         errors.append(f"第 {node.lineno} 行: {forbidden_patterns[node.func.attr]}")
 
-            # 检查 import 语句
-            if isinstance(node, (ast.Import, ast.ImportFrom)):
-                module = getattr(node, 'module', None)
-                if module and module in ('AmazingData', 'importlib', 'subprocess', 'os', 'sys'):
-                    warnings.append(f"第 {node.lineno} 行: 导入 '{module}' 可能不安全")
+            # 检查 import 语句（只允许白名单模块）
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    base = alias.name.split(".")[0]
+                    if base not in ALLOWED_MODULES:
+                        errors.append(f"第 {node.lineno} 行: 模块 '{alias.name}' 不在允许列表中")
+            if isinstance(node, ast.ImportFrom) and node.module:
+                base = node.module.split(".")[0]
+                if base not in ALLOWED_MODULES:
+                    errors.append(f"第 {node.lineno} 行: 模块 '{node.module}' 不在允许列表中")
 
             # 检查 open() 调用
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "open":
@@ -226,7 +245,7 @@ class StrategyEngine:
     def _build_env(self, context: Dict) -> Dict:
         """构建安全的执行环境"""
         # 基础环境
-        env = {"__builtins__": {}}
+        env = {"__builtins__": {"__import__": _restricted_import}}
 
         # 注入白名单内置函数
         for name, obj in ALLOWED_BUILTINS.items():
