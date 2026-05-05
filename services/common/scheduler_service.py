@@ -638,10 +638,13 @@ class SchedulerService:
         jobs = []
         if self._scheduler:
             for job in self._scheduler.get_jobs():
+                next_run = str(job.next_run_time) if job.next_run_time else None
+                if next_run and '+' in next_run:
+                    next_run = next_run.split('+')[0]
                 jobs.append({
                     'id': job.id,
                     'name': job.name,
-                    'next_run_time': str(job.next_run_time) if job.next_run_time else None,
+                    'next_run_time': next_run,
                     'trigger': str(job.trigger)
                 })
 

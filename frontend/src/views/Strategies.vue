@@ -194,7 +194,6 @@
                       <el-button type="info" size="small" @click="viewCodeStrategy(row)">详情</el-button>
                       <el-button type="primary" size="small" @click="editCodeStrategy(row)">编辑</el-button>
                       <el-button type="warning" size="small" @click="testRunStrategy(row)">试运行</el-button>
-                      <el-button type="warning" size="small" @click="showScheduleDialogForStrategy(row)">创建调度</el-button>
                       <el-button :type="row.status === 'active' ? 'warning' : 'success'" size="small" @click="toggleScreeningStrategy(row)">
                         {{ row.status === 'active' ? '停用' : '激活' }}
                       </el-button>
@@ -235,7 +234,6 @@
                       <el-button type="info" size="small" @click="viewCodeStrategy(row)">详情</el-button>
                       <el-button type="primary" size="small" @click="editCodeStrategy(row)">编辑</el-button>
                       <el-button type="warning" size="small" @click="testRunStrategy(row)">试运行</el-button>
-                      <el-button type="warning" size="small" @click="showScheduleDialogForStrategy(row)">创建调度</el-button>
                       <el-button :type="row.status === 'active' ? 'warning' : 'success'" size="small" @click="toggleScreeningStrategy(row)">
                         {{ row.status === 'active' ? '停用' : '激活' }}
                       </el-button>
@@ -630,46 +628,6 @@
         </template>
       </el-dialog>
 
-      <!-- 代码策略调度对话框 -->
-      <el-dialog v-model="showScheduleDialog" :title="`创建调度 - ${scheduleStrategyName}`" width="600px">
-        <el-form label-width="120px">
-          <el-form-item label="候选分组" required>
-            <el-select v-model="scheduleForm.groupId" placeholder="选择候选分组" style="width: 100%">
-              <el-option v-for="g in candidateGroups" :key="g.id" :label="g.name" :value="g.id" />
-            </el-select>
-            <div class="hint">策略将在该分组的股票池上运行</div>
-          </el-form-item>
-          <el-form-item label="执行频率">
-            <el-input v-model="scheduleForm.cronText" placeholder="自然语言描述，如：每个交易日14:30执行" clearable @clear="scheduleForm.cron = ''">
-              <template #append>
-                <el-button @click="translateCronInStrategy" :loading="translatingCron">LLM 转译</el-button>
-              </template>
-            </el-input>
-          </el-form-item>
-          <el-form-item label="Cron 表达式" required>
-            <el-input v-model="scheduleForm.cron" placeholder="如: 0 14 * * 1-5" />
-            <div v-if="cronDescription" class="hint" style="color: #67C23A">
-              已转译：{{ cronDescription }}
-            </div>
-            <div class="hint">
-              快捷模板：<br/>
-              <span class="cron-quick-btn" @click="scheduleForm.cron = '0 14 * * 1-5'; scheduleForm.cronText = '每个交易日14:00'" style="cursor: pointer; color: #409EFF; text-decoration: underline">每个交易日14:00</span><br/>
-              <span class="cron-quick-btn" @click="scheduleForm.cron = '0 14 * * *'; scheduleForm.cronText = '每天14:00'" style="cursor: pointer; color: #409EFF; text-decoration: underline">每天14:00</span><br/>
-              <span class="cron-quick-btn" @click="scheduleForm.cron = '0 * * * *'; scheduleForm.cronText = '每小时'" style="cursor: pointer; color: #409EFF; text-decoration: underline">每小时</span>
-            </div>
-          </el-form-item>
-          <el-form-item>
-            <el-button @click="applyQuickCron('0 14 * * 1-5')">交易日14:00</el-button>
-            <el-button @click="applyQuickCron('0 14 * * *')">每天14:00</el-button>
-            <el-button @click="applyQuickCron('0 * * * *')">每小时</el-button>
-          </el-form-item>
-        </el-form>
-        <template #footer>
-          <el-button @click="showScheduleDialog = false">取消</el-button>
-          <el-button type="primary" @click="createScheduleTask" :loading="creatingTask">创建</el-button>
-        </template>
-      </el-dialog>
-
       <!-- 策略试运行对话框 -->
       <el-dialog v-model="showTestRunDialog" :title="`试运行策略 - ${testRunStrategyName}`" width="700px" :close-on-click-modal="false">
         <el-form label-width="120px">
@@ -817,17 +775,8 @@ const loadingCodeStrategies = ref(false)
 const showCodeDetailDialog = ref(false)
 const selectedCodeStrategy = ref(null)
 
-// 调度设置
-const showScheduleDialog = ref(false)
-const scheduleStrategyName = ref('')
-const scheduleStrategyId = ref(null)
-const creatingTask = ref(false)
-const candidateGroups = ref([])
-const scheduleForm = reactive({ groupId: null, cron: '', cronText: '' })
-const translatingCron = ref(false)
-const cronDescription = ref('')
-
 // 策略试运行
+const candidateGroups = ref([])
 const showTestRunDialog = ref(false)
 const showTestRunResultDialog = ref(false)
 const testRunStrategyName = ref('')
@@ -1357,85 +1306,6 @@ const deleteScreeningStrategy = async (row) => {
     if (error !== 'cancel') {
       ElMessage.error('删除失败')
     }
-  }
-}
-
-// 代码策略调度
-const showScheduleDialogForStrategy = async (row) => {
-  scheduleStrategyId.value = row.id
-  scheduleStrategyName.value = row.name
-  scheduleForm.groupId = null
-  scheduleForm.cron = ''
-  scheduleForm.cronText = ''
-  cronDescription.value = ''
-  showScheduleDialog.value = true
-  await loadCandidateGroups()
-}
-
-const applyQuickCron = (cron) => {
-  scheduleForm.cron = cron
-}
-
-const translateCronInStrategy = async () => {
-  if (!scheduleForm.cronText.trim()) {
-    ElMessage.warning('请输入自然语言描述')
-    return
-  }
-  translatingCron.value = true
-  try {
-    const res = await fetch('/api/v1/ui/scheduler/translate-cron', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text: scheduleForm.cronText.trim() })
-    })
-    const data = await res.json()
-    if (data.success && data.cron) {
-      scheduleForm.cron = data.cron
-      cronDescription.value = data.description || '转译成功'
-      ElMessage.success('Cron 表达式已生成')
-    } else {
-      ElMessage.error(data.error || '转译失败，请检查 LLM 配置或直接输入 cron 表达式')
-    }
-  } catch (e) {
-    ElMessage.error('转译请求失败')
-  } finally {
-    translatingCron.value = false
-  }
-}
-
-const createScheduleTask = async () => {
-  if (!scheduleForm.groupId) {
-    ElMessage.warning('请选择候选分组')
-    return
-  }
-  if (!scheduleForm.cron) {
-    ElMessage.warning('请填写 Cron 表达式')
-    return
-  }
-  creatingTask.value = true
-  try {
-    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/strategy-tasks`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        task_type: 'strategy',
-        strategy_id: scheduleStrategyId.value,
-        group_id: scheduleForm.groupId,
-        cron_expression: scheduleForm.cron,
-        enabled: 1,
-      })
-    })
-    const data = await res.json()
-    if (data.success) {
-      ElMessage.success('调度任务已创建')
-      showScheduleDialog.value = false
-    } else {
-      ElMessage.error(data.detail || '创建失败')
-    }
-  } catch (e) {
-    ElMessage.error('创建失败')
-  } finally {
-    creatingTask.value = false
   }
 }
 

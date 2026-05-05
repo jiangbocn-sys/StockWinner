@@ -414,12 +414,12 @@
         </div>
       </el-dialog>
 
-      <!-- 调度设置对话框 -->
-      <el-dialog v-model="showScheduleDialog" title="任务调度设置" width="700px">
+      <!-- 调度设置对话框（只读，仅显示当前组任务） -->
+      <el-dialog v-model="showScheduleDialog" :title="`任务调度 - ${scheduleForm.groupName}`" width="800px">
         <el-alert :title="`当前组：${scheduleForm.groupName}`" :closable="false" type="info" style="margin-bottom: 16px" />
 
         <div v-loading="tasksLoading">
-          <el-table :data="strategyTasks" stripe style="width: 100%">
+          <el-table :data="groupStrategyTasks" stripe style="width: 100%">
             <el-table-column label="类型" width="80">
               <template #default="{ row }">
                 <el-tag :type="row.task_type === 'builtin' ? 'warning' : 'primary'" size="small">
@@ -454,96 +454,13 @@
                 </el-tooltip>
               </template>
             </el-table-column>
-            <el-table-column label="操作" width="260">
-              <template #default="{ row }">
-                <el-button type="primary" size="small" @click="editTask(row)">编辑</el-button>
-                <el-button :type="row.enabled ? 'warning' : 'success'" size="small" @click="toggleTask(row)">
-                  {{ row.enabled ? '停用' : '启用' }}
-                </el-button>
-                <el-button type="success" size="small" @click="runTask(row)" :disabled="runningTask === row.id">手动执行</el-button>
-                <el-button type="danger" size="small" @click="deleteTask(row)">删除</el-button>
-              </template>
-            </el-table-column>
           </el-table>
-          <el-empty v-if="!tasksLoading && strategyTasks.length === 0" description="暂无任务" />
+          <el-empty v-if="!tasksLoading && groupStrategyTasks.length === 0" description="当前组暂无任务" />
         </div>
 
-        <el-divider />
-        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px">
-          <span style="font-weight: 600">添加任务</span>
-          <el-button size="small" @click="scanTasks" :loading="scanningTasks">
-            <el-icon><Refresh /></el-icon>
-            扫描插件
-          </el-button>
+        <div class="hint" style="margin-top: 16px; text-align: center; color: #909399">
+          任务的创建、编辑、删除请前往「数据维护」页面
         </div>
-        <el-form :model="newTaskForm" label-width="100px">
-          <el-form-item label="任务类型">
-            <el-radio-group v-model="newTaskForm.taskType">
-              <el-radio value="builtin">内置功能</el-radio>
-              <el-radio value="strategy">策略任务</el-radio>
-            </el-radio-group>
-          </el-form-item>
-          <el-form-item v-if="newTaskForm.taskType === 'builtin'" label="选择功能">
-            <el-select v-model="newTaskForm.module" placeholder="选择功能" style="width: 100%">
-              <el-option-group
-                v-for="group in taskCategoryGroups"
-                :key="group.category"
-                :label="group.category"
-              >
-                <el-option
-                  v-for="t in group.tasks"
-                  :key="t.module"
-                  :label="t.name + (t.source === 'user' ? ' ★' : '')"
-                  :value="t.module"
-                >
-                  <span>{{ t.name }}</span>
-                  <span v-if="t.source === 'user'" style="color: #E6A23C; margin-left: 4px">★</span>
-                  <span v-if="!t.available" style="color: #F56C6C; margin-left: 4px">(加载失败)</span>
-                </el-option>
-              </el-option-group>
-            </el-select>
-          </el-form-item>
-          <el-form-item v-if="newTaskForm.taskType === 'strategy'" label="关联策略">
-            <el-select v-model="newTaskForm.strategyId" placeholder="选择策略" style="width: 100%">
-              <el-option
-                v-for="s in taskStrategies"
-                :key="s.id"
-                :label="s.name + (s.code_type === 'python' ? ' [代码]' : '')"
-                :value="s.id"
-              />
-            </el-select>
-          </el-form-item>
-          <el-form-item label="执行频率">
-            <div style="display: flex; gap: 8px; width: 100%">
-              <el-input v-model="newTaskForm.cronText" placeholder="自然语言描述，如：每个交易日14:30执行" clearable style="flex: 1" @clear="newTaskForm.cron = ''">
-                <template #append>
-                  <el-button @click="translateCron" :loading="translatingCron">LLM 转译</el-button>
-                </template>
-              </el-input>
-            </div>
-          </el-form-item>
-          <el-form-item label="Cron 表达式">
-            <el-input v-model="newTaskForm.cron" placeholder="如: 0 14 * * 1-5" />
-            <div v-if="cronDescription" class="hint" style="color: #67C23A">
-              已转译：{{ cronDescription }}
-            </div>
-            <div class="hint">
-              快捷模板（可直接点击）：<br/>
-              <span class="cron-quick-btn" @click="newTaskForm.cron = '0 14 * * 1-5'; newTaskForm.cronText = '每个交易日14:00'" style="cursor: pointer; color: #409EFF; text-decoration: underline">每个交易日14:00</span> |
-              <span class="cron-quick-btn" @click="newTaskForm.cron = '0 14 * * *'; newTaskForm.cronText = '每天14:00'" style="cursor: pointer; color: #409EFF; text-decoration: underline">每天14:00</span> |
-              <span class="cron-quick-btn" @click="newTaskForm.cron = '0 * * * *'; newTaskForm.cronText = '每小时'" style="cursor: pointer; color: #409EFF; text-decoration: underline">每小时</span>
-            </div>
-          </el-form-item>
-          <el-form-item label="启用">
-            <el-switch v-model="newTaskForm.enabled" :active-value="1" :inactive-value="0" />
-          </el-form-item>
-          <el-form-item>
-            <el-button type="primary" @click="createTask" :loading="creatingTask">
-              {{ editingTaskId ? '更新任务' : '创建任务' }}
-            </el-button>
-            <el-button v-if="editingTaskId" @click="cancelEditTask">取消编辑</el-button>
-          </el-form-item>
-        </el-form>
       </el-dialog>
 
       <!-- 批量修改状态对话框 -->
@@ -604,19 +521,11 @@ const dataStats = ref({ total_stocks: 0, total_records: 0, latest_date: null, ea
 const strategies = ref([])
 // 关联策略：仅配置型选股策略（排除代码型）
 const screeningStrategies = computed(() => strategies.value.filter(s => s.strategy_type === 'screening' && s.code_type !== 'python'))
-// 调度任务可选：screening 类型或代码型策略
-const taskStrategies = computed(() => {
-  return strategies.value.filter(s => s.strategy_type === 'screening' || s.code_type === 'python')
-})
 
-// 任务插件按 category 分组
-const taskCategoryGroups = computed(() => {
-  const groups = {}
-  for (const t of taskRegistry.value) {
-    if (!groups[t.category]) groups[t.category] = []
-    groups[t.category].push(t)
-  }
-  return Object.entries(groups).map(([category, tasks]) => ({ category, tasks }))
+// 调度：仅显示当前组的任务（只读）
+const groupStrategyTasks = computed(() => {
+  if (!scheduleForm.groupId) return []
+  return strategyTasks.value.filter(t => t.group_id === scheduleForm.groupId)
 })
 
 // 对话框
@@ -654,15 +563,7 @@ const batchStatusForm = reactive({ status: 'sold' })
 const showScheduleDialog = ref(false)
 const tasksLoading = ref(false)
 const strategyTasks = ref([])
-const runningTask = ref(null)
-const creatingTask = ref(false)
-const scanningTasks = ref(false)
-const translatingCron = ref(false)
-const taskRegistry = ref([])
-const editingTaskId = ref(null)
-const cronDescription = ref('')
 const scheduleForm = reactive({ groupId: null, groupName: '' })
-const newTaskForm = reactive({ taskType: 'builtin', module: null, strategyId: null, cron: '', cronText: '', enabled: 1 })
 
 // 表单
 const createGroupForm = reactive({ name: '', screeningStrategyId: null })
@@ -761,7 +662,6 @@ const handleGroupAction = (cmd, group) => {
     scheduleForm.groupName = group.name
     showScheduleDialog.value = true
     loadTasks()
-    loadTaskRegistry()
   } else if (cmd === 'delete') {
     handleDeleteGroup(group)
   }
@@ -842,7 +742,7 @@ const associateStrategy = async () => {
   }
 }
 
-// ========== 策略任务 ==========
+// ========== 策略任务（只读） ==========
 
 const loadTasks = async () => {
   tasksLoading.value = true
@@ -857,157 +757,6 @@ const loadTasks = async () => {
   }
 }
 
-const loadTaskRegistry = async () => {
-  try {
-    const res = await fetch(`/api/v1/ui/scheduler/task-registry`)
-    const data = await res.json()
-    taskRegistry.value = data.tasks || []
-    // 默认选中第一个可用任务
-    if (taskRegistry.value.length > 0 && !newTaskForm.module) {
-      const first = taskRegistry.value.find(t => t.available)
-      if (first) newTaskForm.module = first.module
-    }
-  } catch (e) {
-    console.error('加载任务注册表失败:', e)
-  }
-}
-
-const scanTasks = async () => {
-  scanningTasks.value = true
-  try {
-    const res = await fetch(`/api/v1/ui/scheduler/scan-tasks`, { method: 'POST' })
-    const data = await res.json()
-    taskRegistry.value = data.tasks || []
-    ElMessage.success(data.message || '扫描完成')
-  } catch (e) {
-    ElMessage.error('扫描失败')
-  } finally {
-    scanningTasks.value = false
-  }
-}
-
-const createTask = async () => {
-  if (newTaskForm.taskType === 'builtin' && !newTaskForm.module) {
-    ElMessage.warning('请选择功能')
-    return
-  }
-  if (newTaskForm.taskType === 'strategy' && !newTaskForm.strategyId) {
-    ElMessage.warning('请选择策略')
-    return
-  }
-  if (!newTaskForm.cron.trim()) {
-    if (newTaskForm.cronText.trim()) {
-      // 自动翻译自然语言
-      translatingCron.value = true
-      try {
-        const res = await fetch('/api/v1/ui/scheduler/translate-cron', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ text: newTaskForm.cronText.trim() })
-        })
-        const data = await res.json()
-        if (data.success && data.cron) {
-          newTaskForm.cron = data.cron
-          cronDescription.value = data.description || '转译成功'
-        } else {
-          ElMessage.error(data.error || 'Cron 表达式转译失败，请检查 LLM 配置或直接输入 cron 表达式')
-          return
-        }
-      } catch (e) {
-        ElMessage.error('Cron 表达式自动转译失败')
-        return
-      } finally {
-        translatingCron.value = false
-      }
-    } else {
-      ElMessage.warning('请输入 Cron 表达式或自然语言描述')
-      return
-    }
-  }
-  creatingTask.value = true
-  try {
-    const body = {
-      task_type: newTaskForm.taskType,
-      group_id: scheduleForm.groupId,
-      cron_expression: newTaskForm.cron,
-      enabled: newTaskForm.enabled,
-    }
-    if (newTaskForm.taskType === 'builtin') {
-      body.module = newTaskForm.module
-    } else {
-      body.strategy_id = newTaskForm.strategyId
-    }
-
-    let res
-    if (editingTaskId.value) {
-      res = await fetch(`/api/v1/ui/${currentAccountId.value}/strategy-tasks/${editingTaskId.value}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body)
-      })
-    } else {
-      res = await fetch(`/api/v1/ui/${currentAccountId.value}/strategy-tasks`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body)
-      })
-    }
-    const data = await res.json()
-    if (res.ok) {
-      ElMessage.success(editingTaskId.value ? '任务已更新，立即生效' : (data.message || '任务已创建'))
-      editingTaskId.value = null
-      newTaskForm.module = null
-      newTaskForm.strategyId = null
-      newTaskForm.cron = ''
-      newTaskForm.enabled = 1
-      await loadTasks()
-    } else {
-      ElMessage.error(data.detail || '创建失败')
-    }
-  } catch (e) {
-    ElMessage.error(editingTaskId.value ? '更新失败' : '创建失败')
-  } finally {
-    creatingTask.value = false
-  }
-}
-
-const cancelEditTask = () => {
-  editingTaskId.value = null
-  newTaskForm.module = null
-  newTaskForm.strategyId = null
-  newTaskForm.cron = ''
-  newTaskForm.cronText = ''
-  newTaskForm.enabled = 1
-  cronDescription.value = ''
-}
-
-const translateCron = async () => {
-  if (!newTaskForm.cronText.trim()) {
-    ElMessage.warning('请输入自然语言描述')
-    return
-  }
-  translatingCron.value = true
-  try {
-    const res = await fetch('/api/v1/ui/scheduler/translate-cron', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text: newTaskForm.cronText.trim() })
-    })
-    const data = await res.json()
-    if (data.success && data.cron) {
-      newTaskForm.cron = data.cron
-      cronDescription.value = data.description || '转译成功'
-      ElMessage.success('Cron 表达式已生成')
-    } else {
-      ElMessage.error(data.error || '转译失败，请检查 LLM 配置')
-    }
-  } catch (e) {
-    ElMessage.error('转译请求失败')
-  } finally {
-    translatingCron.value = false
-  }
-}
-
 // 解析任务执行错误信息
 const parseTaskError = (task) => {
   try {
@@ -1017,70 +766,6 @@ const parseTaskError = (task) => {
     return '执行失败，无详细错误信息'
   } catch {
     return '错误信息解析失败'
-  }
-}
-
-const runTask = async (task) => {
-  runningTask.value = task.id
-  try {
-    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/strategy-tasks/${task.id}/run`, {
-      method: 'POST'
-    })
-    const data = await res.json()
-    if (res.ok) {
-      ElMessage.success('任务已启动')
-      setTimeout(() => loadTasks(), 2000)
-    } else {
-      ElMessage.error(data.detail || '执行失败')
-    }
-  } catch (e) {
-    ElMessage.error('执行失败')
-  } finally {
-    runningTask.value = null
-  }
-}
-
-const deleteTask = async (task) => {
-  try {
-    await ElMessageBox.confirm('确定删除该任务？', '确认删除', { type: 'warning' })
-    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/strategy-tasks/${task.id}`, { method: 'DELETE' })
-    if (res.ok) {
-      ElMessage.success('任务已删除，重启后端服务生效')
-      await loadTasks()
-    }
-  } catch (e) {
-    if (e !== 'cancel') ElMessage.error('删除失败')
-  }
-}
-
-const editTask = (task) => {
-  editingTaskId.value = task.id
-  newTaskForm.taskType = task.task_type || 'strategy'
-  newTaskForm.module = task.module || null
-  newTaskForm.strategyId = task.strategy_id || null
-  newTaskForm.cron = task.cron_expression || ''
-  newTaskForm.enabled = task.enabled
-  // 打开调度设置对话框（编辑模式）
-  showScheduleDialog.value = true
-}
-
-const toggleTask = async (task) => {
-  try {
-    const newEnabled = task.enabled ? 0 : 1
-    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/strategy-tasks/${task.id}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ enabled: newEnabled })
-    })
-    if (res.ok) {
-      ElMessage.success(newEnabled ? '任务已启用，立即生效' : '任务已停用')
-      await loadTasks()
-    } else {
-      const data = await res.json()
-      ElMessage.error(data.detail || '操作失败')
-    }
-  } catch (e) {
-    ElMessage.error('操作失败')
   }
 }
 
