@@ -107,12 +107,36 @@ def get_service_status() -> dict:
     screening_status = screening_service.get_status()
     monitoring_status = trading_monitor.get_status()
 
+    # 检测 Galaxy SDK 连接状态
+    galaxy_status = check_sdk_connection()
+
     return {
-        "galaxy_api": "disconnected",  # TODO: 接入银河 SDK
+        "galaxy_api": galaxy_status,
         "screening": "running" if screening_status.get("running") else "stopped",
         "monitoring": "running" if monitoring_status.get("running") else "stopped",
         "notification": "ok"
     }
+
+
+def check_sdk_connection() -> str:
+    """
+    检测 AmazingData/银河 SDK 连接状态
+
+    Returns:
+        "connected" | "login_failed" | "disconnected"
+    """
+    try:
+        from services.common.sdk_manager import get_sdk_manager, SDKManager
+        sdk_mgr = get_sdk_manager()
+        # 尝试登录检测
+        if sdk_mgr._ensure_login():
+            return "connected"
+        else:
+            return "login_failed"
+    except ImportError:
+        return "disconnected"
+    except Exception as e:
+        return "login_failed"
 
 
 def get_resource_usage() -> dict:

@@ -18,26 +18,17 @@ def patch_pandas_frequency_issue():
     """修补pandas频率字符串兼容性问题"""
     try:
         import pandas as pd
+        import pandas._libs.tslibs.offsets as offsets
 
-        # 检查pandas版本，如果版本较高则可能存在频率解析问题
-        version_tuple = tuple(map(int, pd.__version__.split('.')[:2]))
-
-        if version_tuple >= (2, 0):  # pandas 2.0+ 及 3.x 版本
-            # 尝试动态修补pandas的时间频率映射
-            import pandas._libs.tslibs.offsets as offsets
-
-            # 备份原始函数
-            orig_get_offset = getattr(offsets, '_get_offset', None)
-
-            if orig_get_offset:
-                def patched_get_offset(freqstr, tick_class=None):
-                    # 将大写S转换为小写s
-                    freqstr = freqstr.upper().replace('S', 's')
-                    return orig_get_offset(freqstr, tick_class)
-
-                # 注意：这个修补可能无法完全解决所有问题
-                # 因为SDK内部可能以其他方式引用pandas
-                pass  # 暂时跳过，因为这种修补可能有风险
+        # 修补 pandas 频率字符串映射：将 "S"(秒) 映射为 "s"
+        # SDK 内部使用大写 "S"，但 pandas 3.x 只认小写 "s"
+        orig_to_offset = getattr(offsets, 'to_offset', None)
+        if orig_to_offset:
+            def _patched_to_offset(freqstr, *args, **kwargs):
+                if isinstance(freqstr, str):
+                    freqstr = freqstr.replace('S', 's')
+                return orig_to_offset(freqstr, *args, **kwargs)
+            offsets.to_offset = _patched_to_offset
 
     except Exception as e:
         logger.warning(f"pandas兼容性修补失败: {e}")

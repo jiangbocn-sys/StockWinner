@@ -842,6 +842,51 @@ class SchedulerService:
                     (task["account_id"], task["group_id"])
                 )
 
+                # ── 预取当日实时行情（聚合当日 tick → OHLCV K 线）──
+                _pre_fetched_realtime_quotes: Dict[str, Dict] = {}
+                stock_codes = [s["stock_code"] for s in stocks]
+                try:
+                    from services.common.sdk_manager import get_sdk_manager
+                    from services.data.local_data_service import is_trading_hours
+
+                    if is_trading_hours() and stock_codes:
+                        sdk_mgr = get_sdk_manager()
+                        if sdk_mgr._ensure_login():
+                            md = sdk_mgr.get_market_data()
+                            today_int = int(get_china_time().strftime('%Y%m%d'))
+                            result = md.query_snapshot(
+                                code_list=stock_codes,
+                                begin_date=today_int,
+                                end_date=today_int
+                            )
+                            if result and isinstance(result, dict):
+                                for date_key in result:
+                                    inner = result[date_key]
+                                    for code, tick_df in inner.items():
+                                        if tick_df is None or not hasattr(tick_df, 'empty') or tick_df.empty:
+                                            continue
+                                        # 过滤有成交的 tick
+                                        trade_ticks = tick_df[tick_df['volume'] > 0]
+                                        if trade_ticks.empty:
+                                            continue
+                                        # 聚合为当日 OHLCV
+                                        _pre_fetched_realtime_quotes[code] = {
+                                            'open': float(trade_ticks.iloc[0]['open']),
+                                            'high': float(trade_ticks['high'].max()),
+                                            'low': float(trade_ticks['low'].min()),
+                                            'close': float(trade_ticks.iloc[-1]['last']),
+                                            'volume': float(trade_ticks.iloc[-1]['volume']),
+                                            'amount': float(trade_ticks.iloc[-1]['amount']),
+                                        }
+                                logger.info(f"预取实时行情成功: {len(_pre_fetched_realtime_quotes)}/{len(stock_codes)} 只股票")
+                        else:
+                            logger.warning("SDK 未登录，跳过实时行情预取")
+                except Exception as e:
+                    import traceback
+                    tb = traceback.format_exc()
+                    logger.warning(f"实时行情预取失败: {e}")
+                    logger.warning(tb)
+
                 # ── 数据获取函数（策略沙盒中注入）──
 
                 # ① 本地 K 线查询（同步，不经过 TGW）
@@ -875,25 +920,37 @@ class SchedulerService:
                     return lds.get_daily_factors_batch(stock_codes, target_date)
 
                 # ⑤ 拼接 K 线：本地历史 + 当日实时（同步，TGW 部分走 gateway 排队）
+                # 注：当日实时行情已在策略执行前预取，直接传入 _pre_fetched_realtime_quotes
                 def _get_kline_spliced(stock_codes: list, lookback: int = 100):
                     """本地历史 + 当日实时行情拼接（仅当日走 TGW）"""
                     from services.data.local_data_service import get_local_data_service
                     lds = get_local_data_service()
-                    return lds.get_kline_spliced(stock_codes, lookback=lookback)
+                    # 使用预取的实时行情
+                    realtime_quotes = {}
+                    for code in stock_codes:
+                        if code in _pre_fetched_realtime_quotes:
+                            realtime_quotes[code] = _pre_fetched_realtime_quotes[code]
+                    return lds.get_kline_spliced(stock_codes, lookback=lookback, realtime_quotes=realtime_quotes if realtime_quotes else None)
 
                 # ⑤b 智能 K 线获取：根据交易时段自动选择数据源
                 def _get_kline_smart(stock_codes: list, lookback: int = 100):
                     """
-                    盘中 → 本地历史 + TGW当日实时拼接
+                    盘中 → 本地历史 + 预取的当日实时 OHLCV 拼接
                     盘后 → 纯本地数据（当日因子已计算完成）
                     返回格式: Dict[str, List[Dict]] 与策略代码兼容
                     """
-                    from services.data.local_data_service import get_local_data_service
+                    from services.data.local_data_service import get_local_data_service, is_trading_hours
+
                     lds = get_local_data_service()
-                    raw = lds.get_kline_with_realtime(
-                        stock_codes, lookback=lookback,
-                        fetch_realtime_fn=_get_realtime_quote,
-                    )
+
+                    if not is_trading_hours():
+                        # 盘后：直接返回本地数据
+                        raw = lds.get_batch_kline(stock_codes, limit=lookback)
+                    else:
+                        # 盘中：使用预取的实时行情
+                        realtime_quotes = {code: data for code, data in _pre_fetched_realtime_quotes.items() if code in stock_codes}
+                        raw = lds.get_kline_spliced(stock_codes, lookback=lookback, realtime_quotes=realtime_quotes if realtime_quotes else None)
+
                     # DataFrame → List[Dict] 转换，兼容策略代码
                     result = {}
                     for code, df in raw.items():
@@ -903,11 +960,10 @@ class SchedulerService:
                             result[code] = df
                     return result
 
-                # ⑥ 实时行情（异步，走 gateway → sdk_connection_manager 排队）
-                async def _get_realtime_quote(stock_code: str):
-                    """获取当日实时行情（走 TGW）"""
-                    gateway = await get_gateway()
-                    return await gateway.get_market_data(stock_code)
+                # ⑥ 实时行情（使用预取数据）
+                def _get_realtime_quote(stock_code: str):
+                    """获取预取的当日实时 OHLCV"""
+                    return _pre_fetched_realtime_quotes.get(stock_code)
 
                 # ⑦ 单股 K 线（异步，走 gateway → sdk_connection_manager 排队）
                 async def _get_kline(stock_code: str, period: str = "day", start_date: str = None):
@@ -943,9 +999,9 @@ class SchedulerService:
                     "get_batch_kline": _get_batch_kline,              # 同步: 批量本地 K 线
                     "get_factors": _get_factors,                      # 同步: stock_daily_factors
                     "get_factors_batch": _get_factors_batch,          # 同步: 批量因子
-                    "get_kline_spliced": _get_kline_spliced,          # 同步: 本地历史+当日拼接
+                    "get_kline_spliced": _get_kline_spliced,          # 同步: 本地历史+预取当日拼接
                     "get_kline_smart": _get_kline_smart,              # 同步: 自动判断盘中/盘后
-                    "get_realtime_quote": _get_realtime_quote,        # 异步: 走 gateway TGW
+                    "get_realtime_quote": _get_realtime_quote,        # 同步: 预取当日 OHLCV
                 }
 
                 engine = get_strategy_engine()
