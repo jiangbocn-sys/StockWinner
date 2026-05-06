@@ -1,10 +1,11 @@
 """
-交易记录 API
+交易记录、交易信号、交易策略 API
 """
 
-from fastapi import APIRouter, HTTPException, Path, Query
+from fastapi import APIRouter, HTTPException, Path, Query, Body
 from typing import Optional
 from datetime import datetime
+from pydantic import BaseModel
 from services.common.account_manager import get_account_manager
 from services.common.database import get_db_manager
 from services.common.timezone import get_china_time
@@ -98,3 +99,187 @@ async def get_trades(
         "trades": trades,
         "count": len(trades)
     }
+
+
+# === 交易信号 API ===
+
+@router.get("/api/v1/ui/{account_id}/trading-signals")
+async def get_trading_signals(
+    account_id: str = Path(..., description="账户 ID"),
+    signal_type: Optional[str] = Query(None, description="信号类型过滤"),
+    limit: int = Query(50, description="返回数量限制"),
+    offset: int = Query(0, description="偏移量")
+):
+    """获取交易信号列表"""
+    account_manager = get_account_manager()
+    if not await account_manager.validate_account(account_id):
+        raise HTTPException(status_code=404, detail=f"账户不存在：{account_id}")
+
+    db = get_db_manager()
+
+    where = "account_id = ?"
+    params: list = [account_id]
+
+    if signal_type:
+        where += " AND signal_type = ?"
+        params.append(signal_type)
+
+    params.extend([limit, offset])
+
+    signals = await db.fetchall(
+        f"SELECT * FROM trading_signals WHERE {where} ORDER BY created_at DESC LIMIT ? OFFSET ?",
+        tuple(params)
+    )
+
+    return {"success": True, "signals": signals, "total": len(signals)}
+
+
+# === 交易策略 CRUD API ===
+
+class TradingStrategyCreate(BaseModel):
+    name: str
+    strategy_type: str
+    conditions: str  # JSON
+    action: str
+    target_stocks: Optional[str] = None
+    cooldown_seconds: int = 300
+    enabled: int = 1
+
+
+class TradingStrategyUpdate(BaseModel):
+    name: Optional[str] = None
+    strategy_type: Optional[str] = None
+    conditions: Optional[str] = None
+    action: Optional[str] = None
+    target_stocks: Optional[str] = None
+    cooldown_seconds: Optional[int] = None
+    enabled: Optional[int] = None
+
+
+@router.get("/api/v1/ui/{account_id}/trading-strategies")
+async def list_trading_strategies(
+    account_id: str = Path(..., description="账户 ID"),
+    enabled_only: bool = Query(False)
+):
+    """列出交易策略"""
+    account_manager = get_account_manager()
+    if not await account_manager.validate_account(account_id):
+        raise HTTPException(status_code=404, detail=f"账户不存在：{account_id}")
+
+    db = get_db_manager()
+
+    where = "account_id = ?"
+    params: list = [account_id]
+
+    if enabled_only:
+        where += " AND enabled = 1"
+
+    strategies = await db.fetchall(
+        f"SELECT * FROM trading_strategy_config WHERE {where} ORDER BY created_at DESC",
+        tuple(params)
+    )
+
+    return {"success": True, "strategies": strategies}
+
+
+@router.post("/api/v1/ui/{account_id}/trading-strategies")
+async def create_trading_strategy(
+    account_id: str = Path(..., description="账户 ID"),
+    body: TradingStrategyCreate = Body(...)
+):
+    """创建交易策略"""
+    account_manager = get_account_manager()
+    if not await account_manager.validate_account(account_id):
+        raise HTTPException(status_code=404, detail=f"账户不存在：{account_id}")
+
+    db = get_db_manager()
+
+    strategy_id = await db.insert("trading_strategy_config", {
+        "account_id": account_id,
+        "name": body.name,
+        "strategy_type": body.strategy_type,
+        "conditions": body.conditions,
+        "action": body.action,
+        "target_stocks": body.target_stocks,
+        "cooldown_seconds": body.cooldown_seconds,
+        "enabled": body.enabled,
+    })
+
+    return {"success": True, "message": "策略已创建", "data": {"id": strategy_id}}
+
+
+@router.put("/api/v1/ui/{account_id}/trading-strategies/{strategy_id}")
+async def update_trading_strategy(
+    account_id: str = Path(..., description="账户 ID"),
+    strategy_id: int = Path(...),
+    body: TradingStrategyUpdate = Body(...)
+):
+    """更新交易策略"""
+    account_manager = get_account_manager()
+    if not await account_manager.validate_account(account_id):
+        raise HTTPException(status_code=404, detail=f"账户不存在：{account_id}")
+
+    db = get_db_manager()
+
+    # 验证策略属于该账户
+    existing = await db.fetchone(
+        "SELECT id FROM trading_strategy_config WHERE id = ? AND account_id = ?",
+        (strategy_id, account_id)
+    )
+    if not existing:
+        raise HTTPException(status_code=404, detail="策略不存在或不属于该账户")
+
+    data = {k: v for k, v in body.model_dump().items() if v is not None}
+    await db.update("trading_strategy_config", data, "id = ?", (strategy_id,))
+
+    return {"success": True, "message": "策略已更新"}
+
+
+@router.delete("/api/v1/ui/{account_id}/trading-strategies/{strategy_id}")
+async def delete_trading_strategy(
+    account_id: str = Path(..., description="账户 ID"),
+    strategy_id: int = Path(...)
+):
+    """删除交易策略"""
+    account_manager = get_account_manager()
+    if not await account_manager.validate_account(account_id):
+        raise HTTPException(status_code=404, detail=f"账户不存在：{account_id}")
+
+    db = get_db_manager()
+
+    # 验证策略属于该账户
+    existing = await db.fetchone(
+        "SELECT id FROM trading_strategy_config WHERE id = ? AND account_id = ?",
+        (strategy_id, account_id)
+    )
+    if not existing:
+        raise HTTPException(status_code=404, detail="策略不存在或不属于该账户")
+
+    await db.execute("DELETE FROM trading_strategy_config WHERE id = ?", (strategy_id,))
+
+    return {"success": True, "message": "策略已删除"}
+
+
+@router.put("/api/v1/ui/{account_id}/trading-strategies/{strategy_id}/toggle")
+async def toggle_trading_strategy(
+    account_id: str = Path(..., description="账户 ID"),
+    strategy_id: int = Path(...)
+):
+    """启用/停用交易策略"""
+    account_manager = get_account_manager()
+    if not await account_manager.validate_account(account_id):
+        raise HTTPException(status_code=404, detail=f"账户不存在：{account_id}")
+
+    db = get_db_manager()
+
+    existing = await db.fetchone(
+        "SELECT enabled FROM trading_strategy_config WHERE id = ? AND account_id = ?",
+        (strategy_id, account_id)
+    )
+    if not existing:
+        raise HTTPException(status_code=404, detail="策略不存在或不属于该账户")
+
+    new_enabled = 0 if existing["enabled"] else 1
+    await db.update("trading_strategy_config", {"enabled": new_enabled}, "id = ?", (strategy_id,))
+
+    return {"success": True, "message": "已" + ("启用" if new_enabled else "停用"), "data": {"enabled": new_enabled}}

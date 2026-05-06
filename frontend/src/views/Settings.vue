@@ -4,6 +4,7 @@
     <el-main class="main-content">
       <h2>系统设置 - {{ currentAccount?.display_name }}</h2>
 
+      <!-- API 配置 -->
       <el-card>
         <template #header>
           <span>API 配置</span>
@@ -18,6 +19,64 @@
         </el-form>
       </el-card>
 
+      <!-- 通知配置 -->
+      <el-card style="margin-top: 20px">
+        <template #header>
+          <div class="card-header">
+            <span>飞书 Webhook 通知配置</span>
+            <el-tag :type="notificationConfigured ? 'success' : 'warning'">
+              {{ notificationConfigured ? '已配置' : '未配置' }}
+            </el-tag>
+          </div>
+        </template>
+
+        <el-alert
+          title="如何配置飞书 Webhook"
+          type="info"
+          :closable="false"
+          style="margin-bottom: 20px;"
+        >
+          <ol style="padding-left: 20px; margin: 10px 0;">
+            <li>打开飞书群聊，点击右上角"设置"</li>
+            <li>找到"群机器人"，点击"添加机器人"</li>
+            <li>选择"自定义机器人（通过 Webhook 接入）"</li>
+            <li>复制生成的 Webhook URL，粘贴到下方输入框</li>
+          </ol>
+        </el-alert>
+
+        <el-form label-width="120px">
+          <el-form-item label="Webhook URL">
+            <el-input
+              v-model="notifForm.webhook_url"
+              placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/..."
+              style="width: 500px;"
+            />
+          </el-form-item>
+
+          <el-form-item label="通知开关">
+            <el-switch v-model="notifForm.enabled" :active-value="1" :inactive-value="0" />
+          </el-form-item>
+
+          <el-form-item label="事件类型">
+            <el-checkbox-group v-model="notifForm.events">
+              <el-checkbox label="notify_on_trade">成交通知</el-checkbox>
+              <el-checkbox label="notify_on_signal">信号触发</el-checkbox>
+              <el-checkbox label="notify_on_task">任务状态</el-checkbox>
+            </el-checkbox-group>
+          </el-form-item>
+
+          <el-form-item>
+            <el-button type="primary" @click="saveNotification" :loading="notifSaving">
+              保存配置
+            </el-button>
+            <el-button @click="testNotification" :loading="notifTesting" :disabled="!notificationConfigured">
+              发送测试通知
+            </el-button>
+          </el-form-item>
+        </el-form>
+      </el-card>
+
+      <!-- Claude API 配置 -->
       <el-card style="margin-top: 20px">
         <template #header>
           <div class="card-header">
@@ -110,7 +169,95 @@ import NavBar from '../components/NavBar.vue'
 
 const accountStore = useAccountStore()
 const currentAccount = computed(() => accountStore.currentAccount)
+const currentAccountId = computed(() => accountStore.currentAccountId)
 
+const notificationConfigured = ref(false)
+const notifForm = reactive({
+  webhook_url: '',
+  enabled: 1,
+  events: [],
+})
+const notifSaving = ref(false)
+const notifTesting = ref(false)
+
+const loadNotificationConfig = async () => {
+  try {
+    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/notifications/config`)
+    const data = await res.json()
+    if (data.success && data.data) {
+      const cfg = data.data
+      notifForm.webhook_url = cfg.webhook_url || ''
+      notifForm.enabled = cfg.enabled || 1
+      notifForm.events = []
+      if (cfg.notify_on_trade) notifForm.events.push('notify_on_trade')
+      if (cfg.notify_on_signal) notifForm.events.push('notify_on_signal')
+      if (cfg.notify_on_task) notifForm.events.push('notify_on_task')
+      notificationConfigured.value = true
+    } else {
+      notifForm.webhook_url = ''
+      notifForm.enabled = 1
+      notifForm.events = ['notify_on_trade', 'notify_on_signal', 'notify_on_task']
+      notificationConfigured.value = false
+    }
+  } catch (error) {
+    console.error('加载通知配置失败:', error)
+  }
+}
+
+const saveNotification = async () => {
+  if (!notifForm.webhook_url) {
+    ElMessage.warning('请输入 Webhook URL')
+    return
+  }
+
+  notifSaving.value = true
+  try {
+    const resp = await fetch(`/api/v1/ui/${currentAccountId.value}/notifications/config`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        channel: 'feishu',
+        webhook_url: notifForm.webhook_url,
+        enabled: notifForm.enabled,
+        notify_on_trade: notifForm.events.includes('notify_on_trade') ? 1 : 0,
+        notify_on_signal: notifForm.events.includes('notify_on_signal') ? 1 : 0,
+        notify_on_task: notifForm.events.includes('notify_on_task') ? 1 : 0,
+      }),
+    })
+    const data = await resp.json()
+    if (data.success) {
+      ElMessage.success('通知配置已保存')
+      notificationConfigured.value = true
+    } else {
+      ElMessage.error(data.detail || '保存失败')
+    }
+  } catch (error) {
+    ElMessage.error('保存失败: ' + error.message)
+  } finally {
+    notifSaving.value = false
+  }
+}
+
+const testNotification = async () => {
+  notifTesting.value = true
+  try {
+    const resp = await fetch(`/api/v1/ui/${currentAccountId.value}/notifications/test`, {
+      method: 'POST',
+    })
+    const data = await resp.json()
+    if (data.success) {
+      ElMessage.success('测试通知已发送，请检查飞书群')
+    } else {
+      ElMessage.error(data.detail || '发送失败')
+    }
+  } catch (error) {
+    ElMessage.error('发送失败: ' + error.message)
+  } finally {
+    notifTesting.value = false
+  }
+}
+
+// === LLM 配置 ===
 const llmConfig = reactive({
   configured: false
 })
@@ -122,7 +269,6 @@ const form = reactive({
 const saving = ref(false)
 const testing = ref(false)
 
-// 加载 LLM 配置
 const loadLLMConfig = async () => {
   try {
     const res = await fetch('/api/v1/ui/llm/config')
@@ -135,7 +281,6 @@ const loadLLMConfig = async () => {
   }
 }
 
-// 保存配置
 const saveConfig = async () => {
   if (!form.api_key) {
     ElMessage.warning('请输入 API 密钥')
@@ -164,7 +309,6 @@ const saveConfig = async () => {
   }
 }
 
-// 测试连接
 const testConnection = async () => {
   if (!form.api_key) {
     ElMessage.warning('请输入 API 密钥')
@@ -197,6 +341,7 @@ const testConnection = async () => {
 
 onMounted(() => {
   loadLLMConfig()
+  loadNotificationConfig()
 })
 </script>
 
