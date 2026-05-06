@@ -341,52 +341,95 @@ class StrategyEngine:
         """
         将策略信号写入 watchlist
 
+        去重规则：
+        1. 当日该账户已买入过同一只股票 → 跳过
+        2. 已有信号（pending/watching），新价格更低 → 更新价格/止损止盈
+        3. 已有信号，新价格更高 → 保留原信号，跳过
+
         Returns:
-            {"added": N, "skipped": M, "total": N}
+            {"added": N, "updated": M, "skipped": K, "total": N}
         """
         db = get_db_manager()
+        today = __import__("services.common.timezone", fromlist=["get_china_time"]).get_china_time().strftime("%Y-%m-%d")
+        now = __import__("services.common.timezone", fromlist=["get_china_time"]).get_china_time().isoformat()
 
-        # 获取当前组内已有股票代码
-        existing_rows = await db.fetchall(
-            "SELECT stock_code FROM watchlist WHERE account_id = ? AND group_id = ? AND status IN ('pending', 'watching')",
-            (account_id, group_id)
+        # 1. 查询当日已买入的股票（去重：当日不重复买入）
+        bought_today = await db.fetchall(
+            "SELECT DISTINCT stock_code FROM trade_records WHERE account_id = ? AND DATE(trade_time) = ? AND trade_type = 'buy'",
+            (account_id, today)
         )
-        existing_codes = {row["stock_code"] for row in existing_rows}
+        bought_codes = {row["stock_code"] for row in bought_today}
+
+        # 2. 查询账户下所有待交易/监控中的股票（不限组，用于跨组去重）
+        existing_rows = await db.fetchall(
+            "SELECT stock_code, buy_price, stop_loss_price, take_profit_price FROM watchlist WHERE account_id = ? AND status IN ('pending', 'watching')",
+            (account_id,)
+        )
+        existing = {row["stock_code"]: row for row in existing_rows}
 
         added = 0
+        updated = 0
         skipped = 0
-        now = __import__("services.common.timezone", fromlist=["get_china_time"]).get_china_time().isoformat()
 
         for signal in signals:
             code = signal["stock_code"]
-            if code in existing_codes:
+            new_price = signal.get("buy_price")
+
+            # 当日已买入 → 跳过
+            if code in bought_codes:
                 skipped += 1
                 continue
 
-            buy_price = signal.get("buy_price")
             sl_pct = signal.get("stop_loss_pct", 0.05)
             tp_pct = signal.get("take_profit_pct", 0.15)
+            new_sl = round(new_price * (1 - sl_pct), 2) if new_price else None
+            new_tp = round(new_price * (1 + tp_pct), 2) if new_price else None
 
-            await db.insert("watchlist", {
-                "account_id": account_id,
-                "strategy_id": strategy_id,
-                "group_id": group_id,
-                "source_type": "strategy",
-                "stock_code": code,
-                "stock_name": signal.get("stock_name", code),
-                "reason": signal.get("reason", "策略信号"),
-                "buy_price": buy_price,
-                "stop_loss_price": round(buy_price * (1 - sl_pct), 2) if buy_price else None,
-                "take_profit_price": round(buy_price * (1 + tp_pct), 2) if buy_price else None,
-                "target_quantity": signal.get("target_quantity", 100),
-                "status": "pending",
-                "created_at": now,
-                "updated_at": now,
-            })
-            existing_codes.add(code)
-            added += 1
+            if code in existing:
+                old = existing[code]
+                old_price = old.get("buy_price")
 
-        return {"added": added, "skipped": skipped, "total": len(signals)}
+                # 新价格更优的判断：
+                # 1. 原信号无价格但新信号有 → 更新
+                # 2. 新旧都有价格，新价格更低 → 更新
+                # 3. 否则保留原信号
+                should_update = False
+                if new_price and not old_price:
+                    should_update = True
+                elif new_price and old_price and new_price < old_price:
+                    should_update = True
+
+                if should_update:
+                    await db.execute(
+                        "UPDATE watchlist SET buy_price = ?, stop_loss_price = ?, take_profit_price = ?, "
+                        "reason = ?, strategy_id = ?, status = 'pending', updated_at = ? WHERE account_id = ? AND stock_code = ?",
+                        (new_price, new_sl, new_tp, signal.get("reason", "价格更优"), strategy_id, now, account_id, code)
+                    )
+                    updated += 1
+                else:
+                    # 价格更高或无新价格 → 保留原信号
+                    skipped += 1
+            else:
+                # 全新信号 → 插入
+                await db.insert("watchlist", {
+                    "account_id": account_id,
+                    "strategy_id": strategy_id,
+                    "group_id": group_id,
+                    "source_type": "strategy",
+                    "stock_code": code,
+                    "stock_name": signal.get("stock_name", code),
+                    "reason": signal.get("reason", "策略信号"),
+                    "buy_price": new_price,
+                    "stop_loss_price": new_sl,
+                    "take_profit_price": new_tp,
+                    "target_quantity": signal.get("target_quantity", 100),
+                    "status": "pending",
+                    "created_at": now,
+                    "updated_at": now,
+                })
+                added += 1
+
+        return {"added": added, "updated": updated, "skipped": skipped, "total": len(signals)}
 
 
 # 全局单例

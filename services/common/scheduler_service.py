@@ -886,13 +886,22 @@ class SchedulerService:
                     """
                     盘中 → 本地历史 + TGW当日实时拼接
                     盘后 → 纯本地数据（当日因子已计算完成）
+                    返回格式: Dict[str, List[Dict]] 与策略代码兼容
                     """
                     from services.data.local_data_service import get_local_data_service
                     lds = get_local_data_service()
-                    return lds.get_kline_with_realtime(
+                    raw = lds.get_kline_with_realtime(
                         stock_codes, lookback=lookback,
                         fetch_realtime_fn=_get_realtime_quote,
                     )
+                    # DataFrame → List[Dict] 转换，兼容策略代码
+                    result = {}
+                    for code, df in raw.items():
+                        if hasattr(df, 'to_dict'):
+                            result[code] = df.to_dict('records')
+                        else:
+                            result[code] = df
+                    return result
 
                 # ⑥ 实时行情（异步，走 gateway → sdk_connection_manager 排队）
                 async def _get_realtime_quote(stock_code: str):
