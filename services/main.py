@@ -16,7 +16,7 @@ import os
 from services.common.timezone import get_china_time
 from services.common.database import get_db_manager, reset_db_manager
 from services.common.account_manager import get_account_manager, reset_account_manager
-from services.ui import dashboard, accounts, positions, trades, strategies, screening, monitoring, market_data, data_explorer, position_rules, factors, scheduler
+from services.ui import dashboard, accounts, positions, trades, strategies, screening, monitoring, market_data, data_explorer, position_rules, factors, scheduler, notifications
 from services.strategy.api import router as strategy_v2_router
 from services.account_management.api import router as account_management_router
 from services.auth.api import router as auth_router
@@ -177,6 +177,101 @@ async def lifespan(app: FastAPI):
     except Exception:
         pass
 
+    # === 交易模块 + 消息推送模块 数据库迁移 ===
+
+    # 扩展 accounts 表：佣金费率 + 交易模式
+    try:
+        await db_manager.execute("ALTER TABLE accounts ADD COLUMN commission_rate REAL DEFAULT 0.0003")
+        print("数据库迁移: accounts.commission_rate 已添加")
+    except Exception:
+        pass
+    try:
+        await db_manager.execute("ALTER TABLE accounts ADD COLUMN is_mock INTEGER DEFAULT 1")
+        print("数据库迁移: accounts.is_mock 已添加")
+    except Exception:
+        pass
+    try:
+        await db_manager.execute("ALTER TABLE accounts ADD COLUMN trade_mode TEXT DEFAULT 'mock'")
+        print("数据库迁移: accounts.trade_mode 已添加")
+    except Exception:
+        pass
+
+    # 扩展 trade_records 表
+    try:
+        await db_manager.execute("ALTER TABLE trade_records ADD COLUMN trigger_source TEXT")
+        print("数据库迁移: trade_records.trigger_source 已添加")
+    except Exception:
+        pass
+    try:
+        await db_manager.execute("ALTER TABLE trade_records ADD COLUMN notification_sent INTEGER DEFAULT 0")
+        print("数据库迁移: trade_records.notification_sent 已添加")
+    except Exception:
+        pass
+
+    # 创建 notification_config 表
+    try:
+        await db_manager.execute("""
+            CREATE TABLE IF NOT EXISTS notification_config (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                account_id TEXT NOT NULL,
+                channel TEXT NOT NULL DEFAULT 'feishu',
+                webhook_url TEXT NOT NULL,
+                enabled INTEGER DEFAULT 1,
+                notify_on_trade INTEGER DEFAULT 1,
+                notify_on_signal INTEGER DEFAULT 1,
+                notify_on_task INTEGER DEFAULT 1,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        await db_manager.execute("CREATE INDEX IF NOT EXISTS idx_notification_config_account ON notification_config(account_id)")
+        print("数据库迁移: notification_config 表已创建")
+    except Exception:
+        pass
+
+    # 创建 notification_history 表
+    try:
+        await db_manager.execute("""
+            CREATE TABLE IF NOT EXISTS notification_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                account_id TEXT NOT NULL,
+                channel TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                title TEXT,
+                content TEXT,
+                status TEXT DEFAULT 'pending',
+                response TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        await db_manager.execute("CREATE INDEX IF NOT EXISTS idx_notification_history_account ON notification_history(account_id)")
+        await db_manager.execute("CREATE INDEX IF NOT EXISTS idx_notification_history_created ON notification_history(created_at)")
+        print("数据库迁移: notification_history 表已创建")
+    except Exception:
+        pass
+
+    # 创建 trading_strategy_config 表
+    try:
+        await db_manager.execute("""
+            CREATE TABLE IF NOT EXISTS trading_strategy_config (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                account_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                strategy_type TEXT NOT NULL,
+                conditions TEXT NOT NULL,
+                action TEXT NOT NULL,
+                target_stocks TEXT,
+                enabled INTEGER DEFAULT 1,
+                cooldown_seconds INTEGER DEFAULT 300,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        await db_manager.execute("CREATE INDEX IF NOT EXISTS idx_trading_strategy_account ON trading_strategy_config(account_id)")
+        print("数据库迁移: trading_strategy_config 表已创建")
+    except Exception:
+        pass
+
     # 扫描并注册任务插件
     try:
         from services.tasks import scan_tasks
@@ -250,6 +345,7 @@ app.include_router(strategy_v2_router)  # 策略管理 API v2
 app.include_router(account_management_router)
 app.include_router(auth_router)
 app.include_router(llm_router)  # LLM 配置路由
+app.include_router(notifications.router)  # 通知 API 路由
 
 # 挂载前端静态文件
 frontend_dist = "/home/bobo/StockWinner/frontend/dist"

@@ -957,12 +957,45 @@ class SchedulerService:
             )
             logger.info(f"策略任务完成: {result}")
 
+            # 发送通知
+            try:
+                from services.notifications import get_notification_service
+                notification = get_notification_service()
+                await notification.emit(
+                    event_type="task_completed",
+                    account_id=task["account_id"],
+                    payload={
+                        "task_name": f"策略任务 #{task_id}",
+                        "task_type": task_type,
+                        "duration": "N/A",
+                        "output": json.dumps(result, ensure_ascii=False)[:500],
+                    },
+                )
+            except Exception as e:
+                logger.warning(f"发送任务完成通知失败: {e}")
+
         except Exception as e:
             logger.error(f"策略任务执行失败: {e}", exc_info=True)
             await db.execute(
                 "UPDATE strategy_tasks SET last_status = 'error', last_output = ?, updated_at = ? WHERE id = ?",
                 (json.dumps({"error": str(e)}, ensure_ascii=False), get_china_time().isoformat(), task_id)
             )
+
+            # 发送失败通知
+            try:
+                from services.notifications import get_notification_service
+                notification = get_notification_service()
+                await notification.emit(
+                    event_type="task_failed",
+                    account_id=task["account_id"],
+                    payload={
+                        "task_name": f"策略任务 #{task_id}",
+                        "task_type": task_type,
+                        "error": str(e),
+                    },
+                )
+            except Exception as notify_err:
+                logger.warning(f"发送任务失败通知失败: {notify_err}")
 
     def run_manual_strategy_task(self, task_id: int) -> Dict:
         """手动触发策略任务"""

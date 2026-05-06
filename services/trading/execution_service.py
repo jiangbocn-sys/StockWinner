@@ -181,7 +181,8 @@ class TradeExecutionService:
         stock_name: str,
         price: float,
         target_quantity: Optional[int] = None,
-        order_id: Optional[str] = None
+        order_id: Optional[str] = None,
+        trigger_source: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         执行买入交易
@@ -260,7 +261,8 @@ class TradeExecutionService:
             price=price,
             amount=total_amount - fees["total_fee"],  # 净买入金额（不含费用）
             commission=fees["commission"],
-            status="completed"
+            status="completed",
+            trigger_source=trigger_source,
         )
 
         return {
@@ -279,7 +281,8 @@ class TradeExecutionService:
         stock_name: str,
         price: float,
         target_quantity: Optional[int] = None,
-        order_id: Optional[str] = None
+        order_id: Optional[str] = None,
+        trigger_source: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         执行卖出交易
@@ -353,7 +356,8 @@ class TradeExecutionService:
             amount=net_amount + fees["total_fee"],  # 卖出总额（含费用）
             commission=fees["commission"],
             profit_loss=profit_loss,
-            status="completed"
+            status="completed",
+            trigger_source=trigger_source,
         )
 
         return {
@@ -378,7 +382,8 @@ class TradeExecutionService:
         amount: float,
         commission: float,
         profit_loss: Optional[float] = None,
-        status: str = "completed"
+        status: str = "completed",
+        trigger_source: Optional[str] = None,
     ) -> int:
         """插入交易记录"""
         # 获取 user_id
@@ -399,6 +404,7 @@ class TradeExecutionService:
             "profit_loss": profit_loss,
             "trade_time": get_china_time().isoformat(),
             "status": status,
+            "trigger_source": trigger_source,
             "created_at": get_china_time().isoformat()
         }
 

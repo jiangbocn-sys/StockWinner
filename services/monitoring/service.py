@@ -4,10 +4,11 @@
 
 功能：
 1. 按 watchlist 监控候选股票行情，到达预设买卖价位进行交易
-2. 读取持仓策略，确定买入份额
-3. 交易前读取账户可用资金，确定可买数量
-4. 交易后更新可用资金
-5. 计算并记录交易手续费
+2. 读取交易策略配置（trading_strategy_config），评估触发条件
+3. 读取持仓策略，确定买入份额
+4. 交易前读取账户可用资金，确定可买数量
+5. 交易后更新可用资金 + 发送通知
+6. 计算并记录交易手续费
 """
 
 import asyncio
@@ -17,6 +18,8 @@ from services.common.database import get_db_manager
 from services.common.timezone import get_china_time
 from services.trading.gateway import get_gateway, MarketData
 from services.trading.execution_service import get_trade_execution_service
+from services.trading.strategy_executor import get_strategy_executor
+from services.notifications import get_notification_service
 
 
 class TradingMonitor:
@@ -26,6 +29,8 @@ class TradingMonitor:
         self._running = False
         self._task = None
         self._account_id = None
+        # 冷却期记录：{strategy_id: last_trigger_time}
+        self._cooldown: Dict[int, float] = {}
 
     async def start_monitoring(
         self,
@@ -84,6 +89,75 @@ class TradingMonitor:
         """执行一次交易监控"""
         db = get_db_manager()
 
+        # === 第一部分：基于交易策略的触发评估 ===
+        await self._evaluate_trading_strategies(account_id)
+
+        # === 第二部分：基于 watchlist 的传统监控（止损止盈）===
+        await self._monitor_watchlist(account_id)
+
+    async def _evaluate_trading_strategies(self, account_id: str):
+        """评估交易策略配置中的触发条件"""
+        executor = get_strategy_executor(account_id)
+        strategies = await executor.load_strategies(enabled_only=True)
+
+        if not strategies:
+            return
+
+        # 获取 watchlist 中的股票代码
+        db = get_db_manager()
+        watchlist = await db.fetchall(
+            "SELECT stock_code FROM watchlist WHERE account_id = ? AND status IN ('pending', 'watching')",
+            (account_id,),
+        )
+        stock_codes = [w["stock_code"] for w in watchlist]
+
+        if not stock_codes:
+            return
+
+        # 评估所有策略
+        decisions = await executor.evaluate_all(strategies, stock_codes)
+
+        for decision in decisions:
+            strategy_id = decision["strategy_id"]
+            cooldown_seconds = self._get_cooldown_for_strategy(strategy_id)
+
+            # 检查冷却期
+            import time
+            last_trigger = self._cooldown.get(strategy_id, 0)
+            if time.time() - last_trigger < cooldown_seconds:
+                continue  # 冷却期内，跳过
+
+            # 记录触发时间
+            self._cooldown[strategy_id] = time.time()
+
+            # 执行交易
+            if decision["action"] == "buy":
+                await self._execute_buy_signal(
+                    account_id,
+                    {"stock_code": decision["stock_code"], "stock_name": decision["stock_name"]},
+                    decision["trigger_data"]["current_price"],
+                    100,  # 默认 100 股，后续可从策略配置读取
+                    trigger_source=decision["strategy_name"],
+                )
+            elif decision["action"] == "sell":
+                await self._execute_sell_signal(
+                    account_id,
+                    {"stock_code": decision["stock_code"], "stock_name": decision["stock_name"]},
+                    decision["trigger_data"]["current_price"],
+                    0,  # 全部卖出
+                    signal_type=f"strategy_{decision['strategy_type']}",
+                    trigger_source=decision["strategy_name"],
+                )
+
+    def _get_cooldown_for_strategy(self, strategy_id: int) -> int:
+        """获取策略的冷却时间"""
+        # 默认 300 秒（5 分钟），后续从 DB 读取
+        return 300
+
+    async def _monitor_watchlist(self, account_id: str):
+        """传统的 watchlist 止损止盈监控"""
+        db = get_db_manager()
+
         # 获取 watchlist 中的股票（JOIN 候选组和策略以获取动态参数）
         watchlist = await db.fetchall("""
             SELECT w.*, g.screening_strategy_id, s.config as strategy_config
@@ -92,9 +166,6 @@ class TradingMonitor:
             LEFT JOIN strategies s ON g.screening_strategy_id = s.id
             WHERE w.account_id = ? AND w.status IN ('pending', 'watching')
         """, (account_id,))
-
-        if watchlist:
-            print(f"[Monitor] 监控 {len(watchlist)} 只股票")
 
         for stock in watchlist:
             await self._check_stock_signals(account_id, stock)
@@ -190,7 +261,8 @@ class TradingMonitor:
         account_id: str,
         stock: Dict,
         current_price: float,
-        target_quantity: int
+        target_quantity: int,
+        trigger_source: Optional[str] = None,
     ):
         """执行买入交易"""
         stock_code = stock.get('stock_code')
@@ -204,7 +276,8 @@ class TradingMonitor:
             stock_code=stock_code,
             stock_name=stock_name,
             price=current_price,
-            target_quantity=target_quantity
+            target_quantity=target_quantity,
+            trigger_source=trigger_source,
         )
 
         if result["success"]:
@@ -224,6 +297,23 @@ class TradingMonitor:
                 account_id, stock, 'buy_executed', current_price,
                 result['quantity'], result['total_amount']
             )
+
+            # 发送通知
+            notification = get_notification_service()
+            await notification.emit(
+                event_type="trade_executed",
+                account_id=account_id,
+                payload={
+                    "trade_type": "buy",
+                    "stock_code": stock_code,
+                    "stock_name": stock_name,
+                    "price": f"{current_price:.2f}",
+                    "quantity": result['quantity'],
+                    "amount": f"{result['total_amount']:.2f}",
+                    "fees": f"{result['fees']['total_fee']:.2f}",
+                    "trigger_source": trigger_source or "监控",
+                },
+            )
         else:
             print(f"[Monitor] 买入失败：{result['message']}")
             # 创建失败信号记录
@@ -232,13 +322,26 @@ class TradingMonitor:
                 target_quantity, 0, result['message']
             )
 
+            # 发送失败通知
+            notification = get_notification_service()
+            await notification.emit(
+                event_type="trade_failed",
+                account_id=account_id,
+                payload={
+                    "stock_code": stock_code,
+                    "stock_name": stock_name,
+                    "reason": result['message'],
+                },
+            )
+
     async def _execute_sell_signal(
         self,
         account_id: str,
         stock: Dict,
         current_price: float,
         signal_type: str,
-        target_quantity: int
+        target_quantity: int,
+        trigger_source: Optional[str] = None,
     ):
         """执行卖出交易"""
         stock_code = stock.get('stock_code')
@@ -252,7 +355,8 @@ class TradingMonitor:
             stock_code=stock_code,
             stock_name=stock_name,
             price=current_price,
-            target_quantity=target_quantity
+            target_quantity=target_quantity,
+            trigger_source=trigger_source,
         )
 
         if result["success"]:
@@ -273,6 +377,24 @@ class TradingMonitor:
                 account_id, stock, signal_type, current_price,
                 result['quantity'], result['net_amount'],
                 profit_loss=result['profit_loss']
+            )
+
+            # 发送通知
+            notification = get_notification_service()
+            await notification.emit(
+                event_type="trade_executed",
+                account_id=account_id,
+                payload={
+                    "trade_type": "sell",
+                    "stock_code": stock_code,
+                    "stock_name": stock_name,
+                    "price": f"{current_price:.2f}",
+                    "quantity": result['quantity'],
+                    "amount": f"{result['net_amount']:.2f}",
+                    "fees": f"{result['fees']['total_fee']:.2f}",
+                    "profit_loss": f"{result['profit_loss']:.2f}",
+                    "trigger_source": trigger_source or signal_type,
+                },
             )
         else:
             print(f"[Monitor] 卖出失败：{result['message']}")
