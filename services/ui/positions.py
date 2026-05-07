@@ -127,16 +127,32 @@ async def dsa_analyze_position(
             status = status_data.get("status")
 
             if status == "completed":
-                result = status_data.get("result", {})
-                report = result.get("report", {})
-                return {
-                    "success": True,
-                    "stock_code": stock_code,
-                    "stock_name": result.get("stock_name", ""),
-                    "summary": report.get("summary", {}),
-                    "strategy": report.get("strategy", {}),
-                    "meta": report.get("meta", {}),
-                }
+                # DSA 的 status 接口 result 为 null，需从 history 获取报告
+                with httpx.Client(timeout=30) as hist_client:
+                    hist_resp = hist_client.get(
+                        f"{DSA_BASE_URL}/api/v1/history",
+                        params={"query_id": task_id, "limit": 1}
+                    )
+                    if hist_resp.status_code == 200:
+                        hist_data = hist_resp.json()
+                        items = hist_data.get("items", [])
+                        if items:
+                            record_id = items[0]["id"]
+                            report_resp = hist_client.get(
+                                f"{DSA_BASE_URL}/api/v1/history/{record_id}"
+                            )
+                            if report_resp.status_code == 200:
+                                report = report_resp.json()
+                                return {
+                                    "success": True,
+                                    "stock_code": stock_code,
+                                    "stock_name": report.get("meta", {}).get("stock_name", ""),
+                                    "summary": report.get("summary", {}),
+                                    "strategy": report.get("strategy", {}),
+                                    "meta": report.get("meta", {}),
+                                }
+
+                raise HTTPException(status_code=502, detail="DSA 分析完成但无法获取报告")
             elif status == "failed":
                 raise HTTPException(
                     status_code=502,

@@ -823,7 +823,22 @@ class SchedulerService:
                                 status = status_data.get("status")
 
                                 if status == "completed":
-                                    result_data = status_data.get("result")
+                                    # DSA 的 status 接口 result 为 null，需从 history 获取报告
+                                    with httpx.Client(timeout=30) as hist_client:
+                                        hist_resp = hist_client.get(
+                                            f"{dsa_base_url}/api/v1/history",
+                                            params={"query_id": task_id_dsa, "limit": 1}
+                                        )
+                                        if hist_resp.status_code == 200:
+                                            hist_data = hist_resp.json()
+                                            items = hist_data.get("items", [])
+                                            if items:
+                                                record_id = items[0]["id"]
+                                                report_resp = hist_client.get(
+                                                    f"{dsa_base_url}/api/v1/history/{record_id}"
+                                                )
+                                                if report_resp.status_code == 200:
+                                                    result_data = report_resp.json()
                                     break
                                 elif status == "failed":
                                     logger.warning(
@@ -840,9 +855,8 @@ class SchedulerService:
                         if result_data is None:
                             continue
 
-                        report = result_data.get("report", {})
-                        summary = report.get("summary", {})
-                        strategy = report.get("strategy", {})
+                        summary = result_data.get("summary", {})
+                        strategy = result_data.get("strategy", {})
 
                         analysis_summary = summary.get("analysis_summary", "暂无分析")
                         operation_advice = summary.get("operation_advice", "暂无建议")
