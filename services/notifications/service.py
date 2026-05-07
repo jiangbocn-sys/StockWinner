@@ -93,17 +93,24 @@ class NotificationService:
         content = self._build_content(event_type, payload)
 
         # 4. 发送通知
-        channel = self._get_channel(account_id, config["webhook_url"])
-        result = await channel.send(
-            account_id=account_id,
-            title=title,
-            content=content,
-            color=color,
-            event_type=event_type,
-        )
+        try:
+            channel = self._get_channel(account_id, config["webhook_url"])
+            result = await channel.send(
+                account_id=account_id,
+                title=title,
+                content=content,
+                color=color,
+                event_type=event_type,
+            )
+            if not result.get("success"):
+                print(f"[通知] 发送失败 ({event_type}): {result.get('response')}")
+        except Exception as e:
+            print(f"[通知] 发送异常 ({event_type}): {e}")
+            result = {"success": False, "response": str(e), "status": "error"}
 
         # 5. 记录历史
         try:
+            from services.common.timezone import get_china_time
             await db.insert("notification_history", {
                 "account_id": account_id,
                 "channel": config["channel"],
@@ -112,6 +119,7 @@ class NotificationService:
                 "content": content,
                 "status": result.get("status", "unknown"),
                 "response": result.get("response", ""),
+                "created_at": get_china_time().isoformat(),
             })
         except Exception as e:
             print(f"通知历史记录写入失败: {e}")
@@ -144,13 +152,15 @@ class NotificationService:
 
         elif event_type == "signal_triggered":
             lines = [
-                f"**信号类型：** {payload.get('signal_type', '-')}",
+                f"**策略名称：** {payload.get('strategy_name', '-')}",
+                f"**候选组：** {payload.get('group_name', '-')}",
                 f"**股票代码：** {payload.get('stock_code', '-')}",
-                f"**当前价格：** {payload.get('price', '-')}",
-                f"**触发条件：** {payload.get('condition', '-')}",
+                f"**股票名称：** {payload.get('stock_name', '-')}",
+                f"**建议买入价：** {payload.get('buy_price', '-')}",
+                f"**止损价：** {payload.get('stop_loss_price', '-')}",
+                f"**止盈价：** {payload.get('take_profit_price', '-')}",
+                f"**触发原因：** {payload.get('reason', '-')}",
             ]
-            if payload.get("reason"):
-                lines.append(f"**备注：** {payload['reason']}")
             return "\n".join(lines)
 
         elif event_type == "task_completed":

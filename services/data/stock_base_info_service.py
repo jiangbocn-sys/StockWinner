@@ -27,6 +27,12 @@ from services.common.sdk_column_mapping import (
 )
 from services.common.timezone import CHINA_TZ, get_china_time
 
+try:
+    from pypinyin import lazy_pinyin
+    _HAS_PYPINYIN = True
+except ImportError:
+    _HAS_PYPINYIN = False
+
 DB_PATH = Path(__file__).parent.parent.parent / "data" / "kline.db"
 
 
@@ -65,6 +71,7 @@ class StockBaseInfoService:
                 sw_level3 TEXT,
                 total_share REAL,
                 float_share REAL,
+                spell_initial TEXT,
                 source TEXT,
                 created_at TIMESTAMP,
                 updated_at TIMESTAMP
@@ -179,6 +186,12 @@ class StockBaseInfoService:
         merged['created_at'] = current_time
         merged['updated_at'] = current_time
 
+        # 生成拼音首字母缩写
+        if _HAS_PYPINYIN and 'stock_name' in merged.columns:
+            merged['spell_initial'] = merged['stock_name'].apply(
+                lambda x: ''.join([p[0].upper() for p in lazy_pinyin(str(x).strip()) if p[0].isalpha()]) if pd.notna(x) else None
+            )
+
         # 保存到数据库
         conn = self._get_connection()
         cursor = conn.cursor()
@@ -192,9 +205,9 @@ class StockBaseInfoService:
                         pre_close, high_limited, low_limited, price_tick,
                         list_date, delist_date,
                         sw_level1, sw_level2, sw_level3,
-                        total_share, float_share,
+                        total_share, float_share, spell_initial,
                         source, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (
                     row.get('stock_code'),
                     row.get('stock_name'),
@@ -211,6 +224,7 @@ class StockBaseInfoService:
                     row.get('sw_level3'),
                     row.get('total_share'),
                     row.get('float_share'),
+                    row.get('spell_initial'),
                     row.get('source'),
                     row.get('created_at'),
                     row.get('updated_at'),

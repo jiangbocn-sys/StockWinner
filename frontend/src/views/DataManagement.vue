@@ -96,44 +96,6 @@
           </el-card>
         </el-col>
 
-        <!-- 调度服务 -->
-        <el-col :span="24">
-          <el-card shadow="hover">
-            <template #header>
-              <div class="card-header">
-                <span>调度服务</span>
-                <el-tag :type="schedulerStatus.running ? 'success' : 'info'">
-                  {{ schedulerStatus.running ? '运行中' : '已停止' }}
-                </el-tag>
-              </div>
-            </template>
-            <div class="scheduler-content">
-              <div class="scheduler-controls">
-                <el-button type="success" @click="startScheduler" :disabled="schedulerStatus.running">启动</el-button>
-                <el-button type="danger" @click="stopScheduler" :disabled="!schedulerStatus.running">停止</el-button>
-                <el-divider direction="vertical" />
-                <el-button @click="manualKlineCheck" :disabled="hasRunningTask">立即K线检查</el-button>
-                <el-button @click="manualWeeklyKline" :disabled="hasRunningTask">立即周K线下载</el-button>
-                <el-button @click="manualMonthlyCheck" :disabled="hasRunningTask">立即月频检查</el-button>
-                <el-button @click="manualIndustryDownload" :disabled="hasRunningTask">立即下载行业指数</el-button>
-              </div>
-              <div class="scheduler-jobs" v-if="schedulerStatus.jobs?.length">
-                <h4>内置定时任务</h4>
-                <el-table :data="schedulerStatus.jobs" size="small" border>
-                  <el-table-column prop="id" label="任务ID" width="200" />
-                  <el-table-column prop="name" label="名称" width="200" />
-                  <el-table-column prop="trigger" label="触发器" width="150" />
-                  <el-table-column label="下次执行时间">
-                    <template #default="{ row }">
-                      {{ row.next_run_time?.split('+')[0] || '-' }}
-                    </template>
-                  </el-table-column>
-                </el-table>
-              </div>
-            </div>
-          </el-card>
-        </el-col>
-
         <!-- 策略任务管理 -->
         <el-col :span="24">
           <el-card shadow="hover">
@@ -141,6 +103,9 @@
               <div class="card-header">
                 <span>策略任务</span>
                 <el-space>
+                  <el-tag :type="schedulerStatus.running ? 'success' : 'info'" size="small" style="cursor: pointer" @click="toggleScheduler" :title="schedulerStatus.running ? '点击停止' : '点击启动'">
+                    调度: {{ schedulerStatus.running ? '运行中' : '已停止' }}
+                  </el-tag>
                   <el-select v-model="taskFilterGroup" placeholder="全部分组" clearable style="width: 180px" size="small" @change="loadStrategyTasks">
                     <el-option v-for="g in candidateGroups" :key="g.id" :label="g.name" :value="g.id" />
                   </el-select>
@@ -196,7 +161,7 @@
                       />
                     </el-select>
                   </el-form-item>
-                  <el-form-item label="候选分组" required>
+                  <el-form-item v-if="newTaskForm.taskType === 'strategy'" label="候选分组" required>
                     <el-select v-model="newTaskForm.groupId" placeholder="选择分组" style="width: 100%">
                       <el-option v-for="g in candidateGroups" :key="g.id" :label="g.name" :value="g.id" />
                     </el-select>
@@ -253,7 +218,12 @@
                     {{ row.group_name || '-' }}
                   </template>
                 </el-table-column>
-                <el-table-column prop="cron_expression" label="Cron" width="130" />
+                <el-table-column label="执行时间" width="200">
+                  <template #default="{ row }">
+                    <div>{{ row.cron_description || row.cron_expression }}</div>
+                    <div style="font-size: 11px; color: #909399; font-family: monospace">{{ row.cron_expression }}</div>
+                  </template>
+                </el-table-column>
                 <el-table-column label="状态" width="80">
                   <template #default="{ row }">
                     <el-tag :type="row.enabled ? 'success' : 'info'" size="small">{{ row.enabled ? '启用' : '停用' }}</el-tag>
@@ -265,9 +235,12 @@
                     <span v-else style="color: #999">未执行</span>
                   </template>
                 </el-table-column>
-                <el-table-column label="上次状态" width="90">
+                <el-table-column label="上次状态" width="110">
                   <template #default="{ row }">
-                    <el-tag v-if="row.last_status" :type="{success:'success',error:'danger',running:'warning'}[row.last_status] || 'info'" size="small">
+                    <el-tooltip v-if="row.realtime_status === 'running'" :content="row.realtime_progress?.message || '正在执行'" placement="top" :show-after="0">
+                      <el-tag type="warning" size="small">运行中</el-tag>
+                    </el-tooltip>
+                    <el-tag v-else-if="row.last_status" :type="{success:'success',error:'danger',running:'warning'}[row.last_status] || 'info'" size="small">
                       {{ {success:'成功',error:'失败',running:'运行中'}[row.last_status] || row.last_status }}
                     </el-tag>
                     <el-tooltip v-if="row.last_status === 'error' && row.last_output" :content="parseTaskError(row)" placement="top" :show-after="0">
@@ -563,67 +536,13 @@ async function fillMonthlyInherit() {
 }
 
 // 调度服务操作
-async function startScheduler() {
+async function toggleScheduler() {
+  const action = schedulerStatus.value.running ? '停止' : '启动'
   try {
-    const res = await fetch('/api/v1/ui/scheduler/start', { method: 'POST' })
+    const res = await fetch(`/api/v1/ui/scheduler/${schedulerStatus.value.running ? 'stop' : 'start'}`, { method: 'POST' })
     const data = await res.json()
-    ElMessage.success(data.message)
+    ElMessage.success(data.message || `调度服务已${action}`)
     loadSchedulerStatus()
-  } catch (e) {
-    ElMessage.error('请求失败')
-  }
-}
-
-async function stopScheduler() {
-  try {
-    const res = await fetch('/api/v1/ui/scheduler/stop', { method: 'POST' })
-    const data = await res.json()
-    ElMessage.success(data.message)
-    loadSchedulerStatus()
-  } catch (e) {
-    ElMessage.error('请求失败')
-  }
-}
-
-async function manualKlineCheck() {
-  try {
-    const res = await fetch('/api/v1/ui/scheduler/kline/check', { method: 'POST' })
-    const data = await res.json()
-    ElMessage.success(data.message)
-    loadTasksStatus()
-  } catch (e) {
-    ElMessage.error('请求失败')
-  }
-}
-
-async function manualWeeklyKline() {
-  try {
-    const res = await fetch('/api/v1/ui/scheduler/weekly/kline', { method: 'POST' })
-    const data = await res.json()
-    ElMessage.success(data.message)
-    loadTasksStatus()
-  } catch (e) {
-    ElMessage.error('请求失败')
-  }
-}
-
-async function manualMonthlyCheck() {
-  try {
-    const res = await fetch('/api/v1/ui/scheduler/monthly/check', { method: 'POST' })
-    const data = await res.json()
-    ElMessage.success(data.message)
-    loadTasksStatus()
-  } catch (e) {
-    ElMessage.error('请求失败')
-  }
-}
-
-async function manualIndustryDownload() {
-  try {
-    const res = await fetch('/api/v1/ui/scheduler/industry/download', { method: 'POST' })
-    const data = await res.json()
-    ElMessage.success(data.message)
-    loadTasksStatus()
   } catch (e) {
     ElMessage.error('请求失败')
   }
@@ -709,7 +628,7 @@ const createTask = async () => {
     ElMessage.warning('请选择策略')
     return
   }
-  if (!newTaskForm.groupId) {
+  if (newTaskForm.taskType === 'strategy' && !newTaskForm.groupId) {
     ElMessage.warning('请选择候选分组')
     return
   }
@@ -745,14 +664,15 @@ const createTask = async () => {
   try {
     const body = {
       task_type: newTaskForm.taskType,
-      group_id: newTaskForm.groupId,
       cron_expression: newTaskForm.cron,
       enabled: newTaskForm.enabled,
     }
     if (newTaskForm.taskType === 'builtin') {
       body.module = newTaskForm.module
+      body.account_id = 'SYSTEM'
     } else {
       body.strategy_id = newTaskForm.strategyId
+      body.group_id = newTaskForm.groupId
     }
 
     let res
@@ -872,7 +792,9 @@ const editTask = (task) => {
   newTaskForm.strategyId = task.strategy_id || null
   newTaskForm.groupId = task.group_id || null
   newTaskForm.cron = task.cron_expression || ''
+  newTaskForm.cronText = ''
   newTaskForm.enabled = task.enabled
+  cronDescription.value = ''
   showCreateTaskForm.value = true
   activeTaskForm.value = 'form'
 }
@@ -957,22 +879,6 @@ onUnmounted(() => {
   font-size: 12px;
   color: #606266;
   margin-top: 5px;
-}
-
-.scheduler-content {
-  padding: 0;
-}
-
-.scheduler-controls {
-  display: flex;
-  align-items: center;
-  margin-bottom: 15px;
-}
-
-.scheduler-jobs h4 {
-  margin: 0 0 10px 0;
-  font-size: 14px;
-  color: #303133;
 }
 
 /* 策略任务 */

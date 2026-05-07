@@ -191,8 +191,9 @@ def run(context):
             s = pd.Series(closes)
             ema12 = s.ewm(span=12, adjust=False).mean()
             ema26 = s.ewm(span=26, adjust=False).mean()
-            macd_val = float(ema12.iloc[-1] - ema26.iloc[-1])
-            macd_sig = float(s.ewm(span=9, adjust=False).mean().iloc[-1])
+            dif = ema12 - ema26  # DIF 线
+            macd_val = float(dif.iloc[-1])
+            macd_sig = float(dif.ewm(span=9, adjust=False).mean().iloc[-1])  # DEA 信号线
 
             tail_up = cur_close > opens[-1] * 1.002 if len(opens) > 0 else False
 

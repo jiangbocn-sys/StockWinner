@@ -131,6 +131,53 @@
             />
           </el-form-item>
 
+          <el-divider content-position="left">交易成本参数</el-divider>
+
+          <el-form-item label="佣金费率">
+            <el-input-number
+              v-model="accountForm.commission_rate"
+              :min="0"
+              :precision="6"
+              :step="0.0001"
+              placeholder="0.0003"
+              style="width: 200px"
+            />
+            <span class="field-hint">默认 0.0003（万分三），买卖双向收取</span>
+          </el-form-item>
+          <el-form-item label="印花税">
+            <el-input-number
+              v-model="accountForm.stamp_tax"
+              :min="0"
+              :precision="6"
+              :step="0.0001"
+              placeholder="0.0005"
+              style="width: 200px"
+            />
+            <span class="field-hint">默认 0.0005（万分五），仅卖出收取</span>
+          </el-form-item>
+          <el-form-item label="过户费">
+            <el-input-number
+              v-model="accountForm.transfer_fee"
+              :min="0"
+              :precision="6"
+              :step="0.00001"
+              placeholder="0.00002"
+              style="width: 200px"
+            />
+            <span class="field-hint">默认 0.00002（万分之0.2），买卖双向收取</span>
+          </el-form-item>
+          <el-form-item label="最低佣金">
+            <el-input-number
+              v-model="accountForm.min_commission"
+              :min="0"
+              :precision="2"
+              :step="1"
+              placeholder="5"
+              style="width: 200px"
+            />
+            <span class="field-hint">默认 5 元，单笔佣金最低收取</span>
+          </el-form-item>
+
           <el-divider content-position="left">银河证券账户信息</el-divider>
 
           <el-form-item label="资金账号" prop="broker_account">
@@ -215,6 +262,10 @@ const accountForm = ref({
   password: '',
   display_name: '',
   available_cash: 0,
+  commission_rate: 0.0003,
+  stamp_tax: 0.0005,
+  transfer_fee: 0.00002,
+  min_commission: 5.0,
   broker_account: '',
   broker_password: '',
   broker_company: '',
@@ -262,6 +313,7 @@ const loadAccounts = async () => {
     if (data.success) {
       accounts.value = data.data
       console.log('账户列表加载成功，数量:', data.data.length)
+      loadStats()
     } else {
       ElMessage.error('加载失败：' + data.message)
     }
@@ -319,6 +371,10 @@ const resetForm = () => {
     password: '',
     display_name: '',
     available_cash: 0,
+    commission_rate: 0.0003,
+    stamp_tax: 0.0005,
+    transfer_fee: 0.00002,
+    min_commission: 5.0,
     broker_account: '',
     broker_password: '',
     broker_company: '',
@@ -341,6 +397,10 @@ const handleEdit = (row) => {
     password: '',
     display_name: row.display_name,
     available_cash: row.available_cash || 0,
+    commission_rate: row.commission_rate || 0.0003,
+    stamp_tax: row.stamp_tax || 0.0005,
+    transfer_fee: row.transfer_fee || 0.00002,
+    min_commission: row.min_commission || 5.0,
     broker_account: row.broker_account || '',
     broker_password: '',
     broker_company: row.broker_company || '',
@@ -367,7 +427,7 @@ const handleDelete = async (row) => {
 
     if (data.success) {
       ElMessage.success('账户已删除')
-      loadAccounts()
+      await loadAccounts()
       loadStats()
     } else {
       ElMessage.error('删除失败：' + data.message)
@@ -412,7 +472,7 @@ const handleSubmit = async () => {
       if (data.success) {
         ElMessage.success(editingAccount.value ? '账户已更新' : '账户已创建')
         showCreateDialog.value = false
-        loadAccounts()
+        await loadAccounts()
         loadStats()
       } else {
         ElMessage.error(editingAccount.value ? '更新失败：' + data.message : '创建失败：' + data.message)
@@ -429,7 +489,6 @@ const handleSubmit = async () => {
 onMounted(() => {
   console.log('onMounted 执行，开始加载数据...')
   loadAccounts()
-  loadStats()
 })
 </script>
 
@@ -493,5 +552,11 @@ onMounted(() => {
 
 .stat-value.danger {
   color: #f56c6c;
+}
+
+.field-hint {
+  margin-left: 10px;
+  color: #909399;
+  font-size: 12px;
 }
 </style>

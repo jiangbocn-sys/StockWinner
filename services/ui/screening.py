@@ -621,13 +621,14 @@ async def get_watchlist(
 
     db = get_db_manager()
 
-    # JOIN 候选组和策略表，获取组名和策略名
+    # JOIN 候选组、策略表和持仓表，获取组名、策略名和持仓数量
     base_sql = """
         SELECT w.*, g.name as group_name, g.group_type, g.screening_strategy_id,
-               s.name as strategy_name
+               s.name as strategy_name, COALESCE(p.quantity, 0) as position_quantity
         FROM watchlist w
         LEFT JOIN candidate_groups g ON w.group_id = g.id
         LEFT JOIN strategies s ON g.screening_strategy_id = s.id
+        LEFT JOIN stock_positions p ON w.account_id = p.account_id AND w.stock_code = p.stock_code
         WHERE w.account_id = ?
     """
     params: list = [account_id]
@@ -1107,6 +1108,7 @@ async def add_to_watchlist_manual(
     stock_code: str = Body(..., description="股票代码"),
     group_id: int = Body(..., description="候选组 ID"),
     stock_name: Optional[str] = Body(None, description="股票名称"),
+    status: Optional[str] = Body(None, description="状态：watching/pending/bought/sold/ignored"),
     buy_price: Optional[float] = Body(None, description="买入价格"),
     stop_loss_price: Optional[float] = Body(None, description="止损价格"),
     take_profit_price: Optional[float] = Body(None, description="止盈价格"),
@@ -1136,6 +1138,10 @@ async def add_to_watchlist_manual(
     if existing:
         raise HTTPException(status_code=409, detail="该股票已在候选列表中")
 
+    # 状态校验
+    valid_statuses = {"watching", "pending", "bought", "sold", "ignored"}
+    stock_status = status if status in valid_statuses else "watching"
+
     now = get_china_time().isoformat()
     await db.insert("watchlist", {
         "account_id": account_id,
@@ -1149,7 +1155,7 @@ async def add_to_watchlist_manual(
         "stop_loss_price": stop_loss_price,
         "take_profit_price": take_profit_price,
         "target_quantity": target_quantity,
-        "status": "pending",
+        "status": stock_status,
         "created_at": now,
         "updated_at": now,
     })
@@ -1323,7 +1329,7 @@ async def batch_add_to_watchlist(
             "stop_loss_price": None,
             "take_profit_price": None,
             "target_quantity": 100,
-            "status": "pending",
+            "status": "watching",
             "created_at": now,
             "updated_at": now,
         })

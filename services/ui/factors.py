@@ -288,10 +288,21 @@ async def fill_daily_factors_empty():
     def run_fill():
         try:
             from services.data.local_data_service import fill_empty_factor_values
+            from services.data.local_data_service import get_trading_day_end_date
+            from services.common.timezone import get_china_time
+            from datetime import timedelta
 
-            task_manager.update_progress(TaskType.DAILY_FACTOR_FILL, 10, "正在补算空值...")
+            # 自动计算日期范围：最近120天
+            end_date = get_china_time().strftime('%Y-%m-%d')
+            start_date = (get_china_time() - timedelta(days=120)).strftime('%Y-%m-%d')
 
-            result = fill_empty_factor_values(show_progress=True)
+            task_manager.update_progress(TaskType.DAILY_FACTOR_FILL, 10, f"正在补算空值 {start_date} ~ {end_date}...")
+
+            result = fill_empty_factor_values(
+                start_date=start_date,
+                end_date=end_date,
+                show_progress=True
+            )
 
             task_manager.complete_task(TaskType.DAILY_FACTOR_FILL, result)
         except Exception as e:

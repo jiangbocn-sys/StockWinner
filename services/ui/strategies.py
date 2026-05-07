@@ -353,7 +353,7 @@ async def generate_strategy_by_llm(
     try:
         # 使用 LLM 生成策略
         from services.llm.strategy_generator import get_strategy_generator
-        generator = get_strategy_generator()
+        generator = get_strategy_generator(account_id)
         result = generator.generate(description)
 
         # 获取生成的配置

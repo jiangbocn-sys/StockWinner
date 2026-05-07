@@ -62,11 +62,11 @@
       <div class="nav-right">
         <div class="user-info">
           <el-icon><User /></el-icon>
-          <span class="username">{{ currentUser?.name }}</span>
+          <span class="username">{{ currentUser?.display_name || currentUser?.name }}</span>
         </div>
         <el-dropdown style="margin-left: 15px">
           <el-button size="small">
-            {{ currentUser?.name }}<el-icon class="el-icon--right"><ArrowDown /></el-icon>
+            {{ currentUser?.display_name || currentUser?.name }}<el-icon class="el-icon--right"><ArrowDown /></el-icon>
           </el-button>
           <template #dropdown>
             <el-dropdown-menu>
@@ -98,8 +98,20 @@ const currentUser = ref(null)
 
 const activeMenu = computed(() => route.path)
 
-// 加载当前用户信息
-onMounted(() => {
+// 加载当前用户信息（优先从后端获取，兜底 localStorage）
+onMounted(async () => {
+  const token = localStorage.getItem('auth_token')
+  if (token) {
+    try {
+      const res = await fetch('/api/me', { headers: { 'X-Auth-Token': token } })
+      const data = await res.json()
+      if (data.success) {
+        currentUser.value = data.data
+        localStorage.setItem('current_user', JSON.stringify(data.data))
+        return
+      }
+    } catch (e) { /* fallback */ }
+  }
   const userStr = localStorage.getItem('current_user')
   if (userStr) {
     currentUser.value = JSON.parse(userStr)

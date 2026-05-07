@@ -76,11 +76,11 @@
         </el-form>
       </el-card>
 
-      <!-- Claude API 配置 -->
+      <!-- LLM API 配置 -->
       <el-card style="margin-top: 20px">
         <template #header>
           <div class="card-header">
-            <span>Claude API 配置</span>
+            <span>LLM API 配置</span>
             <el-tag :type="llmConfig.configured ? 'success' : 'danger'">
               {{ llmConfig.configured ? '已配置' : '未配置' }}
             </el-tag>
@@ -88,36 +88,65 @@
         </template>
 
         <el-alert
-          title="如何获取 API 密钥"
+          title="支持任意兼容 OpenAI 格式的 LLM API"
           type="info"
           :closable="false"
           style="margin-bottom: 20px;"
         >
           <ol style="padding-left: 20px; margin: 10px 0;">
-            <li>访问 <a href="https://console.anthropic.com/" target="_blank">Anthropic Console</a></li>
-            <li>登录或注册账号</li>
-            <li>进入 API Keys 页面</li>
-            <li>创建新的 API 密钥</li>
-            <li>复制密钥并粘贴到下方输入框</li>
+            <li>选择 LLM 提供商，或选择"自定义"填写任意兼容地址</li>
+            <li>输入 API Key、Base URL 和模型名称</li>
+            <li>点击"测试连接"验证配置是否正确</li>
           </ol>
         </el-alert>
 
-        <el-form label-width="150px">
-          <el-form-item label="API 密钥">
+        <el-form label-width="120px">
+          <el-form-item label="LLM 提供商">
+            <el-select v-model="llmForm.provider" style="width: 300px" @change="onProviderChange">
+              <el-option label="Anthropic Claude" value="anthropic" />
+              <el-option label="OpenAI GPT" value="openai" />
+              <el-option label="DeepSeek" value="deepseek" />
+              <el-option label="阿里云通义千问" value="aliyun" />
+              <el-option label="月之暗面 Kimi" value="moonshot" />
+              <el-option label="智谱 AI" value="zhipu" />
+              <el-option label="自定义" value="custom" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="Base URL">
             <el-input
-              v-model="form.api_key"
+              v-model="llmForm.base_url"
+              placeholder="https://api.example.com/v1/chat/completions"
+              style="width: 500px;"
+            />
+          </el-form-item>
+          <el-form-item label="API Key">
+            <el-input
+              v-model="llmForm.api_key"
               type="password"
-              placeholder="输入 Claude API 密钥"
+              placeholder="输入 API Key"
               show-password
               style="width: 400px;"
             />
+            <span v-if="llmConfig.api_key_masked" style="margin-left: 10px; color: #999; font-size: 12px;">
+              当前配置: {{ llmConfig.api_key_masked }}
+            </span>
+          </el-form-item>
+          <el-form-item label="模型名称">
+            <el-input
+              v-model="llmForm.model_name"
+              placeholder="例如: gpt-4o, qwen-plus"
+              style="width: 300px;"
+            />
           </el-form-item>
           <el-form-item>
-            <el-button type="primary" @click="saveConfig" :loading="saving">
+            <el-button type="primary" @click="saveLLMConfig" :loading="saving">
               保存配置
             </el-button>
-            <el-button @click="testConnection" :loading="testing">
+            <el-button @click="testLLMConnection" :loading="testing">
               测试连接
+            </el-button>
+            <el-button type="danger" @click="deleteLLMConfig" :loading="deleting" v-if="llmConfig.configured">
+              删除配置
             </el-button>
           </el-form-item>
         </el-form>
@@ -259,46 +288,94 @@ const testNotification = async () => {
 
 // === LLM 配置 ===
 const llmConfig = reactive({
-  configured: false
+  configured: false,
+  provider: 'custom',
+  base_url: '',
+  model_name: '',
+  api_key_masked: ''
 })
 
-const form = reactive({
-  api_key: ''
+const llmForm = reactive({
+  provider: 'custom',
+  base_url: '',
+  api_key: '',
+  model_name: ''
 })
+
+const PROVIDER_DEFAULTS = {
+  anthropic: { base_url: 'https://api.anthropic.com/v1/messages', model: 'claude-sonnet-4-20250514' },
+  openai: { base_url: 'https://api.openai.com/v1/chat/completions', model: 'gpt-4o' },
+  deepseek: { base_url: 'https://api.deepseek.com/v1/chat/completions', model: 'deepseek-chat' },
+  aliyun: { base_url: 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions', model: 'qwen-plus' },
+  moonshot: { base_url: 'https://api.moonshot.cn/v1/chat/completions', model: 'moonshot-v1-8k' },
+  zhipu: { base_url: 'https://open.bigmodel.cn/api/paas/v4/chat/completions', model: 'glm-4' },
+  custom: { base_url: '', model: '' },
+}
+
+const onProviderChange = () => {
+  const defaults = PROVIDER_DEFAULTS[llmForm.provider] || { base_url: '', model: '' }
+  llmForm.base_url = defaults.base_url
+  llmForm.model_name = defaults.model
+}
 
 const saving = ref(false)
 const testing = ref(false)
+const deleting = ref(false)
 
 const loadLLMConfig = async () => {
   try {
-    const res = await fetch('/api/v1/ui/llm/config')
+    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/llm/config`)
     const data = await res.json()
     if (data.success) {
       llmConfig.configured = data.data.configured
+      llmConfig.provider = data.data.provider
+      llmConfig.base_url = data.data.base_url
+      llmConfig.model_name = data.data.model_name
+      llmConfig.api_key_masked = data.data.api_key_masked
+
+      // 填充表单
+      llmForm.provider = data.data.provider
+      llmForm.base_url = data.data.base_url
+      llmForm.model_name = data.data.model_name
+      llmForm.api_key = ''
     }
   } catch (error) {
     console.error('加载 LLM 配置失败:', error)
   }
 }
 
-const saveConfig = async () => {
-  if (!form.api_key) {
-    ElMessage.warning('请输入 API 密钥')
+const saveLLMConfig = async () => {
+  if (!llmForm.api_key && !llmConfig.api_key_masked) {
+    ElMessage.warning('请输入 API Key')
+    return
+  }
+  if (!llmForm.base_url) {
+    ElMessage.warning('请输入 Base URL')
+    return
+  }
+  if (!llmForm.model_name) {
+    ElMessage.warning('请输入模型名称')
     return
   }
 
   saving.value = true
   try {
-    const res = await fetch('/api/v1/ui/llm/config', {
+    const apiKey = llmForm.api_key || ''
+    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/llm/config`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ api_key: form.api_key })
+      body: JSON.stringify({
+        provider: llmForm.provider,
+        base_url: llmForm.base_url,
+        api_key: apiKey,
+        model_name: llmForm.model_name
+      })
     })
     const data = await res.json()
     if (data.success) {
       ElMessage.success(data.message)
       llmConfig.configured = true
-      form.api_key = ''
+      await loadLLMConfig()
     } else {
       ElMessage.error(data.error || '保存失败')
     }
@@ -309,25 +386,31 @@ const saveConfig = async () => {
   }
 }
 
-const testConnection = async () => {
-  if (!form.api_key) {
-    ElMessage.warning('请输入 API 密钥')
+const testLLMConnection = async () => {
+  if (!llmForm.api_key && !llmConfig.api_key_masked) {
+    ElMessage.warning('请输入 API Key')
     return
   }
-
+  saving.value = true
   testing.value = true
   try {
-    const res = await fetch('/api/v1/ui/llm/config', {
+    const apiKey = llmForm.api_key || ''
+    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/llm/config`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ api_key: form.api_key })
+      body: JSON.stringify({
+        provider: llmForm.provider,
+        base_url: llmForm.base_url,
+        api_key: apiKey,
+        model_name: llmForm.model_name
+      })
     })
     const data = await res.json()
     if (data.success) {
       if (data.api_valid) {
-        ElMessage.success('API 密钥有效，连接成功！')
+        ElMessage.success('API 连接成功！')
       } else {
-        ElMessage.warning('API 密钥可能无效，但配置已保存')
+        ElMessage.warning(data.message || 'API 可能无效')
       }
     } else {
       ElMessage.error(data.error || '测试失败')
@@ -335,7 +418,33 @@ const testConnection = async () => {
   } catch (error) {
     ElMessage.error('测试失败：' + error.message)
   } finally {
+    saving.value = false
     testing.value = false
+  }
+}
+
+const deleteLLMConfig = async () => {
+  deleting.value = true
+  try {
+    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/llm/config`, {
+      method: 'DELETE'
+    })
+    const data = await res.json()
+    if (data.success) {
+      ElMessage.success('配置已删除')
+      llmConfig.configured = false
+      llmForm.provider = 'custom'
+      llmForm.base_url = ''
+      llmForm.api_key = ''
+      llmForm.model_name = ''
+      await loadLLMConfig()
+    } else {
+      ElMessage.error(data.error || '删除失败')
+    }
+  } catch (error) {
+    ElMessage.error('删除失败：' + error.message)
+  } finally {
+    deleting.value = false
   }
 }
 

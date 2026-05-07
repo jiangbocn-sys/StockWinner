@@ -230,11 +230,26 @@ async def list_strategy_tasks(account_id: str = Path(..., description="账户 ID
         FROM strategy_tasks t
         LEFT JOIN strategies s ON t.strategy_id = s.id
         LEFT JOIN candidate_groups g ON t.group_id = g.id
-        WHERE t.account_id = ?
+        WHERE t.account_id = ? OR t.account_id = 'SYSTEM'
         ORDER BY t.created_at DESC
     """, (account_id,))
 
-    # 为 builtin 任务添加可读名称
+    # 为 builtin 任务添加可读名称 + cron 可读描述 + 实时运行状态
+    # builtin 任务模块名 → task_manager 任务类型映射
+    MODULE_TO_TASK_TYPE = {
+        "kline_check": "data_download",
+        "weekly_kline": "weekly_kline_download",
+        "monthly_factors": "monthly_factor_update",
+    }
+
+    # 获取 task_manager 实时状态
+    try:
+        from services.common.task_manager import get_task_manager
+        tm = get_task_manager()
+        tm_status = tm.get_all_status()
+    except Exception:
+        tm_status = {}
+
     tasks = []
     for r in rows:
         task = dict(r)
@@ -243,11 +258,81 @@ async def list_strategy_tasks(account_id: str = Path(..., description="账户 ID
             info = get_task(task["module"])
             if info:
                 task["task_name"] = info["name"]
+            # 注入实时运行状态
+            task_type_key = MODULE_TO_TASK_TYPE.get(task["module"])
+            if task_type_key and task_type_key in tm_status:
+                real_status = tm_status[task_type_key]
+                if real_status.get("status") == "running":
+                    task["realtime_status"] = "running"
+                    task["realtime_progress"] = real_status.get("progress", {})
         elif not task.get("task_name"):
             task["task_name"] = task.get("strategy_name") or "未知策略"
+        # cron 可读描述
+        task["cron_description"] = _describe_cron(task.get("cron_expression", ""))
         tasks.append(task)
 
     return {"success": True, "tasks": tasks}
+
+
+def _describe_cron(cron: str) -> str:
+    """将标准 cron 表达式翻译为中文可读描述"""
+    if not cron:
+        return ""
+    parts = cron.split()
+    if len(parts) != 5:
+        return cron
+    minute, hour, day, month, dow = parts
+
+    # 常用 cron 表达式直接匹配
+    common = {
+        "0 1 * * *": "每天 01:00",
+        "0 1 5 * *": "每月 5 日 01:00",
+        "0 2 * * 6": "每周六 02:00",
+        "0 3 * * 1-5": "每周一至周五 03:00",
+        "0 14 * * *": "每天 14:00",
+        "0 14 * * 1-5": "每周一至周五 14:00",
+        "0 10 * * 1-5": "每周一至周五 10:00",
+        "0 * * * *": "每小时",
+        "30 14 * * 1-5": "每周一至周五 14:30",
+        "0 0 * * *": "每天 00:00",
+        "0 9 * * *": "每天 09:00",
+        "0 15 * * *": "每天 15:00",
+    }
+    if cron in common:
+        return common[cron]
+
+    # 通用解析
+    desc_parts = []
+
+    # 时间
+    if minute == "0":
+        time_str = f"{int(hour):02d}:00"
+    elif minute == "30":
+        time_str = f"{int(hour):02d}:30"
+    else:
+        time_str = f"{int(hour):02d}:{int(minute):02d}"
+
+    # 频率
+    if day == "*" and month == "*" and dow == "*":
+        desc_parts.append(f"每天 {time_str}")
+    elif day == "*" and month == "*" and dow != "*":
+        if "-" in dow:
+            start, end = dow.split("-")
+            days = {"1": "周一", "2": "周二", "3": "周三", "4": "周四", "5": "周五", "6": "周六", "0": "周日", "7": "周日"}
+            desc_parts.append(f"每周{days.get(start, start)}至{days.get(end, end)} {time_str}")
+        elif "," in dow:
+            days = {"1": "一", "2": "二", "3": "三", "4": "四", "5": "五", "6": "六", "0": "日", "7": "日"}
+            dow_str = "、".join([f"周{days.get(d, d)}" for d in dow.split(",")])
+            desc_parts.append(f"{dow_str} {time_str}")
+        else:
+            days = {"1": "一", "2": "二", "3": "三", "4": "四", "5": "五", "6": "六", "0": "日", "7": "日"}
+            desc_parts.append(f"每周{days.get(dow, dow)} {time_str}")
+    elif day != "*" and month == "*" and dow == "*":
+        desc_parts.append(f"每月 {int(day)} 日 {time_str}")
+    else:
+        desc_parts.append(f"{time_str} (cron: {cron})")
+
+    return " ".join(desc_parts)
 
 
 @router.post("/api/v1/ui/scheduler/translate-cron")
@@ -484,7 +569,7 @@ async def update_strategy_task(
     if not account:
         raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
 
-    task = await db.fetchone("SELECT * FROM strategy_tasks WHERE id = ? AND account_id = ?", (task_id, account_id))
+    task = await db.fetchone("SELECT * FROM strategy_tasks WHERE id = ? AND (account_id = ? OR account_id = 'SYSTEM')", (task_id, account_id))
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
 
@@ -515,7 +600,7 @@ async def delete_strategy_task(
     if not account:
         raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
 
-    task = await db.fetchone("SELECT id FROM strategy_tasks WHERE id = ? AND account_id = ?", (task_id, account_id))
+    task = await db.fetchone("SELECT id FROM strategy_tasks WHERE id = ? AND (account_id = ? OR account_id = 'SYSTEM')", (task_id, account_id))
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
 
@@ -539,7 +624,7 @@ async def run_strategy_task_manual(
     if not account:
         raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
 
-    task = await db.fetchone("SELECT id FROM strategy_tasks WHERE id = ? AND account_id = ?", (task_id, account_id))
+    task = await db.fetchone("SELECT id FROM strategy_tasks WHERE id = ? AND (account_id = ? OR account_id = 'SYSTEM')", (task_id, account_id))
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
 

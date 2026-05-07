@@ -11,8 +11,8 @@ from typing import Dict, List, Optional, Any, Tuple
 from services.common.database import get_db_manager
 from services.common.timezone import get_china_time
 
-# 手续费率配置（A 股标准）
-FEE_CONFIG = {
+# 手续费率默认配置（A 股标准，账户未设置时使用）
+DEFAULT_FEE_CONFIG = {
     "stamp_tax": 0.0005,      # 印花税 0.05%（只收卖出）
     "commission": 0.0003,     # 佣金 0.03%（买卖双向收取）
     "transfer_fee": 0.00002,  # 过户费 0.002%（买卖双向收取，仅沪市）
@@ -26,6 +26,20 @@ class TradeExecutionService:
     def __init__(self, account_id: str):
         self.account_id = account_id
         self.db = get_db_manager()
+        self._fee_cache: Optional[dict] = None
+
+    async def _get_fee_config(self) -> dict:
+        """从账户配置读取费率参数，未设置的使用默认值"""
+        if self._fee_cache is not None:
+            return self._fee_cache
+        account = await self.get_account_info()
+        self._fee_cache = {
+            "commission_rate": account.get("commission_rate") or DEFAULT_FEE_CONFIG["commission"],
+            "stamp_tax": account.get("stamp_tax") or DEFAULT_FEE_CONFIG["stamp_tax"],
+            "transfer_fee": account.get("transfer_fee") or DEFAULT_FEE_CONFIG["transfer_fee"],
+            "min_commission": account.get("min_commission") or DEFAULT_FEE_CONFIG["min_commission"],
+        }
+        return self._fee_cache
 
     async def get_account_info(self) -> Optional[Dict]:
         """获取账户信息"""
@@ -59,36 +73,56 @@ class TradeExecutionService:
         """
         计算买入数量
 
+        风控计算：
+        1. 按账户 cash_reserve_pct 保留现金 → usable_cash = available * (1 - reserve_pct)
+        2. 按 max_single_position_pct 计算单只上限 → risk_limit = usable * max_pct / price
+        3. 按可用资金计算资金上限 → fund_limit = available / (price * (1 + fee_rate))
+        4. 如果 target_quantity > 0 → quantity = min(target, risk_limit, fund_limit)
+        5. 如果 target_quantity = 0 → quantity = min(risk_limit, fund_limit)
+
         Returns:
             (可买数量，总金额，费用明细)
         """
-        available_cash = await self.get_available_cash()
+        account = await self.get_account_info()
+        available_cash = account.get("available_cash", 0.0) if account else 0.0
+        fees_cfg = await self._get_fee_config()
+        commission_rate = fees_cfg["commission_rate"]
 
-        # 计算费用
-        fees = self._calculate_fees(stock_code, price, target_quantity or 100, "buy")
+        # 风控参数
+        cash_reserve_pct = account.get("cash_reserve_pct", 0.20) if account else 0.20
+        max_single_pct = account.get("max_single_position_pct", 0.15) if account else 0.15
 
-        # 计算最大可买数量（考虑费用）
-        # 总金额 = 价格 × 数量 + 费用
-        # 费用 ≈ 价格 × 数量 × (commission + transfer_fee) + min_commission
-        fee_rate = FEE_CONFIG["commission"] + FEE_CONFIG["transfer_fee"]
+        # 可用资金上限（扣除保留现金）
+        usable_cash = available_cash * (1 - cash_reserve_pct)
 
+        fee_rate = commission_rate + fees_cfg["transfer_fee"]
+
+        # 风控限制：单只最大仓位
+        if price > 0 and max_single_pct > 0:
+            risk_limit = int(usable_cash * max_single_pct / price)
+        else:
+            risk_limit = 0
+
+        # 资金上限（考虑手续费）
         if price > 0:
-            # 估算最大数量：available_cash = price * qty * (1 + fee_rate) + min_commission
-            max_quantity = int((available_cash - FEE_CONFIG["min_commission"]) / (price * (1 + fee_rate)))
-            # 必须是 100 的整数倍（A 股一手=100 股）
-            max_quantity = (max_quantity // 100) * 100
+            max_quantity = int((available_cash - fees_cfg["min_commission"]) / (price * (1 + fee_rate)))
         else:
             max_quantity = 0
 
         # 确定实际买入数量
-        if target_quantity:
-            quantity = min(target_quantity, max_quantity)
+        if target_quantity and target_quantity > 0:
+            # 有目标数量，取三者最小值
+            quantity = min(target_quantity, risk_limit, max_quantity) if risk_limit > 0 else min(target_quantity, max_quantity)
         else:
-            quantity = max_quantity
+            # 无目标数量，取风控和资金上限的较小值
+            quantity = min(risk_limit, max_quantity) if risk_limit > 0 else max_quantity
 
-        # 重新计算实际费用
+        # 必须是 100 的整数倍（A 股一手=100 股）
+        quantity = (quantity // 100) * 100
+
+        # 计算费用
         if quantity > 0:
-            fees = self._calculate_fees(stock_code, price, quantity, "buy")
+            fees = self._calculate_fees(stock_code, price, quantity, "buy", commission_rate)
         else:
             fees = {"commission": 0, "transfer_fee": 0, "stamp_tax": 0, "total_fee": 0}
 
@@ -123,6 +157,7 @@ class TradeExecutionService:
 
         # 计算费用
         if quantity > 0:
+            await self._get_fee_config()  # 确保缓存已加载
             fees = self._calculate_fees(stock_code, price, quantity, "sell")
         else:
             fees = {"commission": 0, "transfer_fee": 0, "stamp_tax": 0, "total_fee": 0}
@@ -137,41 +172,44 @@ class TradeExecutionService:
         stock_code: str,
         price: float,
         quantity: int,
-        trade_type: str
+        trade_type: str,
     ) -> Dict[str, float]:
         """
-        计算交易费用
+        计算交易费用（从账户配置读取费率）
 
         Args:
             stock_code: 股票代码
             price: 价格
             quantity: 数量
             trade_type: buy 或 sell
-
-        Returns:
-            费用明细
         """
+        fees_cfg = self._fee_cache or DEFAULT_FEE_CONFIG
+        commission_rate = fees_cfg["commission_rate"]
+        stamp_tax = fees_cfg["stamp_tax"]
+        transfer_fee_rate = fees_cfg["transfer_fee"]
+        min_commission = fees_cfg["min_commission"]
+
         total_amount = price * quantity
 
         # 佣金（买卖双向收取，最低 5 元）
-        commission = max(total_amount * FEE_CONFIG["commission"], FEE_CONFIG["min_commission"])
+        commission = max(total_amount * commission_rate, min_commission)
 
         # 过户费（仅沪市，买卖双向收取）
         transfer_fee = 0
         if stock_code.startswith("6") or stock_code.startswith("000"):
-            transfer_fee = total_amount * FEE_CONFIG["transfer_fee"]
+            transfer_fee = total_amount * transfer_fee_rate
 
         # 印花税（只收卖出）
-        stamp_tax = 0
+        stamp = 0
         if trade_type == "sell":
-            stamp_tax = total_amount * FEE_CONFIG["stamp_tax"]
+            stamp = total_amount * stamp_tax
 
-        total_fee = commission + transfer_fee + stamp_tax
+        total_fee = commission + transfer_fee + stamp
 
         return {
             "commission": round(commission, 2),
             "transfer_fee": round(transfer_fee, 4),
-            "stamp_tax": round(stamp_tax, 2),
+            "stamp_tax": round(stamp, 2),
             "total_fee": round(total_fee, 2)
         }
 
@@ -185,11 +223,26 @@ class TradeExecutionService:
         trigger_source: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
-        执行买入交易
+        执行买入交易（原子事务 + 风控检查）
 
         Returns:
             交易结果
         """
+        # 风控检查
+        try:
+            from services.trading.risk_service import get_risk_service
+            risk = get_risk_service(self.account_id)
+            passed, reason = await risk.check_buy(stock_code, price, target_quantity or 100)
+            if not passed:
+                return {
+                    "success": False,
+                    "message": f"风控拦截: {reason}",
+                    "quantity": 0,
+                    "fees": {"commission": 0, "transfer_fee": 0, "stamp_tax": 0, "total_fee": 0}
+                }
+        except Exception as e:
+            print(f"[RiskService] 风控检查异常: {e}，放行")
+
         # 计算可买数量和费用
         quantity, total_amount, fees = await self.calculate_buy_quantity(
             stock_code, price, target_quantity
@@ -203,77 +256,121 @@ class TradeExecutionService:
                 "fees": fees
             }
 
+        # 通过网关下单（mock 模式直接返回成功，实盘调用券商 SDK）
+        try:
+            from services.trading.gateway import get_gateway
+            gateway = await get_gateway()
+            order_result = await gateway.buy(
+                stock_code=stock_code,
+                price=price,
+                quantity=quantity,
+                account_id=self.account_id,
+            )
+            if not order_result.success:
+                return {
+                    "success": False,
+                    "message": f"网关下单失败: {order_result.message}",
+                    "quantity": 0,
+                    "fees": fees
+                }
+        except Exception as e:
+            return {
+                "success": False,
+                "message": f"网关调用异常: {e}",
+                "quantity": 0,
+                "fees": fees
+            }
+
         # 获取账户信息
         account = await self.get_account_info()
         current_cash = account.get("available_cash", 0)
-        user_id = account.get("id")  # 获取内部用户 ID
+        user_id = account.get("id")
 
-        # 更新账户资金（只更新 available_cash）
-        await self.db.execute(
-            """UPDATE accounts
-               SET available_cash = ?, updated_at = ?
-               WHERE account_id = ?""",
-            (
-                current_cash - total_amount,
-                get_china_time().isoformat(),
-                self.account_id
-            )
-        )
+        # 原子事务：资金扣减 + 持仓更新 + 交易记录
+        try:
+            async with self.db.transaction() as conn:
+                # 1. 更新账户资金
+                await conn.execute(
+                    """UPDATE accounts
+                       SET available_cash = ?, updated_at = ?
+                       WHERE account_id = ?""",
+                    (
+                        current_cash - total_amount,
+                        get_china_time().isoformat(),
+                        self.account_id
+                    )
+                )
 
-        # 插入或更新持仓
-        existing_position = await self.get_position(stock_code)
-        if existing_position:
-            # 更新现有持仓 - 加权平均计算成本
-            old_qty = existing_position.get("quantity", 0)
-            old_cost = existing_position.get("avg_cost", 0)
-            old_available = existing_position.get("available_quantity", 0)
-            new_qty = old_qty + quantity
-            # 计算新的持仓成本（加权平均）
-            new_cost = (old_qty * old_cost + quantity * price) / new_qty if new_qty > 0 else price
-            # T+1 规则：当日买入的数量不可卖出，available_quantity 保持不变
-            new_available = old_available
+                # 2. 插入或更新持仓
+                existing_position = await self.get_position(stock_code)
+                if existing_position:
+                    old_qty = existing_position.get("quantity", 0)
+                    old_cost = existing_position.get("avg_cost", 0)
+                    old_available = existing_position.get("available_quantity", 0)
+                    new_qty = old_qty + quantity
+                    new_cost = (old_qty * old_cost + quantity * price) / new_qty if new_qty > 0 else price
+                    new_available = old_available
 
-            await self.db.execute(
-                """UPDATE stock_positions
-                   SET quantity = ?, avg_cost = ?, available_quantity = ?, market_value = ?,
-                       updated_at = ?
-                   WHERE account_id = ? AND stock_code = ?""",
-                (new_qty, new_cost, new_available, new_qty * price, get_china_time().isoformat(),
-                 self.account_id, stock_code)
-            )
-        else:
-            # 插入新持仓 - T+1 规则：当日买入，available_quantity 为 0，次日解冻
-            await self.db.execute(
-                """INSERT INTO stock_positions
-                   (account_id, user_id, stock_code, stock_name, quantity, available_quantity, avg_cost, market_value, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (self.account_id, user_id, stock_code, stock_name, quantity, 0, price,
-                 quantity * price, get_china_time().isoformat(), get_china_time().isoformat())
-            )
+                    await conn.execute(
+                        """UPDATE stock_positions
+                           SET quantity = ?, avg_cost = ?, available_quantity = ?, market_value = ?,
+                               updated_at = ?
+                           WHERE account_id = ? AND stock_code = ?""",
+                        (new_qty, new_cost, new_available, new_qty * price,
+                         get_china_time().isoformat(), self.account_id, stock_code)
+                    )
+                else:
+                    await conn.execute(
+                        """INSERT INTO stock_positions
+                           (account_id, user_id, stock_code, stock_name, quantity, available_quantity,
+                            avg_cost, market_value, created_at, updated_at)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (self.account_id, user_id, stock_code, stock_name, quantity, 0, price,
+                         quantity * price, get_china_time().isoformat(), get_china_time().isoformat())
+                    )
 
-        # 记录交易记录
-        trade_record_id = await self._insert_trade_record(
-            order_id=order_id or f"BUY_{get_china_time().strftime('%H%M%S')}",
-            stock_code=stock_code,
-            stock_name=stock_name,
-            trade_type="buy",
-            quantity=quantity,
-            price=price,
-            amount=total_amount - fees["total_fee"],  # 净买入金额（不含费用）
-            commission=fees["commission"],
-            status="completed",
-            trigger_source=trigger_source,
-        )
+                # 3. 记录交易
+                trade_data = {
+                    "account_id": self.account_id,
+                    "user_id": user_id,
+                    "order_id": order_id or f"BUY_{get_china_time().strftime('%H%M%S')}",
+                    "stock_code": stock_code,
+                    "stock_name": stock_name,
+                    "trade_type": "buy",
+                    "quantity": quantity,
+                    "price": price,
+                    "amount": total_amount - fees["total_fee"],
+                    "commission": fees["commission"],
+                    "trade_time": get_china_time().isoformat(),
+                    "status": "completed",
+                    "trigger_source": trigger_source,
+                    "created_at": get_china_time().isoformat()
+                }
+                columns = ', '.join(trade_data.keys())
+                placeholders = ', '.join(['?' for _ in trade_data])
+                cursor = await conn.execute(
+                    f"INSERT INTO trade_records ({columns}) VALUES ({placeholders})",
+                    tuple(trade_data.values())
+                )
+                trade_record_id = cursor.lastrowid
 
-        return {
-            "success": True,
-            "message": "买入成功",
-            "quantity": quantity,
-            "price": price,
-            "total_amount": total_amount,
-            "fees": fees,
-            "trade_record_id": trade_record_id
-        }
+            return {
+                "success": True,
+                "message": "买入成功",
+                "quantity": quantity,
+                "price": price,
+                "total_amount": total_amount,
+                "fees": fees,
+                "trade_record_id": trade_record_id
+            }
+
+        except Exception as e:
+            return {
+                "success": False,
+                "message": f"买入执行失败: {e}",
+                "quantity": 0,
+                "fees": fees
+            }
 
     async def execute_sell(
         self,
@@ -285,7 +382,7 @@ class TradeExecutionService:
         trigger_source: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
-        执行卖出交易
+        执行卖出交易（原子事务）
 
         Returns:
             交易结果
@@ -303,115 +400,120 @@ class TradeExecutionService:
                 "fees": fees
             }
 
+        # 通过网关下单（mock 模式直接返回成功，实盘调用券商 SDK）
+        try:
+            from services.trading.gateway import get_gateway
+            gateway = await get_gateway()
+            order_result = await gateway.sell(
+                stock_code=stock_code,
+                price=price,
+                quantity=quantity,
+                account_id=self.account_id,
+            )
+            if not order_result.success:
+                return {
+                    "success": False,
+                    "message": f"网关下单失败: {order_result.message}",
+                    "quantity": 0,
+                    "fees": fees
+                }
+        except Exception as e:
+            return {
+                "success": False,
+                "message": f"网关调用异常: {e}",
+                "quantity": 0,
+                "fees": fees
+            }
+
         # 获取持仓信息
         position = await self.get_position(stock_code)
         avg_cost = position.get("avg_cost", price)
-        profit_loss = (price - avg_cost) * quantity  # 盈亏
+        profit_loss = (price - avg_cost) * quantity
 
-        # 更新持仓
         old_qty = position.get("quantity", 0)
         old_available = position.get("available_quantity", 0)
         new_qty = old_qty - quantity
         new_available = old_available - quantity
 
-        if new_qty <= 0:
-            # 清空持仓
-            await self.db.execute(
-                "DELETE FROM stock_positions WHERE account_id = ? AND stock_code = ?",
-                (self.account_id, stock_code)
-            )
-        else:
-            # 更新持仓数量和可用数量
-            await self.db.execute(
-                """UPDATE stock_positions
-                   SET quantity = ?, available_quantity = ?, market_value = ?, updated_at = ?
-                   WHERE account_id = ? AND stock_code = ?""",
-                (new_qty, new_available, new_qty * price, get_china_time().isoformat(),
-                 self.account_id, stock_code)
-            )
-
-        # 更新账户资金（卖出后资金增加，只更新 available_cash）
+        # 获取账户信息
         account = await self.get_account_info()
         current_cash = account.get("available_cash", 0)
-
-        await self.db.execute(
-            """UPDATE accounts
-               SET available_cash = ?, updated_at = ?
-               WHERE account_id = ?""",
-            (
-                current_cash + net_amount,
-                get_china_time().isoformat(),
-                self.account_id
-            )
-        )
-
-        # 记录交易记录
-        trade_record_id = await self._insert_trade_record(
-            order_id=order_id or f"SELL_{get_china_time().strftime('%H%M%S')}",
-            stock_code=stock_code,
-            stock_name=stock_name,
-            trade_type="sell",
-            quantity=quantity,
-            price=price,
-            amount=net_amount + fees["total_fee"],  # 卖出总额（含费用）
-            commission=fees["commission"],
-            profit_loss=profit_loss,
-            status="completed",
-            trigger_source=trigger_source,
-        )
-
-        return {
-            "success": True,
-            "message": "卖出成功",
-            "quantity": quantity,
-            "price": price,
-            "net_amount": net_amount,
-            "fees": fees,
-            "profit_loss": profit_loss,
-            "trade_record_id": trade_record_id
-        }
-
-    async def _insert_trade_record(
-        self,
-        order_id: str,
-        stock_code: str,
-        stock_name: str,
-        trade_type: str,
-        quantity: int,
-        price: float,
-        amount: float,
-        commission: float,
-        profit_loss: Optional[float] = None,
-        status: str = "completed",
-        trigger_source: Optional[str] = None,
-    ) -> int:
-        """插入交易记录"""
-        # 获取 user_id
-        account = await self.get_account_info()
         user_id = account.get("id")
 
-        trade_data = {
-            "account_id": self.account_id,
-            "user_id": user_id,
-            "order_id": order_id,
-            "stock_code": stock_code,
-            "stock_name": stock_name,
-            "trade_type": trade_type,
-            "quantity": quantity,
-            "price": price,
-            "amount": amount,
-            "commission": commission,
-            "profit_loss": profit_loss,
-            "trade_time": get_china_time().isoformat(),
-            "status": status,
-            "trigger_source": trigger_source,
-            "created_at": get_china_time().isoformat()
-        }
+        # 原子事务：持仓更新 + 资金增加 + 交易记录
+        try:
+            async with self.db.transaction() as conn:
+                # 1. 更新持仓
+                if new_qty <= 0:
+                    await conn.execute(
+                        "DELETE FROM stock_positions WHERE account_id = ? AND stock_code = ?",
+                        (self.account_id, stock_code)
+                    )
+                else:
+                    await conn.execute(
+                        """UPDATE stock_positions
+                           SET quantity = ?, available_quantity = ?, market_value = ?, updated_at = ?
+                           WHERE account_id = ? AND stock_code = ?""",
+                        (new_qty, new_available, new_qty * price, get_china_time().isoformat(),
+                         self.account_id, stock_code)
+                    )
 
-        # 移除 None 值
-        trade_data = {k: v for k, v in trade_data.items() if v is not None}
+                # 2. 更新账户资金
+                await conn.execute(
+                    """UPDATE accounts
+                       SET available_cash = ?, updated_at = ?
+                       WHERE account_id = ?""",
+                    (
+                        current_cash + net_amount,
+                        get_china_time().isoformat(),
+                        self.account_id
+                    )
+                )
 
-        return await self.db.insert("trade_records", trade_data)
+                # 3. 记录交易
+                trade_data = {
+                    "account_id": self.account_id,
+                    "user_id": user_id,
+                    "order_id": order_id or f"SELL_{get_china_time().strftime('%H%M%S')}",
+                    "stock_code": stock_code,
+                    "stock_name": stock_name,
+                    "trade_type": "sell",
+                    "quantity": quantity,
+                    "price": price,
+                    "amount": net_amount + fees["total_fee"],
+                    "commission": fees["commission"],
+                    "profit_loss": profit_loss,
+                    "trade_time": get_china_time().isoformat(),
+                    "status": "completed",
+                    "trigger_source": trigger_source,
+                    "created_at": get_china_time().isoformat()
+                }
+                columns = ', '.join(trade_data.keys())
+                placeholders = ', '.join(['?' for _ in trade_data])
+                cursor = await conn.execute(
+                    f"INSERT INTO trade_records ({columns}) VALUES ({placeholders})",
+                    tuple(trade_data.values())
+                )
+                trade_record_id = cursor.lastrowid
+
+            return {
+                "success": True,
+                "message": "卖出成功",
+                "quantity": quantity,
+                "price": price,
+                "net_amount": net_amount,
+                "fees": fees,
+                "profit_loss": profit_loss,
+                "trade_record_id": trade_record_id
+            }
+
+        except Exception as e:
+            return {
+                "success": False,
+                "message": f"卖出执行失败: {e}",
+                "quantity": 0,
+                "fees": fees
+            }
 
     async def unfreeze_positions(self):
         """

@@ -30,6 +30,10 @@ async def list_accounts():
                 "display_name": acc["display_name"],
                 "is_active": bool(acc["is_active"]),
                 "available_cash": float(acc["available_cash"] or 0),
+                "commission_rate": float(acc.get("commission_rate", 0.0003)),
+                "stamp_tax": float(acc.get("stamp_tax", 0.0005)),
+                "transfer_fee": float(acc.get("transfer_fee", 0.00002)),
+                "min_commission": float(acc.get("min_commission", 5.0)),
                 "broker_account": acc.get("broker_account", ""),
                 "broker_company": acc.get("broker_company", ""),
                 "broker_server_ip": acc.get("broker_server_ip", ""),
@@ -131,8 +135,9 @@ async def create_account(account_data: dict = Body(...)):
         """INSERT INTO accounts
            (account_id, name, password_hash, display_name, is_active,
             broker_account, broker_password, broker_company, broker_server_ip,
-            broker_server_port, broker_status, notes, available_cash)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            broker_server_port, broker_status, notes, available_cash,
+            commission_rate, stamp_tax, transfer_fee, min_commission)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             account_data.get("name"),
             account_data.get("name"),
@@ -146,7 +151,11 @@ async def create_account(account_data: dict = Body(...)):
             account_data.get("broker_server_port", 8600),
             account_data.get("broker_status", "normal"),
             account_data.get("notes", ""),
-            float(account_data.get("available_cash", 0))
+            float(account_data.get("available_cash", 0)),
+            float(account_data.get("commission_rate", 0.0003)),
+            float(account_data.get("stamp_tax", 0.0005)),
+            float(account_data.get("transfer_fee", 0.00002)),
+            float(account_data.get("min_commission", 5.0))
         )
     )
 
@@ -175,7 +184,8 @@ async def update_account(account_id: str, account_data: dict = Body(...)):
     updatable_fields = [
         "name", "display_name", "is_active", "available_cash",
         "broker_account", "broker_password", "broker_company",
-        "broker_server_ip", "broker_server_port", "broker_status", "notes"
+        "broker_server_ip", "broker_server_port", "broker_status", "notes",
+        "commission_rate", "stamp_tax", "transfer_fee", "min_commission"
     ]
 
     for field in updatable_fields:

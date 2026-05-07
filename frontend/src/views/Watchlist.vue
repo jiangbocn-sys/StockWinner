@@ -136,12 +136,13 @@
               </div>
             </template>
 
-            <el-table :data="currentStocks" stripe style="width: 100%" v-loading="stocksLoading" @selection-change="handleStockSelectionChange">
+            <el-table :data="currentStocks" stripe style="width: 100%" v-loading="stocksLoading" @selection-change="handleStockSelectionChange"
+              :default-sort="{ prop: 'updated_at', order: 'descending' }">
               <el-table-column type="selection" width="50" />
-              <el-table-column prop="stock_code" label="股票代码" width="120" />
-              <el-table-column prop="stock_name" label="股票名称" width="120" />
+              <el-table-column prop="stock_code" label="股票代码" width="120" sortable />
+              <el-table-column prop="stock_name" label="股票名称" width="120" sortable />
               <el-table-column prop="reason" label="入选原因" min-width="180" show-overflow-tooltip />
-              <el-table-column prop="buy_price" label="买入价" width="90" align="right">
+              <el-table-column prop="buy_price" label="买入价" width="90" align="right" sortable>
                 <template #default="{ row }">¥{{ row.buy_price?.toFixed(2) }}</template>
               </el-table-column>
               <el-table-column prop="stop_loss_price" label="止损价" width="90" align="right">
@@ -150,13 +151,17 @@
               <el-table-column prop="take_profit_price" label="止盈价" width="90" align="right">
                 <template #default="{ row }">¥{{ row.take_profit_price?.toFixed(2) }}</template>
               </el-table-column>
-              <el-table-column prop="target_quantity" label="数量" width="80" align="right" />
-              <el-table-column prop="status" label="状态" width="90">
+              <el-table-column prop="position_quantity" label="数量" width="80" align="right">
+                <template #default="{ row }">
+                  {{ row.position_quantity || 0 }}
+                </template>
+              </el-table-column>
+              <el-table-column prop="status" label="状态" width="90" sortable>
                 <template #default="{ row }">
                   <el-tag :type="getStatusType(row.status)" size="small">{{ getStatusText(row.status) }}</el-tag>
                 </template>
               </el-table-column>
-              <el-table-column prop="created_at" label="入选时间" width="160" />
+              <el-table-column prop="updated_at" label="更新时间" width="160" sortable />
               <el-table-column label="操作" fixed="right" width="200">
                 <template #default="{ row }">
                   <el-button type="primary" size="small" @click="editStock(row)">编辑</el-button>
@@ -229,41 +234,37 @@
       <!-- 手动添加股票对话框 -->
       <el-dialog v-model="showAddStockDialog" title="添加候选股票" width="550px">
         <el-form :model="addStockForm" label-width="100px">
-          <el-form-item label="添加方式">
-            <el-radio-group v-model="addStockForm.mode">
-              <el-radio value="code">输入代码</el-radio>
-              <el-radio value="pick">从市场选择</el-radio>
-            </el-radio-group>
+          <el-form-item label="选择股票" required>
+            <el-select
+              v-model="addStockForm.selectedStock"
+              filterable remote
+              :remote-method="searchStocksForAdd"
+              :loading="searchingStocks"
+              placeholder="输入代码、拼音首字母或名称搜索"
+              style="width: 100%"
+            >
+              <el-option
+                v-for="s in stockSearchResults"
+                :key="s.stock_code"
+                :label="`${s.stock_code} - ${s.stock_name?.trim()}${s.spell_initial ? ' (' + s.spell_initial + ')' : ''}`"
+                :value="s"
+              >
+                <span>{{ s.stock_code }}</span>
+                <span style="margin-left: 8px">{{ s.stock_name?.trim() }}</span>
+                <span v-if="s.spell_initial" style="margin-left: 4px; color: #909399; font-size: 12px">{{ s.spell_initial }}</span>
+              </el-option>
+            </el-select>
           </el-form-item>
 
-          <template v-if="addStockForm.mode === 'code'">
-            <el-form-item label="股票代码" required>
-              <el-input v-model="addStockForm.stockCode" placeholder="如 600000.SH 或 000001.SZ" />
-            </el-form-item>
-            <el-form-item label="股票名称">
-              <el-input v-model="addStockForm.stockName" placeholder="可选" />
-            </el-form-item>
-          </template>
-
-          <template v-if="addStockForm.mode === 'pick'">
-            <el-form-item label="选择股票" required>
-              <el-select
-                v-model="addStockForm.selectedStock"
-                filterable remote
-                :remote-method="searchStocks"
-                :loading="searchingStocks"
-                placeholder="输入代码或名称搜索"
-                style="width: 100%"
-              >
-                <el-option
-                  v-for="s in stockSearchResults"
-                  :key="s.stock_code"
-                  :label="`${s.stock_code} - ${s.stock_name}`"
-                  :value="s"
-                />
-              </el-select>
-            </el-form-item>
-          </template>
+          <el-form-item label="目标状态">
+            <el-select v-model="addStockForm.status" style="width: 100%">
+              <el-option label="watching — 观察中" value="watching" />
+              <el-option label="pending — 待交易" value="pending" />
+              <el-option label="bought — 已买入" value="bought" />
+              <el-option label="sold — 已卖出" value="sold" />
+              <el-option label="ignored — 已忽略" value="ignored" />
+            </el-select>
+          </el-form-item>
 
           <el-form-item label="买入价格">
             <el-input-number v-model="addStockForm.buyPrice" :precision="2" :step="0.1" :min="0" />
@@ -359,7 +360,10 @@
           <el-form-item label="买入价格"><el-input-number v-model="editingStock.buy_price" :precision="2" :step="0.1" /></el-form-item>
           <el-form-item label="止损价格"><el-input-number v-model="editingStock.stop_loss_price" :precision="2" :step="0.1" /></el-form-item>
           <el-form-item label="止盈价格"><el-input-number v-model="editingStock.take_profit_price" :precision="2" :step="0.1" /></el-form-item>
-          <el-form-item label="目标数量"><el-input-number v-model="editingStock.target_quantity" :min="100" :step="100" /></el-form-item>
+          <el-form-item label="数量">
+            <el-tag>{{ editingStock.position_quantity || 0 }}</el-tag>
+            <span class="text-muted" style="font-size:12px;color:#999;margin-left:8px">持仓数据，不可修改</span>
+          </el-form-item>
           <el-form-item label="状态">
             <el-select v-model="editingStock.status">
               <el-option label="待交易" value="pending" />
@@ -432,7 +436,12 @@
                 {{ row.task_name || row.strategy_name || '-' }}
               </template>
             </el-table-column>
-            <el-table-column prop="cron_expression" label="Cron" width="130" />
+            <el-table-column label="执行时间" width="200">
+              <template #default="{ row }">
+                <div>{{ row.cron_description || row.cron_expression }}</div>
+                <div style="font-size: 11px; color: #909399; font-family: monospace">{{ row.cron_expression }}</div>
+              </template>
+            </el-table-column>
             <el-table-column label="状态" width="80">
               <template #default="{ row }">
                 <el-tag :type="row.enabled ? 'success' : 'info'" size="small">{{ row.enabled ? '启用' : '停用' }}</el-tag>
@@ -444,9 +453,12 @@
                 <span v-else style="color: #999">未执行</span>
               </template>
             </el-table-column>
-            <el-table-column label="上次状态" width="90">
+            <el-table-column label="上次状态" width="110">
               <template #default="{ row }">
-                <el-tag v-if="row.last_status" :type="{success:'success',error:'danger',running:'warning'}[row.last_status] || 'info'" size="small">
+                <el-tooltip v-if="row.realtime_status === 'running'" :content="row.realtime_progress?.message || '正在执行'" placement="top" :show-after="0">
+                  <el-tag type="warning" size="small">运行中</el-tag>
+                </el-tooltip>
+                <el-tag v-else-if="row.last_status" :type="{success:'success',error:'danger',running:'warning'}[row.last_status] || 'info'" size="small">
                   {{ {success:'成功',error:'失败',running:'运行中'}[row.last_status] || row.last_status }}
                 </el-tag>
                 <el-tooltip v-if="row.last_status === 'error' && row.last_output" :content="parseTaskError(row)" placement="top" :show-after="0">
@@ -570,10 +582,8 @@ const createGroupForm = reactive({ name: '', screeningStrategyId: null })
 const renameForm = reactive({ groupId: null, name: '' })
 const associateForm = reactive({ groupId: null, screeningStrategyId: null })
 const addStockForm = reactive({
-  mode: 'code',
-  stockCode: '',
-  stockName: '',
   selectedStock: null,
+  status: 'watching',
   buyPrice: null,
   stopLoss: null,
   takeProfit: null,
@@ -790,18 +800,18 @@ const loadCurrentGroupStocks = async () => {
   }
 }
 
-// 搜索股票（从 stock_base_info）
-const searchStocks = async (query) => {
-  if (!query || query.length < 2) {
+// 搜索股票（智能搜索：代码/拼音/名称）
+const searchStocksForAdd = async (query) => {
+  if (!query || query.length < 1) {
     stockSearchResults.value = []
     return
   }
   searchingStocks.value = true
   try {
-    const res = await fetch(`/api/v1/ui/databases/kline/tables/stock_base_info/data?stock_code=${encodeURIComponent(query)}&page=1&page_size=20`)
+    const res = await fetch(`/api/v1/ui/stocks/search?q=${encodeURIComponent(query)}&limit=20`)
     const data = await res.json()
-    if (data.success && data.data) {
-      stockSearchResults.value = data.data
+    if (data.success && data.stocks) {
+      stockSearchResults.value = data.stocks
     } else {
       stockSearchResults.value = []
     }
@@ -813,20 +823,12 @@ const searchStocks = async (query) => {
 }
 
 const submitAddStock = async () => {
-  let stockCode = addStockForm.stockCode
-  let stockName = addStockForm.stockName
-  if (addStockForm.mode === 'pick') {
-    if (!addStockForm.selectedStock) {
-      ElMessage.warning('请选择股票')
-      return
-    }
-    stockCode = addStockForm.selectedStock.stock_code
-    stockName = addStockForm.selectedStock.stock_name
-  }
-  if (!stockCode) {
-    ElMessage.warning('请输入股票代码')
+  if (!addStockForm.selectedStock) {
+    ElMessage.warning('请选择股票')
     return
   }
+  const stockCode = addStockForm.selectedStock.stock_code
+  const stockName = (addStockForm.selectedStock.stock_name || '').trim()
 
   addingStock.value = true
   try {
@@ -835,8 +837,9 @@ const submitAddStock = async () => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         stock_code: stockCode,
-        stock_name: stockName || stockCode,
+        stock_name: stockName,
         group_id: selectedGroupId.value,
+        status: addStockForm.status,
         buy_price: addStockForm.buyPrice,
         stop_loss_price: addStockForm.stopLoss,
         take_profit_price: addStockForm.takeProfit,
@@ -862,9 +865,8 @@ const submitAddStock = async () => {
 }
 
 const resetAddStockForm = () => {
-  addStockForm.stockCode = ''
-  addStockForm.stockName = ''
   addStockForm.selectedStock = null
+  addStockForm.status = 'watching'
   addStockForm.buyPrice = null
   addStockForm.stopLoss = null
   addStockForm.takeProfit = null

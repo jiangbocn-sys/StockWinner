@@ -12,7 +12,6 @@
 """
 
 import asyncio
-import json
 from typing import Dict, List, Optional, Any
 from services.common.database import get_db_manager
 from services.common.timezone import get_china_time
@@ -95,6 +94,9 @@ class TradingMonitor:
         # === 第二部分：基于 watchlist 的传统监控（止损止盈）===
         await self._monitor_watchlist(account_id)
 
+        # === 第三部分：刷新持仓盈亏 ===
+        await self._refresh_positions_pnl(account_id)
+
     async def _evaluate_trading_strategies(self, account_id: str):
         """评估交易策略配置中的触发条件"""
         executor = get_strategy_executor(account_id)
@@ -106,7 +108,7 @@ class TradingMonitor:
         # 获取 watchlist 中的股票代码
         db = get_db_manager()
         watchlist = await db.fetchall(
-            "SELECT stock_code FROM watchlist WHERE account_id = ? AND status IN ('pending', 'watching')",
+            "SELECT stock_code FROM watchlist WHERE account_id = ? AND status IN ('pending', 'watching', 'bought')",
             (account_id,),
         )
         stock_codes = [w["stock_code"] for w in watchlist]
@@ -151,63 +153,218 @@ class TradingMonitor:
 
     def _get_cooldown_for_strategy(self, strategy_id: int) -> int:
         """获取策略的冷却时间"""
-        # 默认 300 秒（5 分钟），后续从 DB 读取
-        return 300
+        import sqlite3
+        from pathlib import Path
+        db_path = Path(__file__).parent.parent.parent / "data" / "stockwinner.db"
+        try:
+            conn = sqlite3.connect(str(db_path))
+            cursor = conn.cursor()
+            cursor.execute("SELECT cooldown_seconds FROM trading_strategy_config WHERE id = ?", (strategy_id,))
+            row = cursor.fetchone()
+            conn.close()
+            if row:
+                return row[0]
+        except Exception:
+            pass
+        return 300  # 默认 5 分钟
 
     async def _monitor_watchlist(self, account_id: str):
-        """传统的 watchlist 止损止盈监控"""
+        """传统的 watchlist 止损止盈监控（批量行情）"""
         db = get_db_manager()
 
-        # 获取 watchlist 中的股票（JOIN 候选组和策略以获取动态参数）
+        # 获取 watchlist 中的股票
         watchlist = await db.fetchall("""
-            SELECT w.*, g.screening_strategy_id, s.config as strategy_config
-            FROM watchlist w
-            LEFT JOIN candidate_groups g ON w.group_id = g.id
-            LEFT JOIN strategies s ON g.screening_strategy_id = s.id
-            WHERE w.account_id = ? AND w.status IN ('pending', 'watching')
+            SELECT * FROM watchlist
+            WHERE account_id = ? AND status IN ('pending', 'watching', 'bought')
         """, (account_id,))
 
-        for stock in watchlist:
-            await self._check_stock_signals(account_id, stock)
+        if not watchlist:
+            return
 
-    def _resolve_trade_params(self, stock: Dict) -> tuple:
-        """从策略 config 解析止损止盈参数，无策略时回退 watchlist 行值
+        stock_codes = [w["stock_code"] for w in watchlist]
+
+        # 批量获取行情数据（一次 SDK 调用）
+        try:
+            from services.trading.gateway import get_gateway
+            gateway = await get_gateway()
+            batch_data = await gateway.get_batch_market_data(stock_codes)
+        except Exception as e:
+            print(f"[Monitor] 批量获取行情失败: {e}")
+            # 降级为逐个获取
+            for stock in watchlist:
+                await self._check_stock_signals(account_id, stock)
+            return
+
+        # 逐个检查止损止盈
+        for stock in watchlist:
+            stock_code = stock.get("stock_code")
+            market_data = batch_data.get(stock_code)
+            if not market_data:
+                continue
+
+            # 注入行情数据到 stock 对象
+            stock_with_price = {**stock, "current_price": market_data.current_price}
+            await self._check_stock_signals_with_price(account_id, stock_with_price)
+
+    async def _refresh_positions_pnl(self, account_id: str):
+        """刷新持仓盈亏（从行情数据更新 current_price）"""
+        from services.trading.gateway import get_gateway
+        from services.trading.position_manager import get_position_manager
+
+        db = get_db_manager()
+        positions = await db.fetchall(
+            "SELECT stock_code FROM stock_positions WHERE account_id = ?",
+            (account_id,),
+        )
+        if not positions:
+            return
+
+        stock_codes = [p["stock_code"] for p in positions]
+        try:
+            gateway = await get_gateway()
+            batch_data = await gateway.get_batch_market_data(stock_codes)
+        except Exception:
+            return
+
+        prices = {}
+        for code in stock_codes:
+            md = batch_data.get(code)
+            if md:
+                prices[code] = md.current_price
+
+        if prices:
+            pm = get_position_manager(account_id)
+            count = await pm.refresh_pnl(prices)
+            if count > 0:
+                print(f"[Monitor] 已刷新 {count} 只持仓盈亏")
+
+    async def _evaluate_sell_decision(
+        self,
+        account_id: str,
+        stock_code: str,
+        stock: Dict,
+        current_price: float,
+    ) -> Dict:
+        """评估是否应该卖出
+
+        决策流程：
+        1. 如果有个股策略(trading_strategies) → 执行策略逻辑（动态止盈止损）
+        2. 无个股策略 → 直接使用 watchlist 中的止盈止损价格
+           - 这些价格在选股完成/买入执行时已填入
 
         Returns:
-            (stop_loss_price, take_profit_price)
+            {
+                "should_sell": bool,
+                "reason": str,       # 'stop_loss' / 'take_profit' / 'trailing_stop' / ''
+                "stop_loss_price": float,
+                "take_profit_price": float,
+            }
         """
-        current_price = stock.get('buy_price', 0)  # 作为基准价
-        fallback_stop = stock.get('stop_loss_price', 0)
-        fallback_take = stock.get('take_profit_price', 0)
+        db = get_db_manager()
+        result = {"should_sell": False, "reason": "", "stop_loss_price": 0, "take_profit_price": 0}
 
-        strategy_config_raw = stock.get('strategy_config')
-        if not strategy_config_raw:
-            return fallback_stop, fallback_take
+        # === 优先级 1：检查个股动态策略 ===
+        ts = await db.fetchone(
+            "SELECT * FROM trading_strategies WHERE account_id = ? AND stock_code = ?",
+            (account_id, stock_code),
+        )
 
-        try:
-            config = json.loads(strategy_config_raw) if isinstance(strategy_config_raw, str) else strategy_config_raw
-        except (json.JSONDecodeError, TypeError):
-            return fallback_stop, fallback_take
+        if ts:
+            strategy_type = ts.get("strategy_type", "fixed")
+            avg_cost = stock.get("buy_price", 0) or stock.get("current_price", 0)
 
-        stop_loss_pct = config.get('stop_loss_pct', 0.05)
-        take_profit_pct = config.get('take_profit_pct', 0.15)
+            # --- 动态策略：回撤止盈（trailing_stop）---
+            if strategy_type == "trailing_stop":
+                # 获取持仓最高价
+                position = await db.fetchone(
+                    "SELECT highest_price FROM stock_positions WHERE account_id = ? AND stock_code = ?",
+                    (account_id, stock_code),
+                )
+                highest = position.get("highest_price", 0) if position else 0
 
-        if current_price > 0:
-            return round(current_price * (1 - stop_loss_pct), 2), round(current_price * (1 + take_profit_pct), 2)
-        return fallback_stop, fallback_take
+                # 更新最高价
+                if current_price > highest:
+                    highest = current_price
+                    await db.execute(
+                        "UPDATE stock_positions SET highest_price = ? WHERE account_id = ? AND stock_code = ?",
+                        (highest, account_id, stock_code),
+                    )
+
+                take_profit_pct = ts.get("take_profit_pct", 0.05)  # 默认回落 5%
+                stop_loss_pct = ts.get("stop_loss_pct", 0.05)  # 硬止损
+
+                if highest > 0 and take_profit_pct > 0:
+                    trail_stop = round(highest * (1 - take_profit_pct), 2)
+                    result["take_profit_price"] = trail_stop
+                    if current_price <= trail_stop:
+                        result["should_sell"] = True
+                        result["reason"] = "trailing_stop"
+                        return result
+
+                # 硬止损：基于成本价
+                if avg_cost > 0 and stop_loss_pct > 0:
+                    hard_stop = round(avg_cost * (1 - stop_loss_pct), 2)
+                    result["stop_loss_price"] = hard_stop
+                    if current_price <= hard_stop:
+                        result["should_sell"] = True
+                        result["reason"] = "stop_loss"
+                        return result
+
+                return result
+
+            # --- 固定策略（fixed）：使用绝对价格或百分比 ---
+            if strategy_type == "fixed":
+                # 绝对价格优先
+                sl = ts.get("stop_loss_price", 0) or 0
+                tp = ts.get("take_profit_price", 0) or 0
+                if sl > 0:
+                    result["stop_loss_price"] = float(sl)
+                if tp > 0:
+                    result["take_profit_price"] = float(tp)
+
+                # 百分比次之
+                if sl <= 0 and ts.get("stop_loss_pct", 0) > 0 and avg_cost > 0:
+                    result["stop_loss_price"] = round(avg_cost * (1 - ts["stop_loss_pct"]), 2)
+                if tp <= 0 and ts.get("take_profit_pct", 0) > 0 and avg_cost > 0:
+                    result["take_profit_price"] = round(avg_cost * (1 + ts["take_profit_pct"]), 2)
+
+                if result["stop_loss_price"] > 0 and current_price <= result["stop_loss_price"]:
+                    result["should_sell"] = True
+                    result["reason"] = "stop_loss"
+                elif result["take_profit_price"] > 0 and current_price >= result["take_profit_price"]:
+                    result["should_sell"] = True
+                    result["reason"] = "take_profit"
+
+                return result
+
+            # 未知策略类型，回退到 watchlist
+            print(f"[Monitor] {stock_code} 未知策略类型: {strategy_type}，回退到 watchlist")
+
+        # === 优先级 2：watchlist 止盈止损值（选股完成/买入时已填入）===
+        sl = stock.get("stop_loss_price", 0) or 0
+        tp = stock.get("take_profit_price", 0) or 0
+        result["stop_loss_price"] = float(sl)
+        result["take_profit_price"] = float(tp)
+
+        if sl > 0 and current_price <= sl:
+            result["should_sell"] = True
+            result["reason"] = "stop_loss"
+        elif tp > 0 and current_price >= tp:
+            result["should_sell"] = True
+            result["reason"] = "take_profit"
+
+        return result
 
     async def _check_stock_signals(self, account_id: str, stock: Dict):
         """
         检查单只股票的交易信号
         使用真实行情数据
         """
+        db = get_db_manager()
         stock_code = stock.get('stock_code')
         buy_price = stock.get('buy_price', 0)
         target_quantity = stock.get('target_quantity', 100)
         status = stock.get('status')
-
-        # 从策略 config 解析止损止盈（优先），无策略时回退 watchlist 行值
-        stop_loss, take_profit = self._resolve_trade_params(stock)
 
         # 获取交易网关
         gateway = None
@@ -215,7 +372,6 @@ class TradingMonitor:
 
         try:
             gateway = await get_gateway()
-            # 获取实时行情 - 直接传入股票代码，网关会自动处理格式
             market_data: Optional[MarketData] = await gateway.get_market_data(stock_code)
 
             if market_data:
@@ -233,27 +389,82 @@ class TradingMonitor:
 
         # 检查买入条件
         if status == 'pending':
-            # 价格达到买入价附近 2% 范围内
             if buy_price > 0 and abs(current_price - buy_price) / buy_price <= 0.02:
                 print(f"[Monitor] 触发买入信号：{stock_code}, 目标价：{buy_price:.2f}, 当前价：{current_price:.2f}")
+                await self._create_pending_signal(account_id, stock, 'buy', current_price, target_quantity)
                 await self._execute_buy_signal(account_id, stock, current_price, target_quantity)
 
-        # 检查止损/止盈条件
+        # 检查止损/止盈条件（动态策略引擎）
         elif status == 'watching':
-            # 检查止损条件
-            if stop_loss > 0 and current_price <= stop_loss:
-                print(f"[Monitor] 触发止损：{stock_code}, 止损价：{stop_loss:.2f}, 当前价：{current_price:.2f}")
+            # 先检查持仓，无持仓直接跳过
+            position = await db.fetchone(
+                "SELECT 1 FROM stock_positions WHERE account_id = ? AND stock_code = ?",
+                (account_id, stock_code),
+            )
+            if not position:
+                return
+            decision = await self._evaluate_sell_decision(account_id, stock_code, stock, current_price)
+            if decision["should_sell"]:
+                reason = decision["reason"]
+                signal_type = "sell_stop_loss" if reason == "stop_loss" else (
+                    "sell_take_profit" if reason == "take_profit" else f"sell_{reason}"
+                )
+                print(f"[Monitor] 触发卖出：{stock_code}, 原因: {reason}, "
+                      f"止损价={decision['stop_loss_price']:.2f}, "
+                      f"止盈价={decision['take_profit_price']:.2f}, "
+                      f"当前价={current_price:.2f}")
+                await self._create_pending_signal(account_id, stock, signal_type, current_price, 0)
                 await self._execute_sell_signal(
                     account_id, stock, current_price,
-                    'sell_stop_loss', target_quantity
+                    signal_type, target_quantity
                 )
 
-            # 检查止盈条件
-            elif take_profit > 0 and current_price >= take_profit:
-                print(f"[Monitor] 触发止盈：{stock_code}, 止盈价：{take_profit:.2f}, 当前价：{current_price:.2f}")
+    async def _check_stock_signals_with_price(self, account_id: str, stock: Dict):
+        """
+        检查单只股票的交易信号（行情已预取版本）
+        stock 对象中需包含 current_price 字段
+        """
+        stock_code = stock.get('stock_code')
+        buy_price = stock.get('buy_price', 0)
+        target_quantity = stock.get('target_quantity', 100)
+        status = stock.get('status')
+        current_price = stock.get('current_price')
+
+        db = get_db_manager()
+
+        if current_price is None:
+            return
+
+        # 检查买入条件
+        if status == 'pending':
+            if buy_price > 0 and abs(current_price - buy_price) / buy_price <= 0.02:
+                print(f"[Monitor] 触发买入信号：{stock_code}, 目标价：{buy_price:.2f}, 当前价：{current_price:.2f}")
+                await self._create_pending_signal(account_id, stock, 'buy', current_price, target_quantity)
+                await self._execute_buy_signal(account_id, stock, current_price, target_quantity)
+
+        # 检查止损/止盈条件（动态策略引擎）
+        elif status in ('watching', 'bought'):
+            # 无持仓直接跳过，不检查卖出条件
+            position = await db.fetchone(
+                "SELECT quantity FROM stock_positions WHERE account_id = ? AND stock_code = ?",
+                (account_id, stock_code),
+            )
+            if not position or position.get("quantity", 0) == 0:
+                return
+            decision = await self._evaluate_sell_decision(account_id, stock_code, stock, current_price)
+            if decision["should_sell"]:
+                reason = decision["reason"]
+                signal_type = "sell_stop_loss" if reason == "stop_loss" else (
+                    "sell_take_profit" if reason == "take_profit" else f"sell_{reason}"
+                )
+                print(f"[Monitor] 触发卖出：{stock_code}, 原因: {reason}, "
+                      f"止损价={decision['stop_loss_price']:.2f}, "
+                      f"止盈价={decision['take_profit_price']:.2f}, "
+                      f"当前价={current_price:.2f}")
+                await self._create_pending_signal(account_id, stock, signal_type, current_price, 0)
                 await self._execute_sell_signal(
                     account_id, stock, current_price,
-                    'sell_take_profit', target_quantity
+                    signal_type, target_quantity
                 )
 
     async def _execute_buy_signal(
@@ -264,9 +475,24 @@ class TradingMonitor:
         target_quantity: int,
         trigger_source: Optional[str] = None,
     ):
-        """执行买入交易"""
+        """执行买入交易
+
+        买入数量解析：
+        1. 个股策略 max_trade_quantity > 0 → 按该数量
+        2. 否则使用 watchlist target_quantity
+        实际买入由 execution_service 根据账户风控参数计算上限
+        """
         stock_code = stock.get('stock_code')
         stock_name = stock.get('stock_name', '')
+
+        # 检查个股策略是否有最大买入数量限制
+        db = get_db_manager()
+        ts = await db.fetchone(
+            "SELECT max_trade_quantity FROM trading_strategies WHERE account_id = ? AND stock_code = ?",
+            (account_id, stock_code),
+        )
+        if ts and ts.get("max_trade_quantity", 0) > 0:
+            target_quantity = ts["max_trade_quantity"]
 
         # 获取交易执行服务
         execution = get_trade_execution_service(account_id)
@@ -287,15 +513,14 @@ class TradingMonitor:
             print(f"  总金额：{result['total_amount']:.2f} 元")
             print(f"  手续费：{result['fees']['total_fee']:.2f} 元")
 
-            # 更新 watchlist 状态
+            # 更新 watchlist 状态为已买入
             await self._update_watchlist_status(
-                account_id, stock_code, 'watching'
+                account_id, stock_code, 'bought'
             )
 
-            # 创建交易信号记录
-            await self._create_signal(
-                account_id, stock, 'buy_executed', current_price,
-                result['quantity'], result['total_amount']
+            # 信号 pending → executed
+            await self._update_signal_status(
+                account_id, stock_code, 'executed', result['quantity']
             )
 
             # 发送通知
@@ -316,10 +541,9 @@ class TradingMonitor:
             )
         else:
             print(f"[Monitor] 买入失败：{result['message']}")
-            # 创建失败信号记录
-            await self._create_signal(
-                account_id, stock, 'buy_failed', current_price,
-                target_quantity, 0, result['message']
+            # 信号 pending → cancelled
+            await self._update_signal_status(
+                account_id, stock_code, 'cancelled', target_quantity
             )
 
             # 发送失败通知
@@ -372,11 +596,9 @@ class TradingMonitor:
                 account_id, stock_code, 'sold'
             )
 
-            # 创建交易信号记录
-            await self._create_signal(
-                account_id, stock, signal_type, current_price,
-                result['quantity'], result['net_amount'],
-                profit_loss=result['profit_loss']
+            # 信号 pending → executed
+            await self._update_signal_status(
+                account_id, stock_code, 'executed', result['quantity']
             )
 
             # 发送通知
@@ -398,20 +620,22 @@ class TradingMonitor:
             )
         else:
             print(f"[Monitor] 卖出失败：{result['message']}")
+            # 信号 pending → cancelled
+            await self._update_signal_status(
+                account_id, stock_code, 'cancelled', 0
+            )
 
-    async def _create_signal(
+    async def _create_pending_signal(
         self,
         account_id: str,
         stock: Dict,
         signal_type: str,
         price: float,
-        quantity: int = 0,
-        amount: float = 0,
-        profit_loss: Optional[float] = None,
-        message: Optional[str] = None
+        target_quantity: int,
     ):
-        """创建交易信号记录"""
+        """创建 pending 状态的交易信号"""
         db = get_db_manager()
+        now = get_china_time()
 
         signal_data = {
             "account_id": account_id,
@@ -420,19 +644,41 @@ class TradingMonitor:
             "stock_name": stock.get('stock_name'),
             "signal_type": signal_type,
             "price": price,
-            "quantity": quantity,
-            "amount": amount,
-            "profit_loss": profit_loss,
-            "message": message,
-            "status": "completed" if "failed" not in signal_type else "failed",
-            "created_at": get_china_time().isoformat()
+            "target_quantity": target_quantity,
+            "status": "pending",
+            "created_at": now.isoformat(),
+            "executed_at": None,
         }
 
-        # 移除 None 值
-        signal_data = {k: v for k, v in signal_data.items() if v is not None}
+        signal_id = await db.insert("trading_signals", signal_data)
+        print(f"[Monitor] 创建交易信号(pending)：{stock.get('stock_code')} - {signal_type}")
+        return signal_id
 
-        await db.insert("trading_signals", signal_data)
-        print(f"[Monitor] 创建交易信号：{stock.get('stock_code')} - {signal_type}")
+    async def _update_signal_status(
+        self,
+        account_id: str,
+        stock_code: str,
+        status: str,
+        quantity: int,
+    ):
+        """更新信号状态：pending → executed / cancelled"""
+        db = get_db_manager()
+        now = get_china_time().isoformat()
+
+        if status == "executed":
+            await db.execute(
+                "UPDATE trading_signals SET status = ?, target_quantity = ?, executed_at = ? "
+                "WHERE account_id = ? AND stock_code = ? AND status = 'pending' "
+                "ORDER BY created_at DESC LIMIT 1",
+                (status, quantity, now, account_id, stock_code),
+            )
+        else:
+            await db.execute(
+                "UPDATE trading_signals SET status = ?, executed_at = ? "
+                "WHERE account_id = ? AND stock_code = ? AND status = 'pending' "
+                "ORDER BY created_at DESC LIMIT 1",
+                (status, now, account_id, stock_code),
+            )
 
     async def _update_watchlist_status(
         self,

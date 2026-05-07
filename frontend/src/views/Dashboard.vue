@@ -41,25 +41,38 @@
                 </el-tag>
               </div>
             </template>
-            <el-descriptions :column="2" border>
-              <el-descriptions-item label="运行时长">{{ uptimeHours }} 小时</el-descriptions-item>
-              <el-descriptions-item label="版本">v6.1.2</el-descriptions-item>
-              <el-descriptions-item label="Galaxy API" :span="2">
-                <el-tag size="small" type="success">运行中</el-tag>
+            <el-descriptions :column="5" border>
+              <el-descriptions-item label="运行时长">{{ uptimeText }}</el-descriptions-item>
+              <el-descriptions-item label="版本">{{ appVersion }}</el-descriptions-item>
+              <el-descriptions-item label="CPU">{{ cpuPercent }}%</el-descriptions-item>
+              <el-descriptions-item label="内存">{{ memoryMb }} MB</el-descriptions-item>
+              <el-descriptions-item label="硬盘">{{ diskPercent }}%</el-descriptions-item>
+            </el-descriptions>
+          </el-card>
+
+          <!-- 仓位信息 -->
+          <el-card class="position-card">
+            <template #header>
+              <span>仓位信息</span>
+            </template>
+            <el-descriptions :column="5" border>
+              <el-descriptions-item label="可用资金">¥{{ formatNumber(availableCash) }}</el-descriptions-item>
+              <el-descriptions-item label="持仓数量">{{ positionCount }} 只</el-descriptions-item>
+              <el-descriptions-item label="当前市值">¥{{ formatNumber(totalMarketValue) }}</el-descriptions-item>
+              <el-descriptions-item label="当前盈亏">
+                <span :class="totalPnl >= 0 ? 'profit-positive' : 'profit-negative'">
+                  {{ totalPnl >= 0 ? '+' : '' }}¥{{ formatNumber(Math.abs(totalPnl)) }}
+                </span>
               </el-descriptions-item>
-              <el-descriptions-item label="选股服务" :span="2">
-                <el-tag size="small" type="success">运行中</el-tag>
-              </el-descriptions-item>
-              <el-descriptions-item label="监控服务" :span="2">
-                <el-tag size="small" type="success">运行中</el-tag>
-              </el-descriptions-item>
-              <el-descriptions-item label="通知服务" :span="2">
-                <el-tag size="small" type="success">正常</el-tag>
+              <el-descriptions-item label="当日盈亏">
+                <span :class="dailyPnl >= 0 ? 'profit-positive' : 'profit-negative'">
+                  {{ dailyPnl >= 0 ? '+' : '' }}¥{{ formatNumber(Math.abs(dailyPnl)) }}
+                </span>
               </el-descriptions-item>
             </el-descriptions>
           </el-card>
 
-          <!-- 交易统计和资源开销 -->
+          <!-- 今日交易统计 -->
           <el-row :gutter="20" class="stats-row">
             <el-col :span="12">
               <el-card class="stat-card">
@@ -78,53 +91,18 @@
             <el-col :span="12">
               <el-card class="stat-card">
                 <template #header>
-                  <span>资源开销</span>
+                  <span>今日任务执行</span>
                 </template>
                 <el-descriptions :column="2" border>
-                  <el-descriptions-item label="CPU">{{ cpuPercent }}%</el-descriptions-item>
-                  <el-descriptions-item label="内存">{{ memoryMb }} MB</el-descriptions-item>
-                  <el-descriptions-item label="磁盘" :span="2">{{ diskPercent }}%</el-descriptions-item>
+                  <el-descriptions-item label="执行次数">{{ taskCount }}</el-descriptions-item>
+                  <el-descriptions-item label="成功">{{ taskSuccess }}</el-descriptions-item>
+                  <el-descriptions-item label="失败" :span="2">
+                    <span :class="taskFail > 0 ? 'profit-negative' : ''">{{ taskFail }}</span>
+                  </el-descriptions-item>
                 </el-descriptions>
               </el-card>
             </el-col>
           </el-row>
-
-          <!-- 持仓概览 -->
-          <el-card class="positions-card">
-            <template #header>
-              <span>持仓概览</span>
-            </template>
-            <el-descriptions :column="3" border>
-              <el-descriptions-item label="持仓数量">{{ positionCount }} 只</el-descriptions-item>
-              <el-descriptions-item label="持仓市值">¥{{ formatNumber(totalMarketValue) }}</el-descriptions-item>
-              <el-descriptions-item label="总盈亏">
-                <span :class="totalPnl >= 0 ? 'profit-positive' : 'profit-negative'">
-                  {{ totalPnl >= 0 ? '+' : '' }}¥{{ formatNumber(Math.abs(totalPnl)) }}
-                </span>
-              </el-descriptions-item>
-            </el-descriptions>
-          </el-card>
-
-          <!-- 控制面板 -->
-          <el-card class="control-card">
-            <template #header>
-              <span>控制面板</span>
-            </template>
-            <el-space>
-              <el-button type="primary" :loading="loading" @click="refreshData">
-                <el-icon><Refresh /></el-icon>
-                刷新数据
-              </el-button>
-              <el-button type="success" :loading="loading" @click="toggleService('screening')">
-                <el-icon><VideoPlay /></el-icon>
-                启动选股
-              </el-button>
-              <el-button type="warning" :loading="loading" @click="toggleService('monitoring')">
-                <el-icon><Monitor /></el-icon>
-                启动监控
-              </el-button>
-            </el-space>
-          </el-card>
         </el-main>
       </el-container>
     </el-main>
@@ -132,7 +110,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted, computed } from 'vue'
+import { ref, onMounted, computed } from 'vue'
 import { useAccountStore } from '../stores/account'
 import NavBar from '../components/NavBar.vue'
 
@@ -141,20 +119,24 @@ const currentAccountId = computed(() => accountStore.currentAccountId)
 const accounts = computed(() => accountStore.accounts)
 const currentAccount = computed(() => accountStore.currentAccount)
 
-// 仪表盘数据
 const healthStatus = ref('healthy')
-const uptimeHours = ref(0)
+const uptimeText = ref('0 小时')
+const appVersion = ref('v7.0.0')
+const cpuPercent = ref(0)
+const memoryMb = ref(0)
+const diskPercent = ref(0)
+const taskCount = ref(0)
+const taskSuccess = ref(0)
+const taskFail = ref(0)
 const tradeCount = ref(0)
 const buyCount = ref(0)
 const sellCount = ref(0)
 const totalAmount = ref(0)
-const cpuPercent = ref(0)
-const memoryMb = ref(0)
-const diskPercent = ref(0)
+const availableCash = ref(0)
 const positionCount = ref(0)
 const totalMarketValue = ref(0)
 const totalPnl = ref(0)
-const loading = ref(false)
+const dailyPnl = ref(0)
 
 // 加载仪表盘数据
 const loadDashboard = async () => {
@@ -163,31 +145,30 @@ const loadDashboard = async () => {
     const data = await response.json()
 
     healthStatus.value = data.system_health?.status || 'unknown'
-    uptimeHours.value = data.system_health?.uptime_hours || 0
+    uptimeText.value = `${data.system_health?.uptime_hours || 0} 小时`
+    appVersion.value = `v${data.system_health?.version || '7.0.0'}`
+    cpuPercent.value = data.resources?.cpu_percent || 0
+    memoryMb.value = data.resources?.memory_mb || 0
+    diskPercent.value = data.resources?.disk_percent || 0
     tradeCount.value = data.today_trading?.trade_count || 0
     buyCount.value = data.today_trading?.buy_count || 0
     sellCount.value = data.today_trading?.sell_count || 0
     totalAmount.value = data.today_trading?.total_amount || 0
-    cpuPercent.value = data.resources?.cpu_percent || 0
-    memoryMb.value = data.resources?.memory_mb || 0
-    diskPercent.value = data.resources?.disk_percent || 0
+    taskCount.value = data.today_tasks?.task_count || 0
+    taskSuccess.value = data.today_tasks?.success_count || 0
+    taskFail.value = data.today_tasks?.fail_count || 0
+    availableCash.value = data.positions_summary?.available_cash || 0
     positionCount.value = data.positions_summary?.position_count || 0
     totalMarketValue.value = data.positions_summary?.total_market_value || 0
     totalPnl.value = data.positions_summary?.total_pnl || 0
+    dailyPnl.value = data.positions_summary?.daily_pnl || 0
   } catch (error) {
     console.error('加载仪表盘数据失败:', error)
   }
 }
 
-const refreshData = async () => {
-  loading.value = true
-  await loadDashboard()
-  loading.value = false
-}
-
-const toggleService = async (service) => {
-  console.log('切换服务:', service)
-  // TODO: 实现服务控制 API
+const refreshData = () => {
+  loadDashboard()
 }
 
 const handleAccountSelect = (accountId) => {
@@ -243,9 +224,8 @@ onMounted(async () => {
 }
 
 .health-card,
-.stat-card,
-.positions-card,
-.control-card {
+.position-card,
+.stat-card {
   margin-bottom: 20px;
 }
 

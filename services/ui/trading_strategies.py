@@ -1,6 +1,7 @@
 """
-交易策略 API
-每只股票的交易策略管理
+个股交易策略 API（trading_strategies 表）- 止损止盈配置
+
+条件触发策略的 CRUD API 在 trades.py 中定义。
 """
 
 from fastapi import APIRouter, HTTPException, Path, Body
@@ -12,90 +13,16 @@ from services.common.timezone import get_china_time
 router = APIRouter()
 
 
-@router.get("/api/v1/ui/{account_id}/trading-strategies")
-async def list_trading_strategies(account_id: str = Path(..., description="账户 ID")):
-    """获取账户的所有交易策略"""
-    db = get_db_manager()
+# ============================================================
+# 个股交易策略 API（trading_strategies 表）- 止损止盈配置
+# ============================================================
 
-    # 验证账户
-    account = await db.fetchone(
-        "SELECT 1 FROM accounts WHERE account_id = ? AND is_active = 1",
-        (account_id,)
-    )
-    if not account:
-        raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
-
-    strategies = await db.fetchall(
-        """SELECT * FROM trading_strategies
-           WHERE account_id = ?
-           ORDER BY updated_at DESC""",
-        (account_id,)
-    )
-
-    return {
-        "success": True,
-        "strategies": [
-            {
-                "id": s["id"],
-                "account_id": s["account_id"],
-                "stock_code": s["stock_code"],
-                "stock_name": s["stock_code"],  # 暂时用代码代替名称
-                "entry_price": float(s.get("entry_price") or 0),
-                "stop_loss_price": float(s.get("stop_loss_price") or 0),
-                "take_profit_price": float(s.get("take_profit_price") or 0),
-                "stop_loss_pct": float(s.get("stop_loss_pct") or 0),
-                "take_profit_pct": float(s.get("take_profit_pct") or 0),
-                "max_trade_quantity": int(s.get("max_trade_quantity") or 0),
-                "updated_at": s.get("updated_at", "")
-            }
-            for s in strategies
-        ]
-    }
-
-
-@router.get("/api/v1/ui/{account_id}/trading-strategies/{stock_code}")
-async def get_trading_strategy(
-    account_id: str = Path(..., description="账户 ID"),
-    stock_code: str = Path(..., description="股票代码")
-):
-    """获取指定股票的交易策略"""
-    db = get_db_manager()
-
-    strategy = await db.fetchone(
-        """SELECT * FROM trading_strategies
-           WHERE account_id = ? AND stock_code = ?""",
-        (account_id, stock_code)
-    )
-
-    if not strategy:
-        return {
-            "success": True,
-            "strategy": None,
-            "message": "该股票尚未设置交易策略"
-        }
-
-    return {
-        "success": True,
-        "strategy": {
-            "id": strategy["id"],
-            "account_id": strategy["account_id"],
-            "stock_code": strategy["stock_code"],
-            "stock_name": strategy["stock_code"],  # 暂时用代码代替名称
-            "entry_price": float(strategy.get("entry_price") or 0),
-            "stop_loss_price": float(strategy.get("stop_loss_price") or 0),
-            "take_profit_price": float(strategy.get("take_profit_price") or 0),
-            "stop_loss_pct": float(strategy.get("stop_loss_pct") or 0),
-            "take_profit_pct": float(strategy.get("take_profit_pct") or 0),
-            "max_trade_quantity": int(strategy.get("max_trade_quantity") or 0),
-            "updated_at": strategy.get("updated_at", "")
-        }
-    }
-
-
-@router.post("/api/v1/ui/{account_id}/trading-strategies")
-async def create_trading_strategy(
+@router.post("/api/v1/ui/{account_id}/trading-strategies/stock")
+async def upsert_stock_trading_strategy(
     account_id: str = Path(..., description="账户 ID"),
     stock_code: str = Body(..., description="股票代码"),
+    strategy_type: str = Body("fixed", description="策略类型：fixed/trailing_stop"),
+    config: Optional[str] = Body(None, description="策略配置 JSON"),
     entry_price: Optional[float] = Body(None, description="建仓价"),
     stop_loss_price: Optional[float] = Body(None, description="止损价"),
     take_profit_price: Optional[float] = Body(None, description="止盈价"),
@@ -103,7 +30,7 @@ async def create_trading_strategy(
     take_profit_pct: Optional[float] = Body(None, description="止盈比例"),
     max_trade_quantity: Optional[int] = Body(None, description="单次买卖最大数量")
 ):
-    """创建或更新交易策略（账户+股票唯一）"""
+    """创建或更新个股交易策略（账户+股票唯一）"""
     db = get_db_manager()
 
     # 验证账户
@@ -149,6 +76,12 @@ async def create_trading_strategy(
         if max_trade_quantity is not None:
             update_fields.append("max_trade_quantity = ?")
             params.append(max_trade_quantity)
+        if strategy_type is not None:
+            update_fields.append("strategy_type = ?")
+            params.append(strategy_type)
+        if config is not None:
+            update_fields.append("config = ?")
+            params.append(config)
 
         params.append(existing["id"])
         await db.execute(
@@ -165,6 +98,8 @@ async def create_trading_strategy(
             {
                 "account_id": account_id,
                 "stock_code": stock_code,
+                "strategy_type": strategy_type or "fixed",
+                "config": config or "{}",
                 "entry_price": entry_price or 0,
                 "stop_loss_price": stop_loss_price or 0,
                 "take_profit_price": take_profit_price or 0,
@@ -180,98 +115,6 @@ async def create_trading_strategy(
         "success": True,
         "message": message,
         "strategy_id": strategy_id
-    }
-
-
-@router.put("/api/v1/ui/{account_id}/trading-strategies/{stock_code}")
-async def update_trading_strategy(
-    account_id: str = Path(..., description="账户 ID"),
-    stock_code: str = Path(..., description="股票代码"),
-    entry_price: Optional[float] = Body(None, description="建仓价"),
-    stop_loss_price: Optional[float] = Body(None, description="止损价"),
-    take_profit_price: Optional[float] = Body(None, description="止盈价"),
-    stop_loss_pct: Optional[float] = Body(None, description="止损比例"),
-    take_profit_pct: Optional[float] = Body(None, description="止盈比例"),
-    max_trade_quantity: Optional[int] = Body(None, description="单次买卖最大数量")
-):
-    """更新交易策略"""
-    db = get_db_manager()
-
-    # 检查策略是否存在
-    existing = await db.fetchone(
-        "SELECT id FROM trading_strategies WHERE account_id = ? AND stock_code = ?",
-        (account_id, stock_code)
-    )
-
-    if not existing:
-        raise HTTPException(status_code=404, detail="交易策略不存在")
-
-    # 验证参数范围
-    if stop_loss_pct is not None and not (0.0 <= stop_loss_pct <= 1.0):
-        raise HTTPException(status_code=400, detail="止损比例必须在0-1之间")
-    if take_profit_pct is not None and not (0.0 <= take_profit_pct <= 1.0):
-        raise HTTPException(status_code=400, detail="止盈比例必须在0-1之间")
-
-    # 更新
-    update_fields = ["updated_at = ?"]
-    params = [get_china_time().isoformat()]
-
-    if entry_price is not None:
-        update_fields.append("entry_price = ?")
-        params.append(entry_price)
-    if stop_loss_price is not None:
-        update_fields.append("stop_loss_price = ?")
-        params.append(stop_loss_price)
-    if take_profit_price is not None:
-        update_fields.append("take_profit_price = ?")
-        params.append(take_profit_price)
-    if stop_loss_pct is not None:
-        update_fields.append("stop_loss_pct = ?")
-        params.append(stop_loss_pct)
-    if take_profit_pct is not None:
-        update_fields.append("take_profit_pct = ?")
-        params.append(take_profit_pct)
-    if max_trade_quantity is not None:
-        update_fields.append("max_trade_quantity = ?")
-        params.append(max_trade_quantity)
-
-    params.append(existing["id"])
-    await db.execute(
-        f"""UPDATE trading_strategies SET {", ".join(update_fields)} WHERE id = ?""",
-        params
-    )
-
-    return {
-        "success": True,
-        "message": "交易策略更新成功"
-    }
-
-
-@router.delete("/api/v1/ui/{account_id}/trading-strategies/{stock_code}")
-async def delete_trading_strategy(
-    account_id: str = Path(..., description="账户 ID"),
-    stock_code: str = Path(..., description="股票代码")
-):
-    """删除交易策略"""
-    db = get_db_manager()
-
-    # 检查策略是否存在
-    existing = await db.fetchone(
-        "SELECT id FROM trading_strategies WHERE account_id = ? AND stock_code = ?",
-        (account_id, stock_code)
-    )
-
-    if not existing:
-        raise HTTPException(status_code=404, detail="交易策略不存在")
-
-    await db.execute(
-        "DELETE FROM trading_strategies WHERE account_id = ? AND stock_code = ?",
-        (account_id, stock_code)
-    )
-
-    return {
-        "success": True,
-        "message": "交易策略已删除"
     }
 
 
@@ -345,4 +188,145 @@ async def copy_trading_strategy(
     return {
         "success": True,
         "message": f"已复制策略到 {copied_count} 只股票"
+    }
+
+
+@router.get("/api/v1/ui/{account_id}/trading-strategies/{stock_code}")
+async def get_trading_strategy(
+    account_id: str = Path(..., description="账户 ID"),
+    stock_code: str = Path(..., description="股票代码")
+):
+    """获取指定股票的交易策略"""
+    db = get_db_manager()
+
+    strategy = await db.fetchone(
+        """SELECT * FROM trading_strategies
+           WHERE account_id = ? AND stock_code = ?""",
+        (account_id, stock_code)
+    )
+
+    if not strategy:
+        return {
+            "success": True,
+            "strategy": None,
+            "message": "该股票尚未设置交易策略"
+        }
+
+    return {
+        "success": True,
+        "strategy": {
+            "id": strategy["id"],
+            "account_id": strategy["account_id"],
+            "stock_code": strategy["stock_code"],
+            "stock_name": strategy["stock_code"],
+            "strategy_type": strategy.get("strategy_type", "fixed"),
+            "config": strategy.get("config", "{}"),
+            "entry_price": float(strategy.get("entry_price") or 0),
+            "stop_loss_price": float(strategy.get("stop_loss_price") or 0),
+            "take_profit_price": float(strategy.get("take_profit_price") or 0),
+            "stop_loss_pct": float(strategy.get("stop_loss_pct") or 0),
+            "take_profit_pct": float(strategy.get("take_profit_pct") or 0),
+            "max_trade_quantity": int(strategy.get("max_trade_quantity") or 0),
+            "updated_at": strategy.get("updated_at", "")
+        }
+    }
+
+
+@router.put("/api/v1/ui/{account_id}/trading-strategies/{stock_code}")
+async def update_trading_strategy_per_stock(
+    account_id: str = Path(..., description="账户 ID"),
+    stock_code: str = Path(..., description="股票代码"),
+    strategy_type: str = Body(None, description="策略类型：fixed/trailing_stop"),
+    config: Optional[str] = Body(None, description="策略配置 JSON"),
+    entry_price: Optional[float] = Body(None, description="建仓价"),
+    stop_loss_price: Optional[float] = Body(None, description="止损价"),
+    take_profit_price: Optional[float] = Body(None, description="止盈价"),
+    stop_loss_pct: Optional[float] = Body(None, description="止损比例"),
+    take_profit_pct: Optional[float] = Body(None, description="止盈比例"),
+    max_trade_quantity: Optional[int] = Body(None, description="单次买卖最大数量")
+):
+    """更新交易策略"""
+    db = get_db_manager()
+
+    # 检查策略是否存在
+    existing = await db.fetchone(
+        "SELECT id FROM trading_strategies WHERE account_id = ? AND stock_code = ?",
+        (account_id, stock_code)
+    )
+
+    if not existing:
+        raise HTTPException(status_code=404, detail="交易策略不存在")
+
+    # 验证参数范围
+    if stop_loss_pct is not None and not (0.0 <= stop_loss_pct <= 1.0):
+        raise HTTPException(status_code=400, detail="止损比例必须在0-1之间")
+    if take_profit_pct is not None and not (0.0 <= take_profit_pct <= 1.0):
+        raise HTTPException(status_code=400, detail="止盈比例必须在0-1之间")
+
+    # 更新
+    update_fields = ["updated_at = ?"]
+    params = [get_china_time().isoformat()]
+
+    if entry_price is not None:
+        update_fields.append("entry_price = ?")
+        params.append(entry_price)
+    if stop_loss_price is not None:
+        update_fields.append("stop_loss_price = ?")
+        params.append(stop_loss_price)
+    if take_profit_price is not None:
+        update_fields.append("take_profit_price = ?")
+        params.append(take_profit_price)
+    if stop_loss_pct is not None:
+        update_fields.append("stop_loss_pct = ?")
+        params.append(stop_loss_pct)
+    if take_profit_pct is not None:
+        update_fields.append("take_profit_pct = ?")
+        params.append(take_profit_pct)
+    if max_trade_quantity is not None:
+        update_fields.append("max_trade_quantity = ?")
+        params.append(max_trade_quantity)
+    if strategy_type is not None:
+        update_fields.append("strategy_type = ?")
+        params.append(strategy_type)
+    if config is not None:
+        update_fields.append("config = ?")
+        params.append(config)
+
+    params.append(existing["id"])
+    await db.execute(
+        f"""UPDATE trading_strategies SET {", ".join(update_fields)} WHERE id = ?""",
+        params
+    )
+
+    return {
+        "success": True,
+        "message": "交易策略更新成功"
+    }
+
+
+@router.delete("/api/v1/ui/{account_id}/trading-strategies/{stock_code}")
+async def delete_trading_strategy(
+    account_id: str = Path(..., description="账户 ID"),
+    stock_code: str = Path(..., description="股票代码")
+):
+    """删除交易策略"""
+    db = get_db_manager()
+
+    # 检查策略是否存在
+    existing = await db.fetchone(
+        "SELECT id FROM trading_strategies WHERE account_id = ? AND stock_code = ?",
+        (account_id, stock_code)
+    )
+
+    if not existing:
+        raise HTTPException(status_code=404, detail="交易策略不存在")
+
+    await db.execute(
+        "DELETE FROM trading_strategies WHERE account_id = ? AND stock_code = ?",
+        (account_id, stock_code)
+    )
+
+    return {
+        "success": True,
+        "message": "交易策略已删除"
     }

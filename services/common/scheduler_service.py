@@ -15,7 +15,7 @@ import threading
 import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional, Dict
+from typing import Optional, Dict, Tuple
 import sqlite3
 
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -63,40 +63,10 @@ class SchedulerService:
             self._scheduler = BackgroundScheduler(timezone=CHINA_TZ)
             self._running = True
 
-            # 每天凌晨1点(中国时间)执行K线数据检查任务
-            self._scheduler.add_job(
-                self._daily_kline_check_job,
-                CronTrigger(hour=1, minute=0, timezone=CHINA_TZ),
-                id='daily_kline_check',
-                name='每日K线数据检查',
-                replace_existing=True
-            )
-
-            # 每月5日凌晨1点(中国时间)执行月频因子更新任务
-            self._scheduler.add_job(
-                self._monthly_factor_check_job,
-                CronTrigger(day=5, hour=1, minute=0, timezone=CHINA_TZ),
-                id='monthly_factor_check',
-                name='每月因子数据检查',
-                replace_existing=True
-            )
-
-            # 每周六凌晨2点(中国时间)执行周K线下载
-            self._scheduler.add_job(
-                self._weekly_kline_check_job,
-                CronTrigger(day_of_week='sat', hour=2, minute=0, timezone=CHINA_TZ),
-                id='weekly_kline_download',
-                name='每周周K线数据下载',
-                replace_existing=True
-            )
-
             self._scheduler.start()
-            logger.info("调度服务已启动:")
-            logger.info("  - 每天凌晨1点执行K线数据检查")
-            logger.info("  - 每月5日凌晨1点执行月频因子更新")
-            logger.info("  - 每周六凌晨2点执行周K线数据下载")
+            logger.info("调度服务已启动")
 
-            # 注册策略任务
+            # 注册内置功能任务（从 strategy_tasks 表读取，含 cron 配置）
             self._register_strategy_tasks()
 
         except ImportError:
@@ -192,6 +162,14 @@ class SchedulerService:
 
             # Step 4: 行业指数已随K线下载自动更新（download_incremental_kline_data_sync 默认包含）
             self._task_status['industry_indices_status'] = {'status': 'included_in_kline_download'}
+
+            # Step 5: 日K线下载完成后，检查周K线是否需要补下载
+            logger.info("日K线下载完成，检查周K线覆盖度...")
+            need_weekly, weekly_msg = self._check_weekly_kline_coverage()
+            if need_weekly:
+                logger.info(f"周K线覆盖度不足: {weekly_msg}，开始补下载")
+                weekly_result = self._run_weekly_kline_download()
+                self._task_status['weekly_kline_status'] = weekly_result
 
             logger.info("=" * 60)
             logger.info("每日K线数据检查任务完成")
@@ -308,8 +286,6 @@ class SchedulerService:
         # 获取应有的最新交易日
         expected_date, status_msg = self._get_expected_trading_day()
 
-        conn.close()
-
         # 判断是否需要下载
         need_download = False
         if latest_date is None:
@@ -318,6 +294,18 @@ class SchedulerService:
         elif latest_date < expected_date:
             need_download = True
             logger.info(f"数据库最新日期 {latest_date} < 应有日期 {expected_date}")
+        else:
+            # 最新日期已到，检查覆盖度：有多少股票有 expected_date 的数据
+            if latest_date == expected_date:
+                cursor.execute("SELECT COUNT(DISTINCT stock_code) FROM kline_data WHERE trade_date = ?", (expected_date,))
+                covered = cursor.fetchone()[0]
+                cursor.execute("SELECT COUNT(DISTINCT stock_code) FROM kline_data")
+                total = cursor.fetchone()[0]
+                if total > 0 and covered < total * 0.95:
+                    need_download = True
+                    logger.info(f"日期 {expected_date} 覆盖度不足: {covered}/{total} ({covered/total*100:.1f}%)，需要补下载")
+
+        conn.close()
 
         return {
             'latest_date': latest_date,
@@ -425,13 +413,12 @@ class SchedulerService:
             load_dotenv()
 
             # 执行增量下载（行业指数随K线一起下载）
-            result = download_incremental_kline_data_sync(
-                show_progress=True
-            )
+            success = download_incremental_kline_data_sync()
 
             # 更新任务状态
+            result = {'success': success, 'message': '下载完成' if success else '部分下载失败'}
             task_manager.update_progress(TaskType.DATA_DOWNLOAD, 100, "下载完成")
-            if result.get('success'):
+            if result['success']:
                 task_manager.complete_task(TaskType.DATA_DOWNLOAD, result)
             else:
                 task_manager.fail_task(TaskType.DATA_DOWNLOAD, result.get('message', '下载失败'))
@@ -440,6 +427,11 @@ class SchedulerService:
 
         except Exception as e:
             logger.error(f"K线下载失败: {e}", exc_info=True)
+            # 重置任务状态，避免前端卡在旧状态
+            try:
+                task_manager.reset_task(TaskType.DATA_DOWNLOAD)
+            except Exception:
+                pass
             return {'success': False, 'message': str(e)}
 
     def _run_daily_factor_calc(self, start_date: Optional[str], end_date: str, force_full: bool = False) -> Dict:
@@ -487,6 +479,10 @@ class SchedulerService:
 
         except Exception as e:
             logger.error(f"日频因子计算失败: {e}", exc_info=True)
+            try:
+                task_manager.reset_task(TaskType.DAILY_FACTOR_CALC)
+            except Exception:
+                pass
             return {'success': False, 'message': str(e)}
 
     def _run_monthly_factor_update(self) -> Dict:
@@ -524,6 +520,10 @@ class SchedulerService:
 
         except Exception as e:
             logger.error(f"月频因子更新失败: {e}", exc_info=True)
+            try:
+                task_manager.reset_task(TaskType.MONTHLY_FACTOR_UPDATE)
+            except Exception:
+                pass
             return {'success': False, 'message': str(e)}
 
     def _run_full_kline_download(self) -> Dict:
@@ -545,10 +545,11 @@ class SchedulerService:
             from dotenv import load_dotenv
             load_dotenv()
 
-            result = download_all_kline_data_sync(show_progress=True)
+            success = download_all_kline_data_sync()
 
+            result = {'success': success, 'message': '下载完成' if success else '部分下载失败'}
             task_manager.update_progress(TaskType.DATA_DOWNLOAD, 100, "下载完成")
-            if result.get('success'):
+            if result['success']:
                 task_manager.complete_task(TaskType.DATA_DOWNLOAD, result)
             else:
                 task_manager.fail_task(TaskType.DATA_DOWNLOAD, result.get('message', '下载失败'))
@@ -557,6 +558,10 @@ class SchedulerService:
 
         except Exception as e:
             logger.error(f"K线全量下载失败: {e}", exc_info=True)
+            try:
+                task_manager.reset_task(TaskType.DATA_DOWNLOAD)
+            except Exception:
+                pass
             return {'success': False, 'message': str(e)}
 
     def _run_weekly_kline_download(self) -> Dict:
@@ -578,17 +583,22 @@ class SchedulerService:
             from dotenv import load_dotenv
             load_dotenv()
 
-            result = download_weekly_kline_sync(
+            success = download_weekly_kline_sync(
                 years=10,
                 batch_size=50
             )
 
+            result = {'success': success, 'message': '下载完成' if success else '部分下载失败'}
             task_manager.update_progress(TaskType.WEEKLY_KLINE_DOWNLOAD, 100, "下载完成")
             task_manager.complete_task(TaskType.WEEKLY_KLINE_DOWNLOAD, result)
             return result
 
         except Exception as e:
             logger.error(f"周K线下载失败: {e}", exc_info=True)
+            try:
+                task_manager.reset_task(TaskType.WEEKLY_KLINE_DOWNLOAD)
+            except Exception:
+                pass
             return {'success': False, 'message': str(e)}
 
     def _weekly_kline_check_job(self):
@@ -600,14 +610,22 @@ class SchedulerService:
         try:
             self._task_status['last_weekly_kline_check'] = get_china_time().isoformat()
 
-            result = self._run_weekly_kline_download()
-            self._task_status['last_weekly_kline_download'] = get_china_time().isoformat()
-            self._task_status['weekly_kline_status'] = result
+            # 检查周K线覆盖度
+            need_download, msg = self._check_weekly_kline_coverage()
 
-            if result.get('success'):
-                logger.info(f"周K线下载完成: {result}")
+            if need_download:
+                logger.info(f"周K线覆盖度不足: {msg}，开始增量下载")
+                result = self._run_weekly_kline_download()
+                self._task_status['last_weekly_kline_download'] = get_china_time().isoformat()
+                self._task_status['weekly_kline_status'] = result
+
+                if result.get('success'):
+                    logger.info(f"周K线下载完成: {result}")
+                else:
+                    logger.warning(f"周K线下载失败: {result}")
             else:
-                logger.warning(f"周K线下载失败: {result}")
+                logger.info(f"周K线数据已覆盖: {msg}")
+                self._task_status['weekly_kline_status'] = {'status': 'up_to_date'}
 
             logger.info("=" * 60)
             logger.info("周K线数据下载任务完成")
@@ -616,6 +634,39 @@ class SchedulerService:
         except Exception as e:
             logger.error(f"周K线下载任务异常: {e}", exc_info=True)
             self._task_status['weekly_kline_status'] = {'success': False, 'message': str(e)}
+
+    def _check_weekly_kline_coverage(self) -> Tuple[bool, str]:
+        """检查周K线覆盖度
+
+        对比 kline_data 中股票数量 vs weekly_kline_data 中有本周数据的股票数量
+        """
+        conn = sqlite3.connect(str(DB_PATH))
+        cursor = conn.cursor()
+
+        # 获取最近一个有周K线数据的周末
+        cursor.execute("SELECT MAX(week_end_date) FROM weekly_kline_data")
+        latest_week = cursor.fetchone()[0]
+
+        if not latest_week:
+            conn.close()
+            return True, "无周K线数据"
+
+        # 统计有多少股票有周K线数据
+        cursor.execute("SELECT COUNT(DISTINCT stock_code) FROM weekly_kline_data")
+        weekly_stocks = cursor.fetchone()[0]
+
+        # 统计总股票数
+        cursor.execute("SELECT COUNT(DISTINCT stock_code) FROM kline_data")
+        total_stocks = cursor.fetchone()[0]
+
+        conn.close()
+
+        coverage_pct = weekly_stocks / total_stocks * 100 if total_stocks > 0 else 0
+
+        if coverage_pct < 95:
+            return True, f"{weekly_stocks}/{total_stocks} ({coverage_pct:.1f}%)"
+
+        return False, f"{weekly_stocks}/{total_stocks} ({coverage_pct:.1f}%)"
 
     def _run_industry_indices_download(self) -> Dict:
         """执行申万行业指数下载"""
@@ -724,6 +775,9 @@ class SchedulerService:
 
             logger.info(f"共注册 {count} 个任务")
 
+            # 注册交易监控自动启停任务
+            self._register_monitor_cron_jobs()
+
         except Exception as e:
             logger.error(f"注册任务失败: {e}", exc_info=True)
 
@@ -773,6 +827,124 @@ class SchedulerService:
         except Exception as e:
             logger.error(f"重新加载任务失败: {e}", exc_info=True)
             return {"success": False, "error": str(e)}
+
+    def _register_monitor_cron_jobs(self):
+        """注册交易监控自动启停任务"""
+        try:
+            import sqlite3
+            db_path = Path(__file__).parent.parent.parent / "data" / "stockwinner.db"
+            conn = sqlite3.connect(str(db_path))
+            conn.row_factory = sqlite3.Row
+
+            # 获取所有激活账户
+            accounts = conn.execute(
+                "SELECT account_id FROM accounts WHERE is_active = 1"
+            ).fetchall()
+            conn.close()
+
+            for acct in accounts:
+                acct_id = acct["account_id"]
+
+                # 开盘前启动监控（09:20）
+                start_job_id = f'monitor_start_{acct_id}'
+                self._scheduler.add_job(
+                    self._auto_start_monitor_job,
+                    CronTrigger.from_crontab("20 9 * * 1-5", timezone=CHINA_TZ),
+                    id=start_job_id,
+                    name=f"自动启动监控: {acct_id}",
+                    args=[acct_id],
+                    replace_existing=True,
+                )
+                logger.info(f"  注册监控任务: {start_job_id} (cron=20 9 * * 1-5)")
+
+                # 收盘后停止监控（15:05）
+                stop_job_id = f'monitor_stop_{acct_id}'
+                self._scheduler.add_job(
+                    self._auto_stop_monitor_job,
+                    CronTrigger.from_crontab("5 15 * * 1-5", timezone=CHINA_TZ),
+                    id=stop_job_id,
+                    name=f"自动停止监控: {acct_id}",
+                    args=[acct_id],
+                    replace_existing=True,
+                )
+                logger.info(f"  注册停监控任务: {stop_job_id} (cron=5 15 * * 1-5)")
+
+            # T+1 解冻持仓（每日 09:10）
+            self._scheduler.add_job(
+                self._auto_unfreeze_positions_job,
+                CronTrigger.from_crontab("10 9 * * 1-5", timezone=CHINA_TZ),
+                id="t1_unfreeze",
+                name="T+1 持仓解冻",
+                replace_existing=True,
+            )
+            logger.info(f"  注册 T+1 解冻任务 (cron=10 9 * * 1-5)")
+
+        except Exception as e:
+            logger.error(f"注册监控任务失败: {e}", exc_info=True)
+
+    def _auto_start_monitor_job(self, account_id: str):
+        """自动启动交易监控"""
+        logger.info(f"自动启动交易监控: {account_id}")
+        thread = threading.Thread(
+            target=lambda: asyncio.run(self._do_start_monitor(account_id))
+        )
+        thread.start()
+
+    async def _do_start_monitor(self, account_id: str):
+        """执行启动监控"""
+        from services.monitoring.service import get_trading_monitor
+        monitor = get_trading_monitor()
+        result = await monitor.start_monitoring(account_id, interval=30)
+        logger.info(f"交易监控启动结果: {result}")
+
+    def _auto_stop_monitor_job(self, account_id: str):
+        """自动停止交易监控"""
+        logger.info(f"自动停止交易监控: {account_id}")
+        thread = threading.Thread(
+            target=lambda: asyncio.run(self._do_stop_monitor(account_id))
+        )
+        thread.start()
+
+    async def _do_stop_monitor(self, account_id: str):
+        """执行停止监控"""
+        from services.monitoring.service import get_trading_monitor
+        monitor = get_trading_monitor()
+        result = await monitor.stop_monitoring()
+        logger.info(f"交易监控停止结果: {result}")
+
+    def _auto_unfreeze_positions_job(self):
+        """T+1 持仓解冻"""
+        logger.info("开始 T+1 持仓解冻")
+        thread = threading.Thread(
+            target=lambda: asyncio.run(self._do_unfreeze())
+        )
+        thread.start()
+
+    async def _do_unfreeze(self):
+        """执行 T+1 解冻 + 重置 pending 状态为 watching"""
+        import sqlite3
+        from services.common.database import get_db_manager
+        db = get_db_manager()
+        accounts = await db.fetchall("SELECT DISTINCT account_id FROM stock_positions")
+        for row in accounts:
+            try:
+                from services.trading.position_manager import get_position_manager
+                pm = get_position_manager(row["account_id"])
+                count = await pm.unfreeze_positions()
+                if count > 0:
+                    logger.info(f"T+1 解冻账户 {row['account_id']}: {count} 只股票")
+
+                # 将该账户 watchlist 中所有 pending 状态重置为 watching
+                # 防止昨日因信号进入 pending 的股票被重复买入
+                result = await db.execute(
+                    "UPDATE watchlist SET status = 'watching' WHERE account_id = ? AND status = 'pending'",
+                    (row["account_id"],)
+                )
+                reset_count = getattr(result, 'rowcount', 0) if hasattr(result, 'rowcount') else 0
+                if reset_count > 0:
+                    logger.info(f"重置 pending→watching: {row['account_id']}: {reset_count} 只股票")
+            except Exception as e:
+                logger.warning(f"T+1 解冻失败 ({row['account_id']}): {e}")
 
     def _execute_strategy_task_job(self, task_id: int):
         """执行策略任务（在线程中运行）"""
@@ -839,6 +1011,12 @@ class SchedulerService:
                 # 获取候选组股票
                 stocks = await db.fetchall(
                     "SELECT * FROM watchlist WHERE account_id = ? AND group_id = ? AND status IN ('pending', 'watching')",
+                    (task["account_id"], task["group_id"])
+                )
+
+                # 策略执行前：重置该组所有股票状态为 watching
+                await db.execute(
+                    "UPDATE watchlist SET status = 'watching' WHERE account_id = ? AND group_id = ?",
                     (task["account_id"], task["group_id"])
                 )
 
@@ -1010,7 +1188,8 @@ class SchedulerService:
 
                 # 写入 watchlist
                 result = await engine.write_signals_to_watchlist(
-                    signals, task["account_id"], task["strategy_id"], task["group_id"]
+                    signals, task["account_id"], task["strategy_id"], task["group_id"],
+                    strategy_name=strategy.get("name", ""),
                 )
             else:
                 raise ValueError(f"不支持的任务类型: {task_type}")

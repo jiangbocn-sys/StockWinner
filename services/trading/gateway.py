@@ -514,29 +514,75 @@ class TradingGateway(TradingGatewayInterface):
 
         return []
 
-    async def buy(self, stock_code: str, price: float, quantity: int) -> OrderResult:
-        """真实买入"""
+    async def buy(self, stock_code: str, price: float, quantity: int, account_id: str = None) -> OrderResult:
+        """买入（支持 mock/实盘切换）"""
         if not self.connected:
             return OrderResult(False, message="网关未连接")
 
-        try:
-            logger.warning(f"buy 待实现 - 参数：{stock_code}, {price}, {quantity}")
-            return OrderResult(False, message="SDK 交易接口待实现")
-        except Exception as e:
-            logger.error(f"买入失败：{e}")
-            return OrderResult(False, message=str(e))
+        # 判断交易模式
+        is_mock = True
+        if account_id:
+            try:
+                from services.common.database import get_db_manager
+                db = get_db_manager()
+                acct = await db.fetchone(
+                    "SELECT trade_mode FROM accounts WHERE account_id = ?",
+                    (account_id,)
+                )
+                if acct:
+                    is_mock = acct.get("trade_mode", "mock") == "mock"
+            except Exception as e:
+                logger.warning(f"获取账户交易模式失败，默认 mock: {e}")
 
-    async def sell(self, stock_code: str, price: float, quantity: int) -> OrderResult:
-        """真实卖出"""
+        if is_mock:
+            logger.info(f"[Mock] 买入 {stock_code} {quantity}股 @ {price:.2f}")
+            return OrderResult(True, message=f"[Mock] 买入成功 {stock_code} {quantity}股 @ {price:.2f}")
+        else:
+            # 实盘：调用 SDK 下单（待实现）
+            try:
+                # TODO: 接入银河证券 SDK 真实下单
+                # result = sdk.trade.buy(stock_code, price, quantity)
+                # return OrderResult(True, order_id=result.order_no, message=f"实盘买入 {stock_code}")
+                logger.warning(f"实盘交易接口尚未接入，当前为 mock 模式")
+                return OrderResult(False, message="SDK 实盘交易接口待实现")
+            except Exception as e:
+                logger.error(f"实盘买入失败：{e}")
+                return OrderResult(False, message=str(e))
+
+    async def sell(self, stock_code: str, price: float, quantity: int, account_id: str = None) -> OrderResult:
+        """卖出（支持 mock/实盘切换）"""
         if not self.connected:
             return OrderResult(False, message="网关未连接")
 
-        try:
-            logger.warning(f"sell 待实现 - 参数：{stock_code}, {price}, {quantity}")
-            return OrderResult(False, message="SDK 交易接口待实现")
-        except Exception as e:
-            logger.error(f"卖出失败：{e}")
-            return OrderResult(False, message=str(e))
+        # 判断交易模式
+        is_mock = True
+        if account_id:
+            try:
+                from services.common.database import get_db_manager
+                db = get_db_manager()
+                acct = await db.fetchone(
+                    "SELECT trade_mode FROM accounts WHERE account_id = ?",
+                    (account_id,)
+                )
+                if acct:
+                    is_mock = acct.get("trade_mode", "mock") == "mock"
+            except Exception as e:
+                logger.warning(f"获取账户交易模式失败，默认 mock: {e}")
+
+        if is_mock:
+            logger.info(f"[Mock] 卖出 {stock_code} {quantity}股 @ {price:.2f}")
+            return OrderResult(True, message=f"[Mock] 卖出成功 {stock_code} {quantity}股 @ {price:.2f}")
+        else:
+            # 实盘：调用 SDK 下单（待实现）
+            try:
+                # TODO: 接入银河证券 SDK 真实卖出
+                # result = sdk.trade.sell(stock_code, price, quantity)
+                # return OrderResult(True, order_id=result.order_no, message=f"实盘卖出 {stock_code}")
+                logger.warning(f"实盘交易接口尚未接入，当前为 mock 模式")
+                return OrderResult(False, message="SDK 实盘交易接口待实现")
+            except Exception as e:
+                logger.error(f"实盘卖出失败：{e}")
+                return OrderResult(False, message=str(e))
 
     async def get_positions(self) -> List[Dict[str, Any]]:
         """获取持仓"""

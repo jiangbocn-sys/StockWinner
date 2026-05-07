@@ -5,15 +5,12 @@ LLM 策略生成服务
 
 import json
 import os
+import sqlite3
 from typing import Dict, Any, Optional
 from datetime import datetime
 from pathlib import Path
 
-# 配置文件路径
-CONFIG_PATH = Path(__file__).parent.parent.parent / "config" / "llm.json"
-
-
-# 预置的 LLM 提供商配置
+# 预置的 LLM 提供商默认配置
 LLM_PROVIDERS = {
     "anthropic": {
         "name": "Anthropic Claude",
@@ -64,23 +61,9 @@ LLM_PROVIDERS = {
         "auth_prefix": "Bearer ",
         "format": "openai"
     },
-    "bailian": {
-        "name": "阿里云百炼",
-        "base_url": "https://coding.dashscope.aliyuncs.com/v1/chat/completions",
-        "model": "glm-5",
-        "auth_header": "Authorization",
-        "auth_prefix": "Bearer ",
-        "format": "openai"
-    },
-    "custom": {
-        "name": "自定义",
-        "base_url": "",
-        "model": "",
-        "auth_header": "Authorization",
-        "auth_prefix": "Bearer ",
-        "format": "openai"
-    }
 }
+
+DB_PATH = Path(__file__).parent.parent.parent / "data" / "stockwinner.db"
 
 
 class StrategyGenerator:
@@ -194,20 +177,27 @@ class StrategyGenerator:
     "conditions": ["DIF_CROSS_UP_DEA", "VOLUME_RATIO > 2"]
   }"""
 
-    def __init__(self, config: Optional[Dict[str, Any]] = None):
+    def __init__(self, account_id: Optional[str] = None, config: Optional[Dict[str, Any]] = None):
         """
         初始化策略生成器
 
         Args:
-            config: LLM 配置字典，包含 provider, api_key, base_url, model 等字段
+            account_id: 账户 ID，从数据库读取该用户的 LLM 配置
+            config: 直接传入配置字典（优先级高于数据库）
         """
-        self.config = config or self._load_config()
+        if config:
+            self.config = config
+        elif account_id:
+            self.config = self._load_config_from_db(account_id)
+        else:
+            self.config = {}
+
         self.provider = self.config.get("provider", "custom")
         self.api_key = self.config.get("api_key", "")
         self.base_url = self.config.get("base_url", "")
-        self.model = self.config.get("model", "")
+        self.model = self.config.get("model_name", "")
 
-        # 如果指定了预置提供商，使用其默认配置
+        # 如果指定了预置提供商，使用其默认配置补全
         if self.provider in LLM_PROVIDERS:
             preset = LLM_PROVIDERS[self.provider]
             if not self.base_url:
@@ -215,21 +205,27 @@ class StrategyGenerator:
             if not self.model:
                 self.model = preset["model"]
 
-        # 确保 base_url 包含完整的路径 (对于 openai 格式的 API)
-        if self.base_url and not self.base_url.endswith("/chat/completions"):
+        # 确保 base_url 包含完整的路径
+        if self.base_url and not self.base_url.endswith("/chat/completions") and self.provider != "anthropic":
             if self.base_url.endswith("/v1"):
                 self.base_url = self.base_url + "/chat/completions"
             elif self.base_url.endswith("/v1/"):
                 self.base_url = self.base_url + "chat/completions"
 
-    def _load_config(self) -> Dict[str, Any]:
-        """从配置文件加载配置"""
-        if CONFIG_PATH.exists():
-            try:
-                with open(CONFIG_PATH, 'r') as f:
-                    return json.load(f)
-            except:
-                pass
+    def _load_config_from_db(self, account_id: str) -> Dict[str, Any]:
+        """从数据库加载用户的 LLM 配置"""
+        try:
+            conn = sqlite3.connect(str(DB_PATH))
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT * FROM llm_config WHERE account_id = ? AND enabled = 1",
+                (account_id,)
+            ).fetchone()
+            conn.close()
+            if row:
+                return dict(row)
+        except Exception:
+            pass
         return {}
 
     def generate(self, description: str) -> Dict[str, Any]:
@@ -405,18 +401,26 @@ class StrategyGenerator:
 
 # 全局单例
 _strategy_generator: Optional[StrategyGenerator] = None
+_strategy_account_id: Optional[str] = None
 
 
-def get_strategy_generator(config: Optional[Dict[str, Any]] = None) -> StrategyGenerator:
-    """获取策略生成器单例"""
-    global _strategy_generator
-    if _strategy_generator is None or config is not None:
-        _strategy_generator = StrategyGenerator(config)
+def get_strategy_generator(account_id: Optional[str] = None, config: Optional[Dict[str, Any]] = None) -> StrategyGenerator:
+    """获取策略生成器单例（按 account_id 缓存）"""
+    global _strategy_generator, _strategy_account_id
+    if config is not None:
+        _strategy_generator = StrategyGenerator(config=config)
+        _strategy_account_id = "__custom__"
+    elif account_id and account_id != _strategy_account_id:
+        _strategy_generator = StrategyGenerator(account_id=account_id)
+        _strategy_account_id = account_id
+    elif _strategy_generator is None:
+        _strategy_generator = StrategyGenerator()
+        _strategy_account_id = None
     return _strategy_generator
 
 
 def reset_strategy_generator():
-    """重置策略生成器（用于测试）"""
+    """重置策略生成器（用于配置更新后重新加载）"""
     global _strategy_generator
     _strategy_generator = None
 

@@ -315,6 +315,82 @@ async def apply_screening_template(
 
 # ==================== 股票基本信息 API ====================
 
+@router.get("/api/v1/ui/stocks/search")
+async def smart_search_stocks(
+    q: str = Query(..., min_length=1, description="搜索关键词：股票代码/拼音首字母/股票名称"),
+    limit: int = Query(20, description="返回条数", ge=1, le=50),
+):
+    """
+    智能股票搜索：支持代码、名称、拼音首字母缩写搜索
+
+    - 6位数字 → 匹配 stock_code
+    - 中文/英文 → 匹配 stock_name（LIKE）或 spell_initial（拼音首字母）
+    - 如 "600000"、"pfyx"（浦发银行首字母）、"浦发"
+    """
+    db_path = KLINE_DB_PATH
+    if not db_path.exists():
+        return {"success": False, "stocks": []}
+
+    async with get_db_connection(db_path) as db:
+        db.row_factory = aiosqlite.Row
+
+        # 检查 stock_base_info 是否存在
+        cursor = await db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='stock_base_info'"
+        )
+        if not await cursor.fetchone():
+            return {"success": False, "stocks": [], "message": "stock_base_info 表不存在"}
+
+        conditions = []
+        params = []
+
+        # 1. 纯数字 → 匹配股票代码（支持6位数字 + 自动补全后缀）
+        if q.isdigit():
+            if len(q) == 6:
+                # 6位数字 → 匹配 .SH/.SZ/.BJ 后缀
+                conditions.append("(stock_code LIKE ? OR stock_code LIKE ? OR stock_code LIKE ?)")
+                params.extend([f"{q}.SH", f"{q}.SZ", f"{q}.BJ"])
+            else:
+                conditions.append("stock_code LIKE ?")
+                params.append(f"%{q}%")
+        else:
+            # 2. 匹配拼音首字母（精确前缀匹配）
+            conditions.append("spell_initial LIKE ?")
+            params.append(f"{q.upper()}%")
+
+            # 3. 匹配股票名称（模糊匹配）
+            conditions.append("stock_name LIKE ?")
+            params.append(f"%{q}%")
+
+        where_clause = " OR ".join(conditions)
+
+        query = f"""
+            SELECT stock_code, stock_name, sw_level1, sw_level2, spell_initial
+            FROM stock_base_info
+            WHERE ({where_clause})
+              AND stock_code NOT LIKE '801%.SI'
+              AND (delist_date IS NULL OR delist_date = 0)
+            ORDER BY CASE
+                WHEN stock_code LIKE ? THEN 1  /* 代码精确匹配优先 */
+                WHEN spell_initial = ? THEN 2   /* 拼音首字母精确匹配 */
+                ELSE 3
+            END
+            LIMIT ?
+        """
+        # 代码精确匹配参数
+        if q.isdigit() and len(q) == 6:
+            params.extend([f"{q}.SH", q.upper()])
+        else:
+            params.extend(["", q.upper()])
+        params.append(limit)
+
+        cursor = await db.execute(query, tuple(params))
+        rows = await cursor.fetchall()
+        stocks = [dict(row) for row in rows]
+
+    return {"success": True, "stocks": stocks, "total": len(stocks)}
+
+
 @router.get("/api/v1/ui/stocks")
 async def get_stock_list(
     industry: Optional[str] = Query(None, description="行业分类筛选"),
