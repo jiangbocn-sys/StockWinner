@@ -638,7 +638,10 @@ class SchedulerService:
     def _check_weekly_kline_coverage(self) -> Tuple[bool, str]:
         """检查周K线覆盖度
 
-        对比 kline_data 中股票数量 vs weekly_kline_data 中有本周数据的股票数量
+        同时检查：
+        1. 股票覆盖率是否 >= 95%
+        2. 数据是否包含最近一个已完成周（截至上周五）
+        防止周中手动下载导致数据不完整
         """
         conn = sqlite3.connect(str(DB_PATH))
         cursor = conn.cursor()
@@ -650,6 +653,34 @@ class SchedulerService:
         if not latest_week:
             conn.close()
             return True, "无周K线数据"
+
+        # 计算最近一个已完成的周五
+        # 如果今天是周五且在交易时间内，本周尚未结束，取上周五
+        today = get_china_time().date()
+        weekday = today.weekday()  # 0=周一, 4=周五, 5=周六, 6=周日
+
+        if weekday == 4:
+            # 今天是周五，检查是否在交易时间内
+            from services.data.local_data_service import is_trading_hours
+            if is_trading_hours():
+                # 盘中：本周未完成，取上周五
+                last_friday = today - timedelta(days=7)
+            else:
+                # 盘后：本周已完成，今天就是最近的周五
+                last_friday = today
+        elif weekday >= 5:
+            # 周六/周日 → 上周五
+            last_friday = today - timedelta(days=(weekday - 4))
+        else:
+            # 周一~周四 → 上周五
+            last_friday = today - timedelta(days=(weekday + 3))
+
+        last_friday_str = last_friday.strftime('%Y-%m-%d')
+
+        # 检查是否已包含最近一个完整周的数据
+        if latest_week < last_friday_str:
+            conn.close()
+            return True, f"数据截至 {latest_week}，需更新到 {last_friday_str}"
 
         # 统计有多少股票有周K线数据
         cursor.execute("SELECT COUNT(DISTINCT stock_code) FROM weekly_kline_data")
@@ -666,7 +697,7 @@ class SchedulerService:
         if coverage_pct < 95:
             return True, f"{weekly_stocks}/{total_stocks} ({coverage_pct:.1f}%)"
 
-        return False, f"{weekly_stocks}/{total_stocks} ({coverage_pct:.1f}%)"
+        return False, f"已覆盖 {weekly_stocks}/{total_stocks}，数据截至 {latest_week}"
 
     def _run_industry_indices_download(self) -> Dict:
         """执行申万行业指数下载"""

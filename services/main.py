@@ -46,9 +46,22 @@ async def lifespan(app: FastAPI):
     print(f"已加载 {len(active_accounts)} 个激活账户：{', '.join([a['account_id'] for a in active_accounts])}")
 
     # 启动调度服务（每天凌晨1点检查K线，每月5日检查月频因子）
-    from services.common.scheduler_service import start_scheduler
+    from services.common.scheduler_service import start_scheduler, get_scheduler
     start_scheduler()
     print("调度服务已启动")
+
+    # 启动时检查周K线是否包含最近一周数据
+    try:
+        scheduler = get_scheduler()
+        need, msg = scheduler._check_weekly_kline_coverage()
+        if need:
+            print(f"周K线数据不完整: {msg}，启动下载")
+            result = scheduler._run_weekly_kline_download()
+            print(f"周K线下载结果: {result}")
+        else:
+            print(f"周K线数据已覆盖: {msg}")
+    except Exception as e:
+        print(f"启动时周K线检查失败: {e}")
 
     # 数据库迁移：为 watchlist 表添加新列
     try:

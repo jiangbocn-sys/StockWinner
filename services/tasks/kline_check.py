@@ -7,19 +7,34 @@
 K线增量检查任务
 
 检查本地数据库中kline_data表的最新交易日期，
-如果发现缺失，自动下载最新K线数据。
+如果发现缺失，自动下载最新K线数据并计算因子。
 """
 
 
-async def execute(full: bool = False, **kwargs):
+async def execute(task_id: int = None, **kwargs):
     """执行K线增量检查
 
-    Args:
-        full: True=全量下载，False=增量检查
-        **kwargs: 额外参数（保留扩展）
+    直接同步执行，确保数据库状态能正确更新。
     """
     from services.common.scheduler_service import get_scheduler
+    from services.common.database import get_db_manager
+    from services.common.timezone import get_china_time
+    import json
 
     scheduler = get_scheduler()
-    result = scheduler.run_manual_kline_check(full=full)
+
+    # 直接执行，等待完成
+    scheduler._daily_kline_check_job()
+
+    result = {'success': True, 'message': 'K线增量检查完成'}
+
+    # 更新数据库任务状态
+    if task_id is not None:
+        db = get_db_manager()
+        output = json.dumps(result, ensure_ascii=False)
+        await db.execute(
+            "UPDATE strategy_tasks SET last_status = 'success', last_output = ?, updated_at = ? WHERE id = ?",
+            (output, get_china_time().isoformat(), task_id)
+        )
+
     return result
