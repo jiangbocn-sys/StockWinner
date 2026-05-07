@@ -34,6 +34,7 @@ logging.basicConfig(
 logger = logging.getLogger('Scheduler')
 
 DB_PATH = Path(__file__).parent.parent.parent / "data" / "kline.db"
+POSITIONS_DB_PATH = Path(__file__).parent.parent.parent / "data" / "stockwinner.db"
 
 
 class SchedulerService:
@@ -735,7 +736,7 @@ class SchedulerService:
         self._task_status['last_post_market_analysis'] = get_china_time().isoformat()
 
         try:
-            conn = sqlite3.connect(str(DB_PATH))
+            conn = sqlite3.connect(str(POSITIONS_DB_PATH))
             cursor = conn.cursor()
 
             cursor.execute(

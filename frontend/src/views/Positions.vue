@@ -57,8 +57,9 @@
               </span>
             </template>
           </el-table-column>
-          <el-table-column label="操作" fixed="right" width="200">
+          <el-table-column label="操作" fixed="right" width="280">
             <template #default="{ row }">
+              <el-button type="info" size="small" @click="handleDsaAnalysis(row)" :loading="dsaAnalyzing === row.stock_code">DSA 分析</el-button>
               <el-button type="primary" size="small" @click="handleAction(row, 'add')">加仓</el-button>
               <el-button type="warning" size="small" @click="handleAction(row, 'reduce')">减仓</el-button>
               <el-button type="danger" size="small" @click="handleAction(row, 'clear')">清仓</el-button>
@@ -66,12 +67,56 @@
           </el-table-column>
         </el-table>
       </el-card>
+
+      <!-- DSA 分析结果弹窗 -->
+      <el-dialog
+        v-model="dsaDialogVisible"
+        :title="`DSA 分析 - ${dsaStock.stock_name}(${dsaStock.stock_code})`"
+        width="700px"
+        destroy-on-close
+      >
+        <div v-if="dsaAnalyzing" class="dsa-loading">
+          <el-icon class="is-loading" size="40"><Loading /></el-icon>
+          <p>正在分析中，请稍候...</p>
+        </div>
+        <div v-else-if="dsaResult" class="dsa-content">
+          <el-descriptions :column="2" border size="small" class="mb-16">
+            <el-descriptions-item label="当前价">¥{{ dsaResult.meta?.current_price || '-' }}</el-descriptions-item>
+            <el-descriptions-item label="涨跌幅">{{ dsaResult.meta?.change_pct?.toFixed(2) || '-' }}%</el-descriptions-item>
+          </el-descriptions>
+
+          <h4 class="section-title">市场情绪</h4>
+          <el-tag :type="dsaResult.summary?.sentiment_label === '看多' ? 'danger' : dsaResult.summary?.sentiment_label === '看空' ? 'success' : 'info'" size="large">
+            {{ dsaResult.summary?.sentiment_label || '-' }}
+          </el-tag>
+          <el-tag v-if="dsaResult.summary?.sentiment_score" size="small" style="margin-left: 8px">
+            评分: {{ dsaResult.summary.sentiment_score }}
+          </el-tag>
+
+          <h4 class="section-title">分析摘要</h4>
+          <div class="analysis-text">{{ dsaResult.summary?.analysis_summary || '暂无分析' }}</div>
+
+          <h4 class="section-title">操作建议</h4>
+          <div class="analysis-text">{{ dsaResult.summary?.operation_advice || '暂无建议' }}</div>
+
+          <h4 class="section-title">交易参考</h4>
+          <el-descriptions :column="3" border size="small">
+            <el-descriptions-item label="理想买入">¥{{ dsaResult.strategy?.ideal_buy || '-' }}</el-descriptions-item>
+            <el-descriptions-item label="止损价">¥{{ dsaResult.strategy?.stop_loss || '-' }}</el-descriptions-item>
+            <el-descriptions-item label="止盈价">¥{{ dsaResult.strategy?.take_profit || '-' }}</el-descriptions-item>
+          </el-descriptions>
+        </div>
+        <div v-else-if="dsaError" class="dsa-error">
+          <el-alert :title="dsaError" type="error" :closable="false" />
+        </div>
+      </el-dialog>
     </el-main>
   </div>
 </template>
 
 <script setup>
 import { ref, onMounted, computed } from 'vue'
+import { ElMessage } from 'element-plus'
 import { useAccountStore } from '../stores/account'
 import NavBar from '../components/NavBar.vue'
 
@@ -85,6 +130,13 @@ const availableCash = ref(0)
 const marketValue = ref(0)
 const totalPnl = ref(0)
 const pnlPercent = ref(0)
+
+// DSA 分析状态
+const dsaDialogVisible = ref(false)
+const dsaAnalyzing = ref(false)
+const dsaStock = ref({ stock_code: '', stock_name: '' })
+const dsaResult = ref(null)
+const dsaError = ref('')
 
 const loadPositions = async () => {
   try {
@@ -111,6 +163,32 @@ const formatNumber = (num) => {
 const handleAction = (row, action) => {
   console.log('操作:', action, row.stock_code)
   // TODO: 实现交易操作
+}
+
+const handleDsaAnalysis = async (row) => {
+  dsaStock.value = { stock_code: row.stock_code, stock_name: row.stock_name }
+  dsaDialogVisible.value = true
+  dsaAnalyzing.value = true
+  dsaResult.value = null
+  dsaError.value = ''
+
+  try {
+    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/positions/${row.stock_code}/dsa-analyze`, {
+      method: 'POST',
+    })
+    const data = await res.json()
+
+    if (!res.ok) {
+      dsaError.value = data.detail || '分析失败'
+      return
+    }
+
+    dsaResult.value = data
+  } catch (e) {
+    dsaError.value = '请求失败，请检查网络连接'
+  } finally {
+    dsaAnalyzing.value = false
+  }
 }
 
 onMounted(async () => {
@@ -152,5 +230,41 @@ h2 {
 .profit-negative {
   color: #67c23a;
   font-weight: bold;
+}
+
+.dsa-loading {
+  text-align: center;
+  padding: 40px 0;
+}
+
+.dsa-loading p {
+  margin-top: 16px;
+  color: #909399;
+}
+
+.dsa-content .section-title {
+  margin: 16px 0 8px;
+  font-size: 14px;
+  color: #303133;
+  border-left: 3px solid #409EFF;
+  padding-left: 8px;
+}
+
+.dsa-content .analysis-text {
+  background: #f5f7fa;
+  padding: 12px;
+  border-radius: 4px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: #606266;
+  white-space: pre-wrap;
+}
+
+.dsa-content .mb-16 {
+  margin-bottom: 16px;
+}
+
+.dsa-error {
+  padding: 20px 0;
 }
 </style>
