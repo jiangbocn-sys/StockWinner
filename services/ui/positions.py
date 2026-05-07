@@ -82,7 +82,7 @@ async def get_position(
 
 
 @router.post("/api/v1/ui/{account_id}/positions/{stock_code}/dsa-analyze")
-async dsa_analyze_position(
+async def dsa_analyze_position(
     account_id: str = Path(...),
     stock_code: str = Path(...),
 ):
