@@ -118,6 +118,22 @@ async def manual_industry_indices_download() -> Dict:
     return scheduler.run_manual_industry_indices_download()
 
 
+@router.post("/api/v1/ui/scheduler/post-market-analysis")
+async def manual_post_market_analysis() -> Dict:
+    """
+    手动触发盘后分析
+
+    对每只持仓股调用 DSA 进行分析，结果通过飞书发送
+
+    Returns:
+        任务启动状态
+    """
+    from services.common.scheduler_service import get_scheduler
+
+    scheduler = get_scheduler()
+    return scheduler.run_manual_post_market_analysis()
+
+
 @router.get("/api/v1/ui/data/status")
 async def get_data_status() -> Dict:
     """

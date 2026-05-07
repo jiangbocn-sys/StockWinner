@@ -723,16 +723,21 @@ class SchedulerService:
 
         import httpx
         import time
-        from services.common.database import get_db_manager
-        from services.notifications import get_notification_service
+        from services.common.task_manager import get_task_manager, TaskType
 
+        task_manager = get_task_manager()
+        task_type = TaskType.POST_MARKET_ANALYSIS
+
+        if task_manager.is_running(task_type):
+            return {'success': False, 'message': '分析任务正在运行中'}
+
+        task_manager.start_task(task_type)
         self._task_status['last_post_market_analysis'] = get_china_time().isoformat()
 
         try:
             conn = sqlite3.connect(str(DB_PATH))
             cursor = conn.cursor()
 
-            # 查询所有持仓（quantity > 0）
             cursor.execute(
                 "SELECT DISTINCT account_id, stock_code, stock_name FROM stock_positions WHERE quantity > 0"
             )
@@ -741,9 +746,10 @@ class SchedulerService:
 
             if not positions:
                 logger.info("当前无持仓，跳过盘后分析")
+                task_manager.update_progress(task_type, 100, "无持仓，跳过分析")
+                task_manager.complete_task(task_type, {'success': True, 'message': '无持仓', 'analyzed': 0})
                 return {'success': True, 'message': '无持仓，跳过分析', 'analyzed': 0}
 
-            # 按账户分组
             account_positions: Dict[str, list] = {}
             for acct_id, stock_code, stock_name in positions:
                 account_positions.setdefault(acct_id, []).append({
@@ -751,20 +757,30 @@ class SchedulerService:
                     'stock_name': stock_name or stock_code,
                 })
 
+            all_stocks = [s for stocks in account_positions.values() for s in stocks]
+            total_count = len(all_stocks)
+
             dsa_base_url = "http://localhost:8000"
-            notification = get_notification_service()
             total_analyzed = 0
             total_failed = 0
 
-            for account_id, stocks in account_positions.items():
+            for idx, account_id in enumerate(account_positions.keys()):
+                stocks = account_positions[account_id]
                 logger.info(f"分析账户 {account_id}: {len(stocks)} 只持仓股")
 
                 for stock in stocks:
                     stock_code = stock['stock_code']
                     stock_name = stock['stock_name']
+                    current = idx + 1 if account_id == list(account_positions.keys())[0] else sum(
+                        len(s) for aid, s in account_positions.items() if aid != account_id
+                    ) + list(stocks).index(stock) + 1
+                    progress_pct = int((current / total_count) * 100)
+                    task_manager.update_progress(
+                        task_type, progress_pct,
+                        f"正在分析: {stock_name}({stock_code}) [{current}/{total_count}]"
+                    )
 
                     try:
-                        # Step 1: 提交分析任务
                         with httpx.Client(timeout=30) as client:
                             resp = client.post(
                                 f"{dsa_base_url}/api/v1/analysis/analyze",
@@ -786,9 +802,8 @@ class SchedulerService:
                                 total_failed += 1
                                 continue
 
-                        # Step 2: 轮询等待分析完成（最多 5 分钟）
                         result_data = None
-                        max_wait = 300  # 5 分钟
+                        max_wait = 300
                         waited = 0
                         interval = 5
 
@@ -824,7 +839,6 @@ class SchedulerService:
                         if result_data is None:
                             continue
 
-                        # Step 3: 提取分析摘要
                         report = result_data.get("report", {})
                         summary = report.get("summary", {})
                         strategy = report.get("strategy", {})
@@ -836,7 +850,8 @@ class SchedulerService:
                         stop_loss = strategy.get("stop_loss", "-")
                         take_profit = strategy.get("take_profit", "-")
 
-                        # Step 4: 发送飞书通知
+                        from services.notifications import get_notification_service
+                        notification = get_notification_service()
                         asyncio.run(notification.emit(
                             event_type="post_market_analysis",
                             account_id=account_id,
@@ -860,16 +875,27 @@ class SchedulerService:
                         total_failed += 1
 
             logger.info(f"盘后分析完成: 成功 {total_analyzed}, 失败 {total_failed}")
-            return {
+            result = {
                 'success': True,
                 'analyzed': total_analyzed,
                 'failed': total_failed,
                 'message': f'分析完成: {total_analyzed} 只成功, {total_failed} 只失败',
             }
+            task_manager.update_progress(task_type, 100, result['message'])
+            task_manager.complete_task(task_type, result)
+            return result
 
         except Exception as e:
             logger.error(f"盘后分析任务失败: {e}", exc_info=True)
+            task_manager.fail_task(task_type, str(e))
             return {'success': False, 'message': str(e)}
+
+    def run_manual_post_market_analysis(self) -> Dict:
+        """手动触发盘后分析"""
+        logger.info("手动触发盘后分析")
+        thread = threading.Thread(target=self._post_market_analysis_job)
+        thread.start()
+        return {'success': True, 'message': '盘后分析任务已启动'}
 
     def get_status(self) -> Dict:
         """获取调度服务状态"""

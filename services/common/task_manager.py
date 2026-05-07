@@ -27,6 +27,7 @@ class TaskType(Enum):
     DAILY_FACTOR_FILL = "daily_factor_fill"
     MONTHLY_FACTOR_UPDATE = "monthly_factor_update"
     WEEKLY_KLINE_DOWNLOAD = "weekly_kline_download"
+    POST_MARKET_ANALYSIS = "post_market_analysis"
 
 
 class TaskStatus(Enum):

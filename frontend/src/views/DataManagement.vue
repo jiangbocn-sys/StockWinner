@@ -96,6 +96,34 @@
           </el-card>
         </el-col>
 
+        <!-- 盘后分析 -->
+        <el-col :span="24">
+          <el-card shadow="hover">
+            <template #header>
+              <div class="card-header">
+                <span>盘后分析</span>
+                <span class="task-status" v-if="postMarketTask">
+                  <el-tag :type="postMarketTask.status === 'running' ? 'warning' : postMarketTask.status === 'completed' ? 'success' : 'info'" size="small">
+                    {{ postMarketTask.status === 'running' ? '分析中' : postMarketTask.status === 'completed' ? '已完成' : postMarketTask.status === 'failed' ? '失败' : '空闲' }}
+                  </el-tag>
+                </span>
+              </div>
+            </template>
+            <div class="card-actions">
+              <el-button type="primary" @click="triggerPostMarketAnalysis" :loading="postMarketLoading" :disabled="hasRunningTask">
+                立即分析
+              </el-button>
+              <span class="task-hint" v-if="postMarketTask?.result?.message">
+                {{ postMarketTask.result.message }}
+              </span>
+            </div>
+            <div class="task-progress" v-if="postMarketTask && postMarketTask.status === 'running'">
+              <el-progress :percentage="postMarketTask.progress?.percent || 0" :status="postMarketProgressStatus" />
+              <div class="task-message">{{ postMarketTask.progress?.message || '' }}</div>
+            </div>
+          </el-card>
+        </el-col>
+
         <!-- 策略任务管理 -->
         <el-col :span="24">
           <el-card shadow="hover">
@@ -300,6 +328,7 @@ const dailyCalcLoading = ref(false)
 const dailyFillLoading = ref(false)
 const monthlyUpdateLoading = ref(false)
 const monthlyFillLoading = ref(false)
+const postMarketLoading = ref(false)
 
 // 轮询定时器
 let statusTimer = null
@@ -319,6 +348,9 @@ const weeklyKlineTask = computed(() => allTasksStatus.value['weekly_kline_downlo
 
 // 月频因子任务状态
 const monthlyTaskStatus = computed(() => allTasksStatus.value['monthly_factor_update'])
+
+// 盘后分析任务状态
+const postMarketTask = computed(() => allTasksStatus.value['post_market_analysis'])
 
 // 进度状态
 const klineProgressStatus = computed(() => {
@@ -341,6 +373,12 @@ const weeklyKlineProgressStatus = computed(() => {
 
 const monthlyFactorProgressStatus = computed(() => {
   const t = monthlyTaskStatus.value
+  if (!t) return ''
+  return t.status === 'completed' ? 'success' : t.status === 'failed' ? 'exception' : ''
+})
+
+const postMarketProgressStatus = computed(() => {
+  const t = postMarketTask.value
   if (!t) return ''
   return t.status === 'completed' ? 'success' : t.status === 'failed' ? 'exception' : ''
 })
@@ -532,6 +570,21 @@ async function fillMonthlyInherit() {
     ElMessage.error('请求失败')
   } finally {
     monthlyFillLoading.value = false
+  }
+}
+
+// 盘后分析
+async function triggerPostMarketAnalysis() {
+  postMarketLoading.value = true
+  try {
+    const res = await fetch('/api/v1/ui/scheduler/post-market-analysis', { method: 'POST' })
+    const data = await res.json()
+    ElMessage.success(data.message || '盘后分析任务已启动')
+    loadTasksStatus()
+  } catch (e) {
+    ElMessage.error('请求失败')
+  } finally {
+    postMarketLoading.value = false
   }
 }
 
