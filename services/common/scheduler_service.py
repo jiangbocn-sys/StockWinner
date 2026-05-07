@@ -815,7 +815,8 @@ class SchedulerService:
                                     )
                                     total_failed += 1
                                     break
-                        else:
+
+                        if result_data is None and waited >= max_wait:
                             logger.warning(f"DSA 分析超时 ({stock_code}), 等待 {max_wait}s")
                             total_failed += 1
                             continue
