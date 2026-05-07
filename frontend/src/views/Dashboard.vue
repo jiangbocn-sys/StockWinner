@@ -145,7 +145,7 @@ const loadDashboard = async () => {
     const data = await response.json()
 
     healthStatus.value = data.system_health?.status || 'unknown'
-    uptimeText.value = `${data.system_health?.uptime_hours || 0} 小时`
+    uptimeText.value = data.system_health?.uptime_text || '0天0小时0分0秒'
     appVersion.value = `v${data.system_health?.version || '7.0.0'}`
     cpuPercent.value = data.system_health?.cpu_percent || 0
     memoryMb.value = data.system_health?.memory_mb || 0

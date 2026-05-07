@@ -11,13 +11,20 @@ from services._version import VERSION, get_start_time
 router = APIRouter()
 
 
-def get_uptime_hours() -> float:
-    """获取运行时长（小时）"""
+def get_uptime_text() -> str:
+    """获取运行时长文本"""
     start = get_start_time()
     if start:
         delta = get_china_time() - start
-        return round(delta.total_seconds() / 3600, 1)
-    return 0.0
+        total_seconds = int(delta.total_seconds())
+        if total_seconds < 0:
+            total_seconds = 0
+        days = total_seconds // 86400
+        hours = (total_seconds % 86400) // 3600
+        minutes = (total_seconds % 3600) // 60
+        seconds = total_seconds % 60
+        return f"{days}天{hours}小时{minutes}分{seconds}秒"
+    return "0天0小时0分0秒"
 
 
 def check_sdk_connection() -> str:
@@ -101,7 +108,7 @@ async def get_dashboard(account_id: str = Path(..., description="账户 ID")):
         "system_health": {
             "status": "healthy",
             "version": VERSION,
-            "uptime_hours": get_uptime_hours(),
+            "uptime_text": get_uptime_text(),
             "galaxy_api": check_sdk_connection(),
             "cpu_percent": resources["cpu_percent"],
             "memory_mb": resources["memory_mb"],
