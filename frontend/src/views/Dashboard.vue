@@ -110,7 +110,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted, computed } from 'vue'
+import { ref, onMounted, onUnmounted, computed } from 'vue'
 import { useAccountStore } from '../stores/account'
 import NavBar from '../components/NavBar.vue'
 
@@ -120,7 +120,7 @@ const accounts = computed(() => accountStore.accounts)
 const currentAccount = computed(() => accountStore.currentAccount)
 
 const healthStatus = ref('healthy')
-const uptimeText = ref('0 小时')
+const uptimeText = ref('0天0小时0分0秒')
 const appVersion = ref('v7.0.0')
 const cpuPercent = ref(0)
 const memoryMb = ref(0)
@@ -138,6 +138,28 @@ const totalMarketValue = ref(0)
 const totalPnl = ref(0)
 const dailyPnl = ref(0)
 
+// 本地时钟自动更新运行时长
+let uptimeTimer = null
+let serverStartTimestamp = null  // 服务器启动时间的时间戳（毫秒）
+
+const formatUptime = (elapsedMs) => {
+  const totalSeconds = Math.max(0, Math.floor(elapsedMs / 1000))
+  const days = Math.floor(totalSeconds / 86400)
+  const hours = Math.floor((totalSeconds % 86400) / 3600)
+  const minutes = Math.floor((totalSeconds % 3600) / 60)
+  const seconds = totalSeconds % 60
+  return `${days}天${hours}小时${minutes}分${seconds}秒`
+}
+
+const startUptimeTimer = () => {
+  if (uptimeTimer) clearInterval(uptimeTimer)
+  if (serverStartTimestamp) {
+    uptimeTimer = setInterval(() => {
+      uptimeText.value = formatUptime(Date.now() - serverStartTimestamp)
+    }, 1000)
+  }
+}
+
 // 加载仪表盘数据
 const loadDashboard = async () => {
   try {
@@ -145,7 +167,16 @@ const loadDashboard = async () => {
     const data = await response.json()
 
     healthStatus.value = data.system_health?.status || 'unknown'
-    uptimeText.value = data.system_health?.uptime_text || '0天0小时0分0秒'
+
+    // 服务器启动时间戳，用于本地时钟计算运行时长
+    if (data.system_health?.server_start) {
+      serverStartTimestamp = new Date(data.system_health.server_start + '+08:00').getTime()
+      uptimeText.value = formatUptime(Date.now() - serverStartTimestamp)
+      startUptimeTimer()
+    } else {
+      uptimeText.value = data.system_health?.uptime_text || '0天0小时0分0秒'
+    }
+
     appVersion.value = `v${data.system_health?.version || '7.0.0'}`
     cpuPercent.value = data.system_health?.cpu_percent || 0
     memoryMb.value = data.system_health?.memory_mb || 0
@@ -182,6 +213,10 @@ const formatNumber = (num) => {
 onMounted(async () => {
   await accountStore.loadAccounts()
   await loadDashboard()
+})
+
+onUnmounted(() => {
+  if (uptimeTimer) clearInterval(uptimeTimer)
 })
 </script>
 

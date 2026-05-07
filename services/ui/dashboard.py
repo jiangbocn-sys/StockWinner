@@ -109,6 +109,7 @@ async def get_dashboard(account_id: str = Path(..., description="账户 ID")):
             "status": "healthy",
             "version": VERSION,
             "uptime_text": get_uptime_text(),
+            "server_start": get_start_time().isoformat() if get_start_time() else None,
             "galaxy_api": check_sdk_connection(),
             "cpu_percent": resources["cpu_percent"],
             "memory_mb": resources["memory_mb"],
