@@ -900,15 +900,15 @@ class SchedulerService:
                 )
                 logger.info(f"  注册停监控任务: {stop_job_id} (cron=5 15 * * 1-5)")
 
-            # T+1 解冻持仓（每日 09:10）
+            # T+1 解冻持仓 + 重置 watchlist pending 状态（每日收盘后 15:05）
             self._scheduler.add_job(
                 self._auto_unfreeze_positions_job,
-                CronTrigger.from_crontab("10 9 * * 1-5", timezone=CHINA_TZ),
+                CronTrigger.from_crontab("5 15 * * 1-5", timezone=CHINA_TZ),
                 id="t1_unfreeze",
                 name="T+1 持仓解冻",
                 replace_existing=True,
             )
-            logger.info(f"  注册 T+1 解冻任务 (cron=10 9 * * 1-5)")
+            logger.info(f"  注册 T+1 解冻任务 (cron=5 15 * * 1-5)")
 
         except Exception as e:
             logger.error(f"注册监控任务失败: {e}", exc_info=True)
