@@ -147,9 +147,9 @@ const loadDashboard = async () => {
     healthStatus.value = data.system_health?.status || 'unknown'
     uptimeText.value = `${data.system_health?.uptime_hours || 0} 小时`
     appVersion.value = `v${data.system_health?.version || '7.0.0'}`
-    cpuPercent.value = data.resources?.cpu_percent || 0
-    memoryMb.value = data.resources?.memory_mb || 0
-    diskPercent.value = data.resources?.disk_percent || 0
+    cpuPercent.value = data.system_health?.cpu_percent || 0
+    memoryMb.value = data.system_health?.memory_mb || 0
+    diskPercent.value = data.system_health?.disk_percent || 0
     tradeCount.value = data.today_trading?.trade_count || 0
     buyCount.value = data.today_trading?.buy_count || 0
     sellCount.value = data.today_trading?.sell_count || 0

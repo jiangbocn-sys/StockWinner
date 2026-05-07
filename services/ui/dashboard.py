@@ -91,6 +91,9 @@ async def get_dashboard(account_id: str = Path(..., description="账户 ID")):
         WHERE account_id = ? AND DATE(last_run_at) = ?
     """, (account_id, today))
 
+    # 资源使用情况
+    resources = get_resource_usage()
+
     return {
         "account_id": account_id,
         "account_name": account_name,
@@ -100,6 +103,9 @@ async def get_dashboard(account_id: str = Path(..., description="账户 ID")):
             "version": VERSION,
             "uptime_hours": get_uptime_hours(),
             "galaxy_api": check_sdk_connection(),
+            "cpu_percent": resources["cpu_percent"],
+            "memory_mb": resources["memory_mb"],
+            "disk_percent": resources["disk_percent"],
         },
         "today_trading": {
             "trade_count": trade_stats.get("total_count", 0) if trade_stats else 0,
