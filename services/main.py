@@ -482,6 +482,13 @@ async def lifespan(app: FastAPI):
                 "cron_expression": "0 3 * * 1-5",
                 "enabled": 0,
             },
+            {
+                "task_type": "builtin",
+                "module": "post_market_analysis",
+                "account_id": "SYSTEM",
+                "cron_expression": "30 15 * * 1-5",
+                "enabled": 1,
+            },
         ]
         for t in builtin_defaults:
             existing = await db_manager.fetchone(

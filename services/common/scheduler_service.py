@@ -715,6 +715,161 @@ class SchedulerService:
             logger.error(f"申万行业指数下载失败: {e}", exc_info=True)
             return {'success': False, 'message': str(e)}
 
+    def _post_market_analysis_job(self) -> Dict:
+        """盘后分析任务：对每只持仓股调用 DSA 分析并发送飞书通知"""
+        logger.info("=" * 60)
+        logger.info("开始盘后分析任务")
+        logger.info("=" * 60)
+
+        import httpx
+        import time
+        from services.common.database import get_db_manager
+        from services.notifications import get_notification_service
+
+        self._task_status['last_post_market_analysis'] = get_china_time().isoformat()
+
+        try:
+            conn = sqlite3.connect(str(DB_PATH))
+            cursor = conn.cursor()
+
+            # 查询所有持仓（quantity > 0）
+            cursor.execute(
+                "SELECT DISTINCT account_id, stock_code, stock_name FROM stock_positions WHERE quantity > 0"
+            )
+            positions = cursor.fetchall()
+            conn.close()
+
+            if not positions:
+                logger.info("当前无持仓，跳过盘后分析")
+                return {'success': True, 'message': '无持仓，跳过分析', 'analyzed': 0}
+
+            # 按账户分组
+            account_positions: Dict[str, list] = {}
+            for acct_id, stock_code, stock_name in positions:
+                account_positions.setdefault(acct_id, []).append({
+                    'stock_code': stock_code,
+                    'stock_name': stock_name or stock_code,
+                })
+
+            dsa_base_url = "http://localhost:8000"
+            notification = get_notification_service()
+            total_analyzed = 0
+            total_failed = 0
+
+            for account_id, stocks in account_positions.items():
+                logger.info(f"分析账户 {account_id}: {len(stocks)} 只持仓股")
+
+                for stock in stocks:
+                    stock_code = stock['stock_code']
+                    stock_name = stock['stock_name']
+
+                    try:
+                        # Step 1: 提交分析任务
+                        with httpx.Client(timeout=30) as client:
+                            resp = client.post(
+                                f"{dsa_base_url}/api/v1/analysis/analyze",
+                                json={
+                                    "stock_code": stock_code,
+                                    "report_type": "detailed",
+                                    "async_mode": True,
+                                }
+                            )
+                            if resp.status_code not in (200, 202):
+                                logger.warning(f"DSA 提交失败 ({stock_code}): {resp.status_code}")
+                                total_failed += 1
+                                continue
+
+                            task_data = resp.json()
+                            task_id_dsa = task_data.get("task_id")
+                            if not task_id_dsa:
+                                logger.warning(f"DSA 未返回 task_id ({stock_code})")
+                                total_failed += 1
+                                continue
+
+                        # Step 2: 轮询等待分析完成（最多 5 分钟）
+                        result_data = None
+                        max_wait = 300  # 5 分钟
+                        waited = 0
+                        interval = 5
+
+                        with httpx.Client(timeout=30) as client:
+                            while waited < max_wait:
+                                time.sleep(interval)
+                                waited += interval
+
+                                status_resp = client.get(
+                                    f"{dsa_base_url}/api/v1/analysis/status/{task_id_dsa}"
+                                )
+                                if status_resp.status_code != 200:
+                                    continue
+
+                                status_data = status_resp.json()
+                                status = status_data.get("status")
+
+                                if status == "completed":
+                                    result_data = status_data.get("result")
+                                    break
+                                elif status == "failed":
+                                    logger.warning(
+                                        f"DSA 分析失败 ({stock_code}): {status_data.get('error', 'unknown')}"
+                                    )
+                                    total_failed += 1
+                                    break
+                        else:
+                            logger.warning(f"DSA 分析超时 ({stock_code}), 等待 {max_wait}s")
+                            total_failed += 1
+                            continue
+
+                        if result_data is None:
+                            continue
+
+                        # Step 3: 提取分析摘要
+                        report = result_data.get("report", {})
+                        summary = report.get("summary", {})
+                        strategy = report.get("strategy", {})
+
+                        analysis_summary = summary.get("analysis_summary", "暂无分析")
+                        operation_advice = summary.get("operation_advice", "暂无建议")
+                        sentiment_label = summary.get("sentiment_label", "-")
+                        ideal_buy = strategy.get("ideal_buy", "-")
+                        stop_loss = strategy.get("stop_loss", "-")
+                        take_profit = strategy.get("take_profit", "-")
+
+                        # Step 4: 发送飞书通知
+                        asyncio.run(notification.emit(
+                            event_type="post_market_analysis",
+                            account_id=account_id,
+                            payload={
+                                "stock_code": stock_code,
+                                "stock_name": stock_name,
+                                "analysis_summary": analysis_summary,
+                                "operation_advice": operation_advice,
+                                "sentiment_label": sentiment_label,
+                                "ideal_buy": ideal_buy,
+                                "stop_loss": stop_loss,
+                                "take_profit": take_profit,
+                            },
+                        ))
+
+                        total_analyzed += 1
+                        logger.info(f"分析完成: {stock_code} {stock_name}")
+
+                    except Exception as e:
+                        logger.error(f"分析异常 ({stock_code}): {e}")
+                        total_failed += 1
+
+            logger.info(f"盘后分析完成: 成功 {total_analyzed}, 失败 {total_failed}")
+            return {
+                'success': True,
+                'analyzed': total_analyzed,
+                'failed': total_failed,
+                'message': f'分析完成: {total_analyzed} 只成功, {total_failed} 只失败',
+            }
+
+        except Exception as e:
+            logger.error(f"盘后分析任务失败: {e}", exc_info=True)
+            return {'success': False, 'message': str(e)}
+
     def get_status(self) -> Dict:
         """获取调度服务状态"""
         jobs = []
