@@ -67,10 +67,10 @@
         </el-descriptions>
       </el-card>
 
-      <!-- 左右分栏：候选组 + 股票列表 -->
-      <el-row :gutter="16" class="main-row">
+      <!-- 左右分栏：候选组 + 股票列表（宽度可调） -->
+      <div class="main-row resizable-split">
         <!-- 左侧：候选组列表 -->
-        <el-col :span="5">
+        <div class="left-panel" :style="{ width: leftPanelWidth + 'px' }">
           <el-card class="group-card">
             <template #header>
               <div class="card-header">
@@ -109,15 +109,18 @@
               <el-empty v-if="!groupsLoading && candidateGroups.length === 0" description="暂无候选组" :image-size="60" />
             </div>
           </el-card>
-        </el-col>
+        </div>
+
+        <!-- 拖拽分隔条 -->
+        <div class="split-handle" @mousedown="startResize"></div>
 
         <!-- 右侧：候选股列表 -->
-        <el-col :span="19">
+        <div class="right-panel" :style="{ flex: 1 }">
           <el-card>
             <template #header>
-              <div class="card-header">
+              <div class="card-header stock-toolbar">
                 <span>{{ currentGroup?.label || '候选股票' }}</span>
-                <el-space>
+                <el-space wrap>
                   <el-radio-group v-model="filterStatus" size="small" @change="loadCurrentGroupStocks">
                     <el-radio-button value="">全部</el-radio-button>
                     <el-radio-button value="pending">待交易</el-radio-button>
@@ -125,12 +128,20 @@
                     <el-radio-button value="bought">已买入</el-radio-button>
                     <el-radio-button value="sold">已卖出</el-radio-button>
                   </el-radio-group>
-                  <el-button v-if="selectedGroupId" type="primary" size="small" @click="showAddStockDialog = true">
+                  <el-button v-if="selectedGroupId" type="success" size="small" @click="showAddStockDialog = true">
                     <el-icon><Plus /></el-icon>
-                    添加股票
+                    添加
                   </el-button>
-                  <el-button v-if="selectedStocks.length > 0" type="warning" size="small" @click="showBatchStatusDialog = true">
-                    批量修改状态 ({{ selectedStocks.length }})
+                  <el-button type="primary" size="small" :disabled="selectedStocks.length !== 1" @click="editSelected">
+                    <el-icon><Edit /></el-icon>
+                    编辑{{ selectedStocks.length === 1 ? ` (${selectedStocks[0].stock_code})` : '' }}
+                  </el-button>
+                  <el-button type="danger" size="small" :disabled="selectedStocks.length === 0" @click="batchRemoveSelected">
+                    <el-icon><Delete /></el-icon>
+                    移除{{ selectedStocks.length > 0 ? ` (${selectedStocks.length})` : '' }}
+                  </el-button>
+                  <el-button type="warning" size="small" :disabled="selectedStocks.length === 0" @click="showBatchStatusDialog = true">
+                    改状态{{ selectedStocks.length > 0 ? ` (${selectedStocks.length})` : '' }}
                   </el-button>
                 </el-space>
               </div>
@@ -144,6 +155,13 @@
               <el-table-column prop="reason" label="入选原因" min-width="180" show-overflow-tooltip />
               <el-table-column prop="buy_price" label="买入价" width="90" align="right" sortable>
                 <template #default="{ row }">¥{{ row.buy_price?.toFixed(2) }}</template>
+              </el-table-column>
+              <el-table-column prop="current_price" label="现价" width="90" align="right" sortable>
+                <template #default="{ row }">
+                  <span :style="{ color: row.current_price > row.buy_price ? '#f56c6c' : row.current_price > 0 && row.current_price < row.buy_price ? '#67c23a' : '' }">
+                    {{ row.current_price > 0 ? '¥' + row.current_price.toFixed(2) : '-' }}
+                  </span>
+                </template>
               </el-table-column>
               <el-table-column prop="stop_loss_price" label="止损价" width="90" align="right">
                 <template #default="{ row }">¥{{ row.stop_loss_price?.toFixed(2) }}</template>
@@ -162,18 +180,12 @@
                 </template>
               </el-table-column>
               <el-table-column prop="updated_at" label="更新时间" width="160" sortable />
-              <el-table-column label="操作" fixed="right" width="200">
-                <template #default="{ row }">
-                  <el-button type="primary" size="small" @click="editStock(row)">编辑</el-button>
-                  <el-button type="danger" size="small" @click="removeStock(row)">移除</el-button>
-                </template>
-              </el-table-column>
             </el-table>
 
             <el-empty v-if="!stocksLoading && currentStocks.length === 0" description="暂无候选股票，请添加或运行选股" />
           </el-card>
-        </el-col>
-      </el-row>
+        </div>
+      </div>
 
       <!-- 新建候选组对话框 -->
       <el-dialog v-model="showCreateGroupDialog" title="新建候选组" width="450px">
@@ -505,7 +517,7 @@
 <script setup>
 import { ref, reactive, onMounted, computed, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Search, Refresh, Plus, MoreFilled, Upload, Loading, WarningFilled } from '@element-plus/icons-vue'
+import { Search, Refresh, Plus, MoreFilled, Upload, Loading, WarningFilled, Edit, Delete } from '@element-plus/icons-vue'
 import { useAccountStore } from '../stores/account'
 import NavBar from '../components/NavBar.vue'
 
@@ -531,8 +543,11 @@ const dataStats = ref({ total_stocks: 0, total_records: 0, latest_date: null, ea
 
 // 策略
 const strategies = ref([])
-// 关联策略：仅配置型选股策略（排除代码型）
-const screeningStrategies = computed(() => strategies.value.filter(s => s.strategy_type === 'screening' && s.code_type !== 'python'))
+// 关联策略：配置型选股策略 + 代码型选股策略（code_scope=screening）
+const screeningStrategies = computed(() => strategies.value.filter(s =>
+  (s.strategy_type === 'screening' && s.code_type !== 'python') ||
+  (s.strategy_type === 'python' && s.code_scope === 'screening')
+))
 
 // 调度：仅显示当前组的任务（只读）
 const groupStrategyTasks = computed(() => {
@@ -602,6 +617,29 @@ const screeningProgress = reactive({ processing: false, total: 0, processed: 0, 
 let progressPollingTimer = null
 
 const stockSearchResults = ref([])
+
+// 可调分栏宽度
+const leftPanelWidth = ref(260)
+const isResizing = ref(false)
+
+const startResize = (e) => {
+  isResizing.value = true
+  e.preventDefault()
+  const startX = e.clientX
+  const startWidth = leftPanelWidth.value
+  const onMouseMove = (ev) => {
+    const newWidth = Math.min(500, Math.max(180, startWidth + ev.clientX - startX))
+    leftPanelWidth.value = newWidth
+  }
+  const onMouseUp = () => {
+    isResizing.value = false
+    document.removeEventListener('mousemove', onMouseMove)
+    document.removeEventListener('mouseup', onMouseUp)
+    document.querySelector('.split-handle')?.classList.remove('active')
+  }
+  document.addEventListener('mousemove', onMouseMove)
+  document.addEventListener('mouseup', onMouseUp)
+}
 
 const formatProgress = (percent) => `${percent}%`
 
@@ -1099,6 +1137,36 @@ const editStock = (row) => {
   showEditDialog.value = true
 }
 
+// 编辑选中的股票（只能单选）
+const editSelected = () => {
+  if (selectedStocks.value.length === 1) {
+    editStock(selectedStocks.value[0])
+  }
+}
+
+// 批量移除选中的股票
+const batchRemoveSelected = async () => {
+  if (selectedStocks.value.length === 0) return
+  const codes = selectedStocks.value.map(s => s.stock_code).join(', ')
+  try {
+    await ElMessageBox.confirm(
+      `确定要移除以下 ${selectedStocks.value.length} 只股票吗？\n${codes}`,
+      '批量移除确认',
+      { type: 'warning', confirmButtonText: '确认移除', cancelButtonText: '取消' }
+    )
+    for (const row of selectedStocks.value) {
+      const url = `/api/v1/ui/${currentAccountId.value}/watchlist/${row.stock_code}?group_id=${selectedGroupId.value}`
+      await fetch(url, { method: 'DELETE' })
+    }
+    ElMessage.success('已批量移除')
+    selectedStocks.value = []
+    await loadCurrentGroupStocks()
+    await loadGroups()
+  } catch (e) {
+    // 取消
+  }
+}
+
 const saveStock = async () => {
   try {
     await fetch(`/api/v1/ui/${currentAccountId.value}/watchlist/${editingStock.stock_code}`, {
@@ -1377,9 +1445,21 @@ onMounted(async () => {
 .page-header h2 { color: #303133; margin: 0; }
 .status-card { margin-bottom: 20px; }
 .card-header { display: flex; justify-content: space-between; align-items: center; }
+.stock-toolbar { flex-wrap: wrap; gap: 8px; }
 .progress-card { margin-bottom: 20px; }
 .progress-details { display: flex; justify-content: space-between; margin-top: 10px; font-size: 13px; color: #606266; }
 .main-row { margin-bottom: 20px; }
+.main-row.resizable-split { display: flex; gap: 0; align-items: stretch; }
+.main-row.resizable-split .left-panel { min-width: 180px; max-width: 500px; }
+.main-row.resizable-split .right-panel { flex: 1; min-width: 400px; }
+.main-row.resizable-split .split-handle {
+  width: 6px; cursor: col-resize; background: transparent; flex-shrink: 0;
+  position: relative; z-index: 10;
+}
+.main-row.resizable-split .split-handle:hover,
+.main-row.resizable-split .split-handle.active {
+  background: #409EFF; opacity: 0.3;
+}
 
 .group-card { height: 100%; }
 .group-list { min-height: 300px; }

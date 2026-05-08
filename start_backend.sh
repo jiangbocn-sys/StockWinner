@@ -24,12 +24,20 @@ case "$1" in
                 exit 0
             fi
         fi
-        # 后台启动
-        nohup "$PYTHON_CMD" -m uvicorn services.main:app \
-            --host 0.0.0.0 \
-            --port 8080 \
-            --reload \
-            > "$LOG_FILE" 2>&1 &
+        # 后台启动（默认不带 --reload，开发模式用 start --dev）
+        if [ "$2" = "--dev" ]; then
+            echo "  [开发模式] 启用热重载，文件变更将自动重启"
+            "$PYTHON_CMD" -m uvicorn services.main:app \
+                --host 0.0.0.0 \
+                --port 8080 \
+                --reload \
+                > "$LOG_FILE" 2>&1 &
+        else
+            "$PYTHON_CMD" -m uvicorn services.main:app \
+                --host 0.0.0.0 \
+                --port 8080 \
+                > "$LOG_FILE" 2>&1 &
+        fi
         echo $! > "$PID_FILE"
         sleep 2
         if kill -0 $(cat "$PID_FILE") 2>/dev/null; then
@@ -89,13 +97,14 @@ case "$1" in
         tail -f "$LOG_FILE"
         ;;
     *)
-        echo "用法：$0 {start|stop|restart|status|logs}"
+        echo "用法：$0 {start|stop|restart|status|logs} [--dev]"
         echo
-        echo "  start   - 启动服务"
-        echo "  stop    - 停止服务"
-        echo "  restart - 重启服务"
-        echo "  status  - 查看状态"
-        echo "  logs    - 查看日志 (实时)"
+        echo "  start          - 启动服务（生产模式，不热重载）"
+        echo "  start --dev    - 启动服务（开发模式，文件变更自动重启）"
+        echo "  stop           - 停止服务"
+        echo "  restart        - 重启服务"
+        echo "  status         - 查看状态"
+        echo "  logs           - 查看日志 (实时)"
         exit 1
         ;;
 esac

@@ -9,7 +9,7 @@
 import asyncio
 from typing import Dict, List, Optional, Any, Tuple
 from services.common.database import get_db_manager
-from services.common.timezone import get_china_time
+from services.common.timezone import get_china_time, format_china_time
 
 # 手续费率默认配置（A 股标准，账户未设置时使用）
 DEFAULT_FEE_CONFIG = {
@@ -221,19 +221,39 @@ class TradeExecutionService:
         target_quantity: Optional[int] = None,
         order_id: Optional[str] = None,
         trigger_source: Optional[str] = None,
+        strategy_id: Optional[int] = None,
+        signal_id: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
-        执行买入交易（原子事务 + 风控检查）
+        执行买入交易（订单状态机 + 原子事务 + 风控检查）
+
+        订单流转：pending → submitted → filled
+        若任何环节失败，订单标记为 rejected
 
         Returns:
             交易结果
         """
+        # 创建订单（pending 状态）
+        from services.trading.order_service import get_order_service
+        order_svc = get_order_service(self.account_id)
+        db_order_id = await order_svc.create_order(
+            stock_code=stock_code,
+            stock_name=stock_name,
+            trade_type="buy",
+            price=price,
+            quantity=target_quantity or 100,
+            trigger_source=trigger_source,
+            stop_loss_price=None,
+            take_profit_price=None,
+        )
+
         # 风控检查
         try:
             from services.trading.risk_service import get_risk_service
             risk = get_risk_service(self.account_id)
             passed, reason = await risk.check_buy(stock_code, price, target_quantity or 100)
             if not passed:
+                await order_svc.update_status(db_order_id, "rejected", reject_reason=reason)
                 return {
                     "success": False,
                     "message": f"风控拦截: {reason}",
@@ -249,12 +269,16 @@ class TradeExecutionService:
         )
 
         if quantity <= 0:
+            await order_svc.update_status(db_order_id, "rejected", reject_reason="可用资金不足")
             return {
                 "success": False,
                 "message": "可用资金不足",
                 "quantity": 0,
                 "fees": fees
             }
+
+        # 更新订单为 submitted
+        await order_svc.update_status(db_order_id, "submitted")
 
         # 通过网关下单（mock 模式直接返回成功，实盘调用券商 SDK）
         try:
@@ -267,6 +291,7 @@ class TradeExecutionService:
                 account_id=self.account_id,
             )
             if not order_result.success:
+                await order_svc.update_status(db_order_id, "rejected", reject_reason=order_result.message)
                 return {
                     "success": False,
                     "message": f"网关下单失败: {order_result.message}",
@@ -274,6 +299,7 @@ class TradeExecutionService:
                     "fees": fees
                 }
         except Exception as e:
+            await order_svc.update_status(db_order_id, "rejected", reject_reason=str(e))
             return {
                 "success": False,
                 "message": f"网关调用异常: {e}",
@@ -286,7 +312,7 @@ class TradeExecutionService:
         current_cash = account.get("available_cash", 0)
         user_id = account.get("id")
 
-        # 原子事务：资金扣减 + 持仓更新 + 交易记录
+        # 原子事务：资金扣减 + 持仓更新 + 交易记录 + 订单完成
         try:
             async with self.db.transaction() as conn:
                 # 1. 更新账户资金
@@ -296,7 +322,7 @@ class TradeExecutionService:
                        WHERE account_id = ?""",
                     (
                         current_cash - total_amount,
-                        get_china_time().isoformat(),
+                        format_china_time(),
                         self.account_id
                     )
                 )
@@ -317,7 +343,7 @@ class TradeExecutionService:
                                updated_at = ?
                            WHERE account_id = ? AND stock_code = ?""",
                         (new_qty, new_cost, new_available, new_qty * price,
-                         get_china_time().isoformat(), self.account_id, stock_code)
+                         format_china_time(), self.account_id, stock_code)
                     )
                 else:
                     await conn.execute(
@@ -326,7 +352,7 @@ class TradeExecutionService:
                             avg_cost, market_value, created_at, updated_at)
                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                         (self.account_id, user_id, stock_code, stock_name, quantity, 0, price,
-                         quantity * price, get_china_time().isoformat(), get_china_time().isoformat())
+                         quantity * price, format_china_time(), format_china_time())
                     )
 
                 # 3. 记录交易
@@ -341,10 +367,12 @@ class TradeExecutionService:
                     "price": price,
                     "amount": total_amount - fees["total_fee"],
                     "commission": fees["commission"],
-                    "trade_time": get_china_time().isoformat(),
+                    "trade_time": format_china_time(),
                     "status": "completed",
                     "trigger_source": trigger_source,
-                    "created_at": get_china_time().isoformat()
+                    "strategy_id": strategy_id,
+                    "signal_id": signal_id,
+                    "created_at": format_china_time()
                 }
                 columns = ', '.join(trade_data.keys())
                 placeholders = ', '.join(['?' for _ in trade_data])
@@ -354,6 +382,25 @@ class TradeExecutionService:
                 )
                 trade_record_id = cursor.lastrowid
 
+                # 4. 更新 watchlist 标记已买入
+                if signal_id:
+                    await conn.execute(
+                        "UPDATE watchlist SET status = 'bought', bought = 1, buy_trade_id = ? WHERE id = ?",
+                        (trade_record_id, signal_id)
+                    )
+                else:
+                    await conn.execute(
+                        "UPDATE watchlist SET status = 'bought', bought = 1 WHERE account_id = ? AND stock_code = ?",
+                        (self.account_id, stock_code)
+                    )
+
+                # 5. 更新订单状态为 filled + 关联券商委托号
+                broker_order_id = order_result.order_id if hasattr(order_result, 'order_id') else None
+                await conn.execute(
+                    "UPDATE orders SET status = 'filled', filled_quantity = ?, filled_amount = ?, broker_order_id = ?, updated_at = ? WHERE id = ?",
+                    (quantity, total_amount, broker_order_id, format_china_time(), db_order_id)
+                )
+
             return {
                 "success": True,
                 "message": "买入成功",
@@ -361,10 +408,16 @@ class TradeExecutionService:
                 "price": price,
                 "total_amount": total_amount,
                 "fees": fees,
-                "trade_record_id": trade_record_id
+                "trade_record_id": trade_record_id,
+                "order_id": db_order_id,
             }
 
         except Exception as e:
+            # 事务已回滚，标记订单为 rejected
+            try:
+                await order_svc.update_status(db_order_id, "rejected", reject_reason=str(e))
+            except Exception:
+                pass
             return {
                 "success": False,
                 "message": f"买入执行失败: {e}",
@@ -382,23 +435,39 @@ class TradeExecutionService:
         trigger_source: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
-        执行卖出交易（原子事务）
+        执行卖出交易（订单状态机 + 原子事务）
 
         Returns:
             交易结果
         """
+        # 创建订单（pending 状态）
+        from services.trading.order_service import get_order_service
+        order_svc = get_order_service(self.account_id)
+        db_order_id = await order_svc.create_order(
+            stock_code=stock_code,
+            stock_name=stock_name,
+            trade_type="sell",
+            price=price,
+            quantity=target_quantity or 0,
+            trigger_source=trigger_source,
+        )
+
         # 计算可卖数量和费用
         quantity, net_amount, fees = await self.calculate_sell_quantity(
             stock_code, price, target_quantity
         )
 
         if quantity <= 0:
+            await order_svc.update_status(db_order_id, "rejected", reject_reason="持仓不足")
             return {
                 "success": False,
                 "message": "持仓不足",
                 "quantity": 0,
                 "fees": fees
             }
+
+        # 更新订单为 submitted
+        await order_svc.update_status(db_order_id, "submitted")
 
         # 通过网关下单（mock 模式直接返回成功，实盘调用券商 SDK）
         try:
@@ -411,6 +480,7 @@ class TradeExecutionService:
                 account_id=self.account_id,
             )
             if not order_result.success:
+                await order_svc.update_status(db_order_id, "rejected", reject_reason=order_result.message)
                 return {
                     "success": False,
                     "message": f"网关下单失败: {order_result.message}",
@@ -418,6 +488,7 @@ class TradeExecutionService:
                     "fees": fees
                 }
         except Exception as e:
+            await order_svc.update_status(db_order_id, "rejected", reject_reason=str(e))
             return {
                 "success": False,
                 "message": f"网关调用异常: {e}",
@@ -440,7 +511,7 @@ class TradeExecutionService:
         current_cash = account.get("available_cash", 0)
         user_id = account.get("id")
 
-        # 原子事务：持仓更新 + 资金增加 + 交易记录
+        # 原子事务：持仓更新 + 资金增加 + 交易记录 + 订单完成
         try:
             async with self.db.transaction() as conn:
                 # 1. 更新持仓
@@ -454,7 +525,7 @@ class TradeExecutionService:
                         """UPDATE stock_positions
                            SET quantity = ?, available_quantity = ?, market_value = ?, updated_at = ?
                            WHERE account_id = ? AND stock_code = ?""",
-                        (new_qty, new_available, new_qty * price, get_china_time().isoformat(),
+                        (new_qty, new_available, new_qty * price, format_china_time(),
                          self.account_id, stock_code)
                     )
 
@@ -465,12 +536,19 @@ class TradeExecutionService:
                        WHERE account_id = ?""",
                     (
                         current_cash + net_amount,
-                        get_china_time().isoformat(),
+                        format_china_time(),
                         self.account_id
                     )
                 )
 
                 # 3. 记录交易
+                buy_record = await conn.fetchone(
+                    "SELECT strategy_id, signal_id FROM trade_records WHERE account_id = ? AND stock_code = ? AND trade_type = 'buy' ORDER BY trade_time DESC LIMIT 1",
+                    (self.account_id, stock_code)
+                )
+                inherited_strategy_id = buy_record["strategy_id"] if buy_record and buy_record.get("strategy_id") else None
+                inherited_signal_id = buy_record["signal_id"] if buy_record and buy_record.get("signal_id") else None
+
                 trade_data = {
                     "account_id": self.account_id,
                     "user_id": user_id,
@@ -483,10 +561,12 @@ class TradeExecutionService:
                     "amount": net_amount + fees["total_fee"],
                     "commission": fees["commission"],
                     "profit_loss": profit_loss,
-                    "trade_time": get_china_time().isoformat(),
+                    "trade_time": format_china_time(),
                     "status": "completed",
                     "trigger_source": trigger_source,
-                    "created_at": get_china_time().isoformat()
+                    "strategy_id": inherited_strategy_id,
+                    "signal_id": inherited_signal_id,
+                    "created_at": format_china_time()
                 }
                 columns = ', '.join(trade_data.keys())
                 placeholders = ', '.join(['?' for _ in trade_data])
@@ -496,6 +576,13 @@ class TradeExecutionService:
                 )
                 trade_record_id = cursor.lastrowid
 
+                # 4. 更新订单状态为 filled + 关联券商委托号
+                broker_order_id = order_result.order_id if hasattr(order_result, 'order_id') else None
+                await conn.execute(
+                    "UPDATE orders SET status = 'filled', filled_quantity = ?, filled_amount = ?, broker_order_id = ?, updated_at = ? WHERE id = ?",
+                    (quantity, net_amount + fees["total_fee"], broker_order_id, format_china_time(), db_order_id)
+                )
+
             return {
                 "success": True,
                 "message": "卖出成功",
@@ -504,10 +591,16 @@ class TradeExecutionService:
                 "net_amount": net_amount,
                 "fees": fees,
                 "profit_loss": profit_loss,
-                "trade_record_id": trade_record_id
+                "trade_record_id": trade_record_id,
+                "order_id": db_order_id,
             }
 
         except Exception as e:
+            # 事务已回滚，标记订单为 rejected
+            try:
+                await order_svc.update_status(db_order_id, "rejected", reject_reason=str(e))
+            except Exception:
+                pass
             return {
                 "success": False,
                 "message": f"卖出执行失败: {e}",
@@ -524,7 +617,7 @@ class TradeExecutionService:
             """UPDATE stock_positions
                SET available_quantity = quantity, updated_at = ?
                WHERE account_id = ? AND available_quantity < quantity""",
-            (get_china_time().isoformat(), self.account_id)
+            (format_china_time(), self.account_id)
         )
         print(f"[T+1] 已解冻账户 {self.account_id} 的所有持仓")
 

@@ -16,7 +16,7 @@ import os
 from services.common.timezone import get_china_time
 from services.common.database import get_db_manager, reset_db_manager
 from services.common.account_manager import get_account_manager, reset_account_manager
-from services.ui import dashboard, accounts, positions, trades, strategies, screening, monitoring, market_data, data_explorer, position_rules, factors, scheduler, notifications, trading_strategies
+from services.ui import dashboard, accounts, positions, trades, strategies, screening, monitoring, market_data, data_explorer, position_rules, factors, scheduler, notifications, trading_strategies, strategy_performance
 from services.strategy.api import router as strategy_v2_router
 from services.account_management.api import router as account_management_router
 from services.auth.api import router as auth_router
@@ -24,6 +24,9 @@ from services.llm.api import router as llm_router
 
 from services._version import VERSION, set_start_time
 _server_start_time = None
+
+# 数据库迁移版本号 —— 每次新增迁移时递增
+MIGRATION_VERSION = 1
 
 
 @asynccontextmanager
@@ -63,268 +66,266 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"启动时周K线检查失败: {e}")
 
-    # 数据库迁移：为 watchlist 表添加新列
+    # 启动时自动检测：如果是交易日交易时段，自动启动交易监控
     try:
-        await db_manager.execute(
-            "ALTER TABLE watchlist ADD COLUMN source_type TEXT DEFAULT 'screening'"
-        )
-        print("数据库迁移: watchlist.source_type 已添加")
-    except Exception:
-        pass  # 列已存在
-
-    try:
-        await db_manager.execute(
-            "ALTER TABLE watchlist ADD COLUMN group_id INTEGER"
-        )
-        print("数据库迁移: watchlist.group_id 已添加")
-    except Exception:
-        pass  # 列已存在
-
-    # 创建 candidate_groups 表
-    try:
-        await db_manager.execute("""
-            CREATE TABLE IF NOT EXISTS candidate_groups (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                account_id TEXT NOT NULL,
-                name TEXT NOT NULL,
-                group_type TEXT NOT NULL DEFAULT 'manual',
-                screening_strategy_id INTEGER,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (screening_strategy_id) REFERENCES strategies(id)
-            )
-        """)
-        await db_manager.execute("CREATE INDEX IF NOT EXISTS idx_candidate_groups_account ON candidate_groups(account_id)")
-        print("数据库迁移: candidate_groups 表已创建")
-    except Exception:
-        pass  # 表已存在
-
-    # 创建「未分组」默认组，归集所有 group_id 为 NULL 的记录
-    try:
-        # 为每个有未分组记录的账户创建默认组
-        accounts_with_ungrouped = await db_manager.fetchall(
-            "SELECT DISTINCT account_id FROM watchlist WHERE group_id IS NULL"
-        )
-        for row in accounts_with_ungrouped:
-            aid = row['account_id']
-            # 检查是否已有未分组组
-            existing = await db_manager.fetchone(
-                "SELECT id FROM candidate_groups WHERE account_id = ? AND name = '未分组'",
-                (aid,)
-            )
-            if not existing:
-                group_id = await db_manager.insert("candidate_groups", {
-                    "account_id": aid,
-                    "name": "未分组",
-                    "group_type": "manual",
-                    "screening_strategy_id": None,
-                })
-            else:
-                group_id = existing['id']
-            await db_manager.execute(
-                "UPDATE watchlist SET group_id = ? WHERE group_id IS NULL AND account_id = ?",
-                (group_id, aid)
-            )
-        print("数据库迁移: 「未分组」默认组已创建，未分组记录已归集")
+        scheduler = get_scheduler()
+        scheduler.auto_start_monitoring_if_trading()
     except Exception as e:
-        print(f"数据库迁移: 未分组归集跳过 ({e})")
+        print(f"启动时自动监控检测失败: {e}")
 
-    # 扩展 strategies 表：支持代码型策略
-    try:
-        await db_manager.execute("ALTER TABLE strategies ADD COLUMN code TEXT")
-        print("数据库迁移: strategies.code 已添加")
-    except Exception:
-        pass
-    try:
-        await db_manager.execute("ALTER TABLE strategies ADD COLUMN code_type TEXT DEFAULT 'config'")
-        print("数据库迁移: strategies.code_type 已添加")
-    except Exception:
-        pass
-    try:
-        await db_manager.execute("ALTER TABLE strategies ADD COLUMN target_scope TEXT DEFAULT 'group'")
-        print("数据库迁移: strategies.target_scope 已添加")
-    except Exception:
-        pass
-    try:
-        await db_manager.execute("ALTER TABLE strategies ADD COLUMN function_name TEXT DEFAULT 'run'")
-        print("数据库迁移: strategies.function_name 已添加")
-    except Exception:
-        pass
-    try:
-        await db_manager.execute("ALTER TABLE strategies ADD COLUMN code_scope TEXT DEFAULT 'screening'")
-        print("数据库迁移: strategies.code_scope 已添加")
-    except Exception:
-        pass
-
-    # 创建 strategy_tasks 表
+    # 数据库迁移框架：按版本号执行，避免每次启动重复执行
     try:
         await db_manager.execute("""
-            CREATE TABLE IF NOT EXISTS strategy_tasks (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                strategy_id INTEGER NOT NULL,
-                group_id INTEGER NOT NULL,
-                account_id TEXT NOT NULL,
-                cron_expression TEXT NOT NULL,
-                enabled INTEGER DEFAULT 1,
-                last_run_at TIMESTAMP,
-                last_status TEXT,
-                last_output TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (strategy_id) REFERENCES strategies(id),
-                FOREIGN KEY (group_id) REFERENCES candidate_groups(id)
+            CREATE TABLE IF NOT EXISTS migration_version (
+                version INTEGER PRIMARY KEY,
+                applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        current_version = await db_manager.fetchone("SELECT MAX(version) as v FROM migration_version")
+        applied_v = current_version["v"] if current_version and current_version.get("v") else 0
+    except Exception as e:
+        print(f"数据库迁移: 版本检查失败 ({e})，跳过迁移")
+        applied_v = 9999  # 跳过所有迁移
+
+    async def run_migration(v: int, desc: str, sql_blocks: list):
+        """执行指定版本的迁移"""
+        if v <= applied_v:
+            return
+        print(f"数据库迁移 [v{v}]: {desc}...")
+        for sql in sql_blocks:
+            try:
+                await db_manager.execute(sql)
+            except Exception:
+                pass  # 列/表已存在
+        try:
+            await db_manager.execute("INSERT INTO migration_version (version) VALUES (?)", (v,))
+            print(f"数据库迁移 [v{v}]: 完成")
+        except Exception as e:
+            print(f"数据库迁移 [v{v}]: 版本记录写入失败 ({e})")
+
+    # v1: 所有现有迁移（首次运行时执行，之后跳过）
+    await run_migration(1, "初始迁移（表结构扩展 + 新表创建）", [
+        # watchlist 扩展
+        "ALTER TABLE watchlist ADD COLUMN source_type TEXT DEFAULT 'screening'",
+        "ALTER TABLE watchlist ADD COLUMN group_id INTEGER",
+        "ALTER TABLE watchlist ADD COLUMN current_price REAL DEFAULT 0",
+        "ALTER TABLE watchlist ADD COLUMN bought INTEGER DEFAULT 0",
+        "ALTER TABLE watchlist ADD COLUMN buy_trade_id INTEGER",
+        # strategies 扩展
+        "ALTER TABLE strategies ADD COLUMN code TEXT",
+        "ALTER TABLE strategies ADD COLUMN code_type TEXT DEFAULT 'config'",
+        "ALTER TABLE strategies ADD COLUMN target_scope TEXT DEFAULT 'group'",
+        "ALTER TABLE strategies ADD COLUMN function_name TEXT DEFAULT 'run'",
+        "ALTER TABLE strategies ADD COLUMN code_scope TEXT DEFAULT 'screening'",
+        # trade_records 扩展
+        "ALTER TABLE trade_records ADD COLUMN trigger_source TEXT",
+        "ALTER TABLE trade_records ADD COLUMN notification_sent INTEGER DEFAULT 0",
+        "ALTER TABLE trade_records ADD COLUMN strategy_id INTEGER",
+        "ALTER TABLE trade_records ADD COLUMN signal_id INTEGER",
+        # accounts 扩展
+        "ALTER TABLE accounts ADD COLUMN commission_rate REAL DEFAULT 0.0003",
+        "ALTER TABLE accounts ADD COLUMN stamp_tax REAL DEFAULT 0.0005",
+        "ALTER TABLE accounts ADD COLUMN transfer_fee REAL DEFAULT 0.00002",
+        "ALTER TABLE accounts ADD COLUMN min_commission REAL DEFAULT 5.0",
+        "ALTER TABLE accounts ADD COLUMN is_mock INTEGER DEFAULT 1",
+        "ALTER TABLE accounts ADD COLUMN trade_mode TEXT DEFAULT 'mock'",
+        # trading_strategies 扩展
+        "ALTER TABLE trading_strategies ADD COLUMN strategy_type TEXT DEFAULT 'fixed'",
+        "ALTER TABLE trading_strategies ADD COLUMN config TEXT DEFAULT '{}'",
+        # stock_positions 扩展
+        "ALTER TABLE stock_positions ADD COLUMN highest_price REAL DEFAULT 0",
+        # strategy_tasks 扩展
+        "ALTER TABLE strategy_tasks ADD COLUMN task_type TEXT DEFAULT 'strategy'",
+        "ALTER TABLE strategy_tasks ADD COLUMN module TEXT DEFAULT NULL",
+        # 创建新表
+        """CREATE TABLE IF NOT EXISTS candidate_groups (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            account_id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            group_type TEXT NOT NULL DEFAULT 'manual',
+            screening_strategy_id INTEGER,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (screening_strategy_id) REFERENCES strategies(id)
+        )""",
+        """CREATE TABLE IF NOT EXISTS strategy_tasks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            strategy_id INTEGER NOT NULL,
+            group_id INTEGER NOT NULL,
+            account_id TEXT NOT NULL,
+            cron_expression TEXT NOT NULL,
+            enabled INTEGER DEFAULT 1,
+            last_run_at TIMESTAMP,
+            last_status TEXT,
+            last_output TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (strategy_id) REFERENCES strategies(id),
+            FOREIGN KEY (group_id) REFERENCES candidate_groups(id)
+        )""",
+        """CREATE TABLE IF NOT EXISTS notification_config (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            account_id TEXT NOT NULL,
+            channel TEXT NOT NULL DEFAULT 'feishu',
+            webhook_url TEXT NOT NULL,
+            enabled INTEGER DEFAULT 1,
+            notify_on_trade INTEGER DEFAULT 1,
+            notify_on_signal INTEGER DEFAULT 1,
+            notify_on_task INTEGER DEFAULT 1,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )""",
+        """CREATE TABLE IF NOT EXISTS notification_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            account_id TEXT NOT NULL,
+            channel TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            title TEXT,
+            content TEXT,
+            status TEXT DEFAULT 'pending',
+            response TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )""",
+        """CREATE TABLE IF NOT EXISTS trading_strategy_config (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            account_id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            strategy_type TEXT NOT NULL,
+            conditions TEXT NOT NULL,
+            action TEXT NOT NULL,
+            target_stocks TEXT,
+            enabled INTEGER DEFAULT 1,
+            cooldown_seconds INTEGER DEFAULT 300,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )""",
+        """CREATE TABLE IF NOT EXISTS orders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            account_id TEXT NOT NULL,
+            stock_code TEXT NOT NULL,
+            stock_name TEXT,
+            trade_type TEXT NOT NULL,
+            order_price REAL NOT NULL,
+            order_quantity INTEGER NOT NULL,
+            filled_quantity INTEGER DEFAULT 0,
+            filled_amount REAL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'pending',
+            order_no TEXT NOT NULL,
+            broker_order_id TEXT,
+            trigger_source TEXT,
+            stop_loss_price REAL,
+            take_profit_price REAL,
+            reject_reason TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )""",
+        """CREATE TABLE IF NOT EXISTS llm_config (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            account_id TEXT NOT NULL,
+            provider TEXT DEFAULT 'openai',
+            base_url TEXT NOT NULL,
+            api_key TEXT NOT NULL,
+            model_name TEXT NOT NULL,
+            enabled INTEGER DEFAULT 1,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )""",
+    ])
+
+    # 以下迁移逻辑需要数据操作（非纯 DDL），在 v1 之后单独执行一次
+    # 创建 candidate_groups 索引
+    try:
+        await db_manager.execute("CREATE INDEX IF NOT EXISTS idx_candidate_groups_account ON candidate_groups(account_id)")
+    except Exception:
+        pass
+    # 创建 strategy_tasks 索引
+    try:
         await db_manager.execute("CREATE INDEX IF NOT EXISTS idx_strategy_tasks_account ON strategy_tasks(account_id)")
         await db_manager.execute("CREATE INDEX IF NOT EXISTS idx_strategy_tasks_enabled ON strategy_tasks(enabled)")
-        print("数据库迁移: strategy_tasks 表已创建")
-    except Exception:
-        pass  # 表已存在
-
-    # 扩展 strategy_tasks 支持内置功能任务
-    try:
-        await db_manager.execute("ALTER TABLE strategy_tasks ADD COLUMN task_type TEXT DEFAULT 'strategy'")
-        print("数据库迁移: strategy_tasks.task_type 已添加")
     except Exception:
         pass
+    # 创建 notification_config 索引
     try:
-        await db_manager.execute("ALTER TABLE strategy_tasks ADD COLUMN module TEXT DEFAULT NULL")
-        print("数据库迁移: strategy_tasks.module 已添加")
-    except Exception:
-        pass
-
-    # === 交易模块 + 消息推送模块 数据库迁移 ===
-
-    # 扩展 accounts 表：佣金费率 + 交易模式
-    try:
-        await db_manager.execute("ALTER TABLE accounts ADD COLUMN commission_rate REAL DEFAULT 0.0003")
-        print("数据库迁移: accounts.commission_rate 已添加")
-    except Exception:
-        pass
-    try:
-        await db_manager.execute("ALTER TABLE accounts ADD COLUMN stamp_tax REAL DEFAULT 0.0005")
-        print("数据库迁移: accounts.stamp_tax 已添加")
-    except Exception:
-        pass
-    try:
-        await db_manager.execute("ALTER TABLE accounts ADD COLUMN transfer_fee REAL DEFAULT 0.00002")
-        print("数据库迁移: accounts.transfer_fee 已添加")
-    except Exception:
-        pass
-    try:
-        await db_manager.execute("ALTER TABLE accounts ADD COLUMN min_commission REAL DEFAULT 5.0")
-        print("数据库迁移: accounts.min_commission 已添加")
-    except Exception:
-        pass
-    try:
-        await db_manager.execute("ALTER TABLE accounts ADD COLUMN is_mock INTEGER DEFAULT 1")
-        print("数据库迁移: accounts.is_mock 已添加")
-    except Exception:
-        pass
-    try:
-        await db_manager.execute("ALTER TABLE accounts ADD COLUMN trade_mode TEXT DEFAULT 'mock'")
-        print("数据库迁移: accounts.trade_mode 已添加")
-    except Exception:
-        pass
-
-    # 扩展 trade_records 表
-    try:
-        await db_manager.execute("ALTER TABLE trade_records ADD COLUMN trigger_source TEXT")
-        print("数据库迁移: trade_records.trigger_source 已添加")
-    except Exception:
-        pass
-    try:
-        await db_manager.execute("ALTER TABLE trade_records ADD COLUMN notification_sent INTEGER DEFAULT 0")
-        print("数据库迁移: trade_records.notification_sent 已添加")
-    except Exception:
-        pass
-
-    # 创建 notification_config 表
-    try:
-        await db_manager.execute("""
-            CREATE TABLE IF NOT EXISTS notification_config (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                account_id TEXT NOT NULL,
-                channel TEXT NOT NULL DEFAULT 'feishu',
-                webhook_url TEXT NOT NULL,
-                enabled INTEGER DEFAULT 1,
-                notify_on_trade INTEGER DEFAULT 1,
-                notify_on_signal INTEGER DEFAULT 1,
-                notify_on_task INTEGER DEFAULT 1,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
         await db_manager.execute("CREATE INDEX IF NOT EXISTS idx_notification_config_account ON notification_config(account_id)")
-        print("数据库迁移: notification_config 表已创建")
     except Exception:
         pass
-
-    # 创建 notification_history 表
+    # 创建 notification_history 索引
     try:
-        await db_manager.execute("""
-            CREATE TABLE IF NOT EXISTS notification_history (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                account_id TEXT NOT NULL,
-                channel TEXT NOT NULL,
-                event_type TEXT NOT NULL,
-                title TEXT,
-                content TEXT,
-                status TEXT DEFAULT 'pending',
-                response TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
         await db_manager.execute("CREATE INDEX IF NOT EXISTS idx_notification_history_account ON notification_history(account_id)")
         await db_manager.execute("CREATE INDEX IF NOT EXISTS idx_notification_history_created ON notification_history(created_at)")
-        print("数据库迁移: notification_history 表已创建")
     except Exception:
         pass
-
-    # 创建 trading_strategy_config 表
+    # 创建 trading_strategy_config 索引
     try:
-        await db_manager.execute("""
-            CREATE TABLE IF NOT EXISTS trading_strategy_config (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                account_id TEXT NOT NULL,
-                name TEXT NOT NULL,
-                strategy_type TEXT NOT NULL,
-                conditions TEXT NOT NULL,
-                action TEXT NOT NULL,
-                target_stocks TEXT,
-                enabled INTEGER DEFAULT 1,
-                cooldown_seconds INTEGER DEFAULT 300,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
         await db_manager.execute("CREATE INDEX IF NOT EXISTS idx_trading_strategy_account ON trading_strategy_config(account_id)")
-        print("数据库迁移: trading_strategy_config 表已创建")
     except Exception:
         pass
-
-    # === 交易模块增强：个股动态策略支持 ===
-
-    # 扩展 trading_strategies 表：支持动态策略类型
+    # 创建 orders 索引
     try:
-        await db_manager.execute("ALTER TABLE trading_strategies ADD COLUMN strategy_type TEXT DEFAULT 'fixed'")
-        print("数据库迁移: trading_strategies.strategy_type 已添加")
+        await db_manager.execute("CREATE INDEX IF NOT EXISTS idx_orders_account ON orders(account_id)")
+        await db_manager.execute("CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status)")
     except Exception:
         pass
+    # 创建 llm_config 唯一索引
     try:
-        await db_manager.execute("ALTER TABLE trading_strategies ADD COLUMN config TEXT DEFAULT '{}'")
-        print("数据库迁移: trading_strategies.config 已添加")
+        await db_manager.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_llm_config_account ON llm_config(account_id)")
     except Exception:
         pass
 
-    # 扩展 stock_positions 表：记录持仓期间最高价（用于回撤止盈策略）
-    try:
-        await db_manager.execute("ALTER TABLE stock_positions ADD COLUMN highest_price REAL DEFAULT 0")
-        print("数据库迁移: stock_positions.highest_price 已添加")
-    except Exception:
-        pass
+    # 归集未分组 watchlist 记录（只需执行一次）
+    if applied_v < 1:
+        try:
+            accounts_with_ungrouped = await db_manager.fetchall(
+                "SELECT DISTINCT account_id FROM watchlist WHERE group_id IS NULL"
+            )
+            for row in accounts_with_ungrouped:
+                aid = row['account_id']
+                existing = await db_manager.fetchone(
+                    "SELECT id FROM candidate_groups WHERE account_id = ? AND name = '未分组'",
+                    (aid,)
+                )
+                if not existing:
+                    group_id = await db_manager.insert("candidate_groups", {
+                        "account_id": aid,
+                        "name": "未分组",
+                        "group_type": "manual",
+                        "screening_strategy_id": None,
+                    })
+                else:
+                    group_id = existing['id']
+                await db_manager.execute(
+                    "UPDATE watchlist SET group_id = ? WHERE group_id IS NULL AND account_id = ?",
+                    (group_id, aid)
+                )
+            print("数据库迁移: 「未分组」默认组已创建，未分组记录已归集")
+        except Exception as e:
+            print(f"数据库迁移: 未分组归集跳过 ({e})")
 
-    # 启动时清理遗留的 running 状态（服务重启后未完成的任务）
+    # 迁移旧版 LLM 配置（只需执行一次）
+    if applied_v < 1:
+        try:
+            from pathlib import Path as _Path
+            import json as _json
+            legacy_path = _Path(__file__).parent.parent / "config" / "llm.json"
+            if legacy_path.exists():
+                existing_count = await db_manager.fetchone("SELECT COUNT(*) as cnt FROM llm_config")
+                if existing_count and existing_count.get("cnt", 0) == 0:
+                    with open(legacy_path, 'r') as f:
+                        legacy = _json.load(f)
+                    if legacy.get("api_key"):
+                        await db_manager.insert("llm_config", {
+                            "account_id": "SYSTEM",
+                            "provider": legacy.get("provider", "custom"),
+                            "base_url": legacy.get("base_url", ""),
+                            "api_key": legacy.get("api_key", ""),
+                            "model_name": legacy.get("model", ""),
+                            "enabled": 1,
+                        })
+                        print("数据库迁移: 已从 config/llm.json 迁移系统级配置")
+        except Exception as e:
+            print(f"数据库迁移: LLM 旧配置迁移失败 ({e})")
+
+    # 清理遗留 running 状态（每次启动执行，不纳入版本控制）
     try:
         result = await db_manager.execute(
             "UPDATE strategy_tasks SET last_status = 'error', last_output = '{\"error\": \"服务重启，任务中断\"}', updated_at = ? WHERE last_status = 'running'",
@@ -336,39 +337,7 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"数据库迁移: 清理 running 状态跳过 ({e})")
 
-    # === 交易模块增强：订单状态机 + 持仓管理 ===
-
-    # 创建 orders 表（订单状态机）
-    try:
-        await db_manager.execute("""
-            CREATE TABLE IF NOT EXISTS orders (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                account_id TEXT NOT NULL,
-                stock_code TEXT NOT NULL,
-                stock_name TEXT,
-                trade_type TEXT NOT NULL,
-                order_price REAL NOT NULL,
-                order_quantity INTEGER NOT NULL,
-                filled_quantity INTEGER DEFAULT 0,
-                filled_amount REAL DEFAULT 0,
-                status TEXT NOT NULL DEFAULT 'pending',
-                order_no TEXT NOT NULL,
-                broker_order_id TEXT,
-                trigger_source TEXT,
-                stop_loss_price REAL,
-                take_profit_price REAL,
-                reject_reason TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        await db_manager.execute("CREATE INDEX IF NOT EXISTS idx_orders_account ON orders(account_id)")
-        await db_manager.execute("CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status)")
-        print("数据库迁移: orders 表已创建")
-    except Exception:
-        pass  # 表已存在
-
-    # 启动时恢复：将 pending/submitted 状态的订单标记为 cancelled（服务重启后旧订单已失效）
+    # 恢复遗留未完成订单（每次启动执行）
     try:
         result = await db_manager.execute(
             "UPDATE orders SET status = 'cancelled', reject_reason = '服务重启，订单已失效', updated_at = ? WHERE status IN ('pending', 'submitted')",
@@ -378,9 +347,9 @@ async def lifespan(app: FastAPI):
         if cancelled_count > 0:
             print(f"数据库迁移: 已取消 {cancelled_count} 个遗留未完成订单")
     except Exception:
-        pass  # 表可能不存在
+        pass
 
-    # 启动时执行 T+1 解冻 + 重置 pending 状态（服务重启后自动解冻昨日买入的持仓）
+    # T+1 解冻（每次启动执行）
     try:
         positions = await db_manager.fetchall(
             "SELECT DISTINCT account_id FROM stock_positions WHERE available_quantity < quantity"
@@ -390,7 +359,6 @@ async def lifespan(app: FastAPI):
                 "UPDATE stock_positions SET available_quantity = quantity, updated_at = ? WHERE account_id = ? AND available_quantity < quantity",
                 (get_china_time().isoformat(), row["account_id"])
             )
-            # 同步重置该账户 watchlist 中所有 pending 状态为 watching
             await db_manager.execute(
                 "UPDATE watchlist SET status = 'watching' WHERE account_id = ? AND status = 'pending'",
                 (row["account_id"],)
@@ -400,50 +368,7 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"数据库迁移: T+1 解冻跳过 ({e})")
 
-    # 创建 llm_config 表（用户级 LLM API 配置）
-    try:
-        await db_manager.execute("""
-            CREATE TABLE IF NOT EXISTS llm_config (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                account_id TEXT NOT NULL,
-                provider TEXT DEFAULT 'openai',
-                base_url TEXT NOT NULL,
-                api_key TEXT NOT NULL,
-                model_name TEXT NOT NULL,
-                enabled INTEGER DEFAULT 1,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        await db_manager.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_llm_config_account ON llm_config(account_id)")
-        print("数据库迁移: llm_config 表已创建")
-    except Exception:
-        pass
-
-    # 迁移旧版 config/llm.json 配置到数据库（如果存在且数据库中尚无记录）
-    try:
-        from pathlib import Path as _Path
-        import json as _json
-        legacy_path = _Path(__file__).parent.parent / "config" / "llm.json"
-        if legacy_path.exists():
-            existing_count = await db_manager.fetchone("SELECT COUNT(*) as cnt FROM llm_config")
-            if existing_count and existing_count.get("cnt", 0) == 0:
-                with open(legacy_path, 'r') as f:
-                    legacy = _json.load(f)
-                if legacy.get("api_key"):
-                    await db_manager.insert("llm_config", {
-                        "account_id": "SYSTEM",
-                        "provider": legacy.get("provider", "custom"),
-                        "base_url": legacy.get("base_url", ""),
-                        "api_key": legacy.get("api_key", ""),
-                        "model_name": legacy.get("model", ""),
-                        "enabled": 1,
-                    })
-                    print("数据库迁移: 已从 config/llm.json 迁移系统级配置")
-    except Exception as e:
-        print(f"数据库迁移: LLM 旧配置迁移失败 ({e})")
-
-    # 扫描并注册任务插件
+    # 扫描任务插件（每次启动执行）
     try:
         from services.tasks import scan_tasks
         scan_tasks()
@@ -451,44 +376,14 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"数据库迁移: 任务插件扫描失败: {e}")
 
-    # 创建默认内置功能任务（如不存在）
-    try:
+    # 创建内置任务（只需执行一次）
+    if applied_v < 1:
         builtin_defaults = [
-            {
-                "task_type": "builtin",
-                "module": "kline_check",
-                "account_id": "SYSTEM",
-                "cron_expression": "0 1 * * *",
-                "enabled": 1,
-            },
-            {
-                "task_type": "builtin",
-                "module": "monthly_factors",
-                "account_id": "SYSTEM",
-                "cron_expression": "0 1 5 * *",
-                "enabled": 1,
-            },
-            {
-                "task_type": "builtin",
-                "module": "weekly_kline",
-                "account_id": "SYSTEM",
-                "cron_expression": "0 2 * * 6",
-                "enabled": 1,
-            },
-            {
-                "task_type": "builtin",
-                "module": "industry_download",
-                "account_id": "SYSTEM",
-                "cron_expression": "0 3 * * 1-5",
-                "enabled": 0,
-            },
-            {
-                "task_type": "builtin",
-                "module": "post_market_analysis",
-                "account_id": "SYSTEM",
-                "cron_expression": "30 15 * * 1-5",
-                "enabled": 1,
-            },
+            {"task_type": "builtin", "module": "kline_check", "account_id": "SYSTEM", "cron_expression": "0 1 * * *", "enabled": 1},
+            {"task_type": "builtin", "module": "monthly_factors", "account_id": "SYSTEM", "cron_expression": "0 1 5 * *", "enabled": 1},
+            {"task_type": "builtin", "module": "weekly_kline", "account_id": "SYSTEM", "cron_expression": "0 2 * * 6", "enabled": 1},
+            {"task_type": "builtin", "module": "industry_download", "account_id": "SYSTEM", "cron_expression": "0 3 * * 1-5", "enabled": 0},
+            {"task_type": "builtin", "module": "post_market_analysis", "account_id": "SYSTEM", "cron_expression": "30 15 * * 1-5", "enabled": 1},
         ]
         for t in builtin_defaults:
             existing = await db_manager.fetchone(
@@ -506,10 +401,13 @@ async def lifespan(app: FastAPI):
                     "enabled": t["enabled"],
                 })
                 print(f"数据库迁移: 内置任务 {t['module']} 已创建")
-    except Exception as e:
-        print(f"数据库迁移: 内置任务创建失败: {e}")
 
-    # 预加载 Kronos 模型（非阻塞，失败不影响启动）
+    # v2: watchlist 复合索引 + 现价字段优化（2026-05-08）
+    await run_migration(2, "watchlist 复合索引", [
+        "CREATE INDEX IF NOT EXISTS idx_watchlist_code_status_updated ON watchlist(stock_code, status, updated_at)",
+        "CREATE INDEX IF NOT EXISTS idx_watchlist_account_status ON watchlist(account_id, status)",
+        "CREATE INDEX IF NOT EXISTS idx_watchlist_group_status ON watchlist(group_id, status)",
+    ])
     try:
         from services.common.kronos_service import load_kronos_on_startup
         load_kronos_on_startup()
@@ -576,6 +474,7 @@ app.include_router(account_management_router)
 app.include_router(auth_router)
 app.include_router(llm_router)  # LLM 配置路由
 app.include_router(notifications.router)  # 通知 API 路由
+app.include_router(strategy_performance.router)  # 策略效能评估 API 路由
 
 # 挂载前端静态文件
 frontend_dist = "/home/bobo/StockWinner/frontend/dist"

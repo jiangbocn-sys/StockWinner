@@ -74,9 +74,9 @@ async def get_dashboard(account_id: str = Path(..., description="账户 ID")):
     trade_stats = await db.fetchone("""
         SELECT
             COUNT(*) as total_count,
-            SUM(CASE WHEN trade_type = 'buy' THEN 1 ELSE 0 END) as buy_count,
-            SUM(CASE WHEN trade_type = 'sell' THEN 1 ELSE 0 END) as sell_count,
-            SUM(amount) as total_amount
+            COALESCE(SUM(CASE WHEN trade_type = 'buy' THEN 1 ELSE 0 END), 0) as buy_count,
+            COALESCE(SUM(CASE WHEN trade_type = 'sell' THEN 1 ELSE 0 END), 0) as sell_count,
+            COALESCE(SUM(amount), 0) as total_amount
         FROM trade_records
         WHERE account_id = ? AND DATE(trade_time) = ?
     """, (account_id, today))
@@ -92,8 +92,8 @@ async def get_dashboard(account_id: str = Path(..., description="账户 ID")):
     today_tasks = await db.fetchone("""
         SELECT
             COUNT(*) as total_count,
-            SUM(CASE WHEN last_status = 'success' THEN 1 ELSE 0 END) as success_count,
-            SUM(CASE WHEN last_status = 'error' OR last_status = 'failed' THEN 1 ELSE 0 END) as fail_count
+            COALESCE(SUM(CASE WHEN last_status = 'success' THEN 1 ELSE 0 END), 0) as success_count,
+            COALESCE(SUM(CASE WHEN last_status = 'error' OR last_status = 'failed' THEN 1 ELSE 0 END), 0) as fail_count
         FROM strategy_tasks
         WHERE account_id = ? AND DATE(last_run_at) = ?
     """, (account_id, today))
@@ -116,10 +116,10 @@ async def get_dashboard(account_id: str = Path(..., description="账户 ID")):
             "disk_percent": resources["disk_percent"],
         },
         "today_trading": {
-            "trade_count": trade_stats.get("total_count", 0) if trade_stats else 0,
-            "buy_count": trade_stats.get("buy_count", 0) if trade_stats else 0,
-            "sell_count": trade_stats.get("sell_count", 0) if trade_stats else 0,
-            "total_amount": float(trade_stats.get("total_amount", 0)) if trade_stats and trade_stats.get("total_amount") else 0,
+            "trade_count": trade_stats["total_count"],
+            "buy_count": trade_stats["buy_count"],
+            "sell_count": trade_stats["sell_count"],
+            "total_amount": float(trade_stats["total_amount"]),
         },
         "positions_summary": {
             "available_cash": available_cash,
@@ -129,9 +129,9 @@ async def get_dashboard(account_id: str = Path(..., description="账户 ID")):
             "daily_pnl": float(daily_pnl_row.get("daily_pnl", 0)) if daily_pnl_row and daily_pnl_row.get("daily_pnl") else 0,
         },
         "today_tasks": {
-            "task_count": today_tasks.get("total_count", 0) if today_tasks else 0,
-            "success_count": today_tasks.get("success_count", 0) if today_tasks else 0,
-            "fail_count": today_tasks.get("fail_count", 0) if today_tasks else 0,
+            "task_count": today_tasks["total_count"],
+            "success_count": today_tasks["success_count"],
+            "fail_count": today_tasks["fail_count"],
         },
     }
 

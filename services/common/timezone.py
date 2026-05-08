@@ -37,7 +37,7 @@ def to_china_time(dt: datetime) -> datetime:
     return dt.astimezone(CHINA_TZ).replace(tzinfo=None)
 
 
-def format_china_time(dt: Optional[datetime] = None, fmt: str = '%Y-%m-%d %H:%M:%S') -> str:
+def format_china_time(dt: Optional[datetime] = None, fmt: str = '%Y-%m-%dT%H:%M:%S') -> str:
     """
     格式化中国时区时间
 

@@ -63,7 +63,7 @@ ALLOWED_BUILTINS = {
 ALLOWED_MODULES = {
     "pandas", "numpy", "datetime", "statistics", "json", "math", "re",
     "collections", "itertools", "functools", "dataclasses", "typing",
-    "time", "calendar", "decimal", "copy", "string",
+    "time", "calendar", "decimal", "copy", "string", "sqlite3",
 }
 
 # 黑名单：禁止使用的函数

@@ -14,7 +14,7 @@ from typing import Dict, List, Optional, Any
 from pathlib import Path
 from services.common.database import get_db_manager
 from services.common.account_manager import get_account_manager
-from services.common.timezone import get_china_time, CHINA_TZ
+from services.common.timezone import get_china_time, format_china_time, CHINA_TZ
 from services.common.technical_indicators import calculate_indicators_for_screening, calculate_rsi
 from services.common.indicators import TechnicalIndicators
 from services.data.local_data_service import get_local_data_service
@@ -823,8 +823,8 @@ class ScreeningService:
             "take_profit_price": take_profit,
             "target_quantity": target_quantity,
             "status": "pending",
-            "created_at": get_china_time().isoformat(),
-            "updated_at": get_china_time().isoformat()
+            "created_at": format_china_time(),
+            "updated_at": format_china_time()
         }
 
         await db.insert("watchlist", watchlist_data)
@@ -899,7 +899,7 @@ class ScreeningService:
             "take_profit_price": take_profit,
             "target_quantity": target_quantity,
             "match_score": candidate.get('match_score', 0),
-            "created_at": get_china_time().isoformat()
+            "created_at": format_china_time()
         }
 
         await db.insert("temp_candidates", temp_data)
@@ -950,8 +950,8 @@ class ScreeningService:
                         "take_profit_price": candidate['take_profit_price'],
                         "target_quantity": candidate['target_quantity'],
                         "status": "pending",
-                        "created_at": get_china_time().isoformat(),
-                        "updated_at": get_china_time().isoformat()
+                        "created_at": format_china_time(),
+                        "updated_at": format_china_time()
                     })
                     result["confirmed"] += 1
                 else:
@@ -981,8 +981,8 @@ class ScreeningService:
                         "take_profit_price": candidate['take_profit_price'],
                         "target_quantity": candidate['target_quantity'],
                         "status": "pending",
-                        "created_at": get_china_time().isoformat(),
-                        "updated_at": get_china_time().isoformat()
+                        "created_at": format_china_time(),
+                        "updated_at": format_china_time()
                     })
                     result["confirmed"] += 1
                 else:

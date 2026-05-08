@@ -77,7 +77,12 @@ class SchedulerService:
     def stop(self):
         """停止调度服务"""
         if self._scheduler:
-            self._scheduler.shutdown()
+            try:
+                # wait=False：不等待正在执行的任务完成，防止 shutdown 卡死
+                # close=False：保留 executor 供后续重启
+                self._scheduler.shutdown(wait=False)
+            except Exception as e:
+                logger.error(f"调度服务停止异常: {e}")
             self._scheduler = None
         self._running = False
         logger.info("调度服务已停止")
@@ -896,14 +901,21 @@ class SchedulerService:
                         stop_loss = strategy.get("stop_loss", "-")
                         take_profit = strategy.get("take_profit", "-")
 
-                        # 同步发送飞书通知（使用新事件循环）
-                        from services.notifications.channels.feishu import FeishuWebhookChannel
+                        # 发送通知（同步 httpx，避免在已有 event loop 的线程中创建新循环）
 
-                        db = get_db_manager()
-                        configs = await db.fetchall(
-                            "SELECT * FROM notification_config WHERE account_id = ? AND enabled = 1",
-                            (account_id,),
-                        )
+                        configs = []
+                        try:
+                            conn = sqlite3.connect(str(POSITIONS_DB_PATH))
+                            conn.row_factory = sqlite3.Row
+                            cursor = conn.cursor()
+                            cursor.execute(
+                                "SELECT * FROM notification_config WHERE account_id = ? AND enabled = 1",
+                                (account_id,),
+                            )
+                            configs = [dict(r) for r in cursor.fetchall()]
+                            conn.close()
+                        except Exception as qe:
+                            logger.warning(f"查询通知配置失败: {qe}")
 
                         if configs:
                             config = configs[0]
@@ -919,22 +931,33 @@ class SchedulerService:
                                     f"**止盈价：** {take_profit}"
                                 )
 
-                                def _send_feishu():
-                                    loop = asyncio.new_event_loop()
-                                    asyncio.set_event_loop(loop)
-                                    try:
-                                        channel = FeishuWebhookChannel(config["webhook_url"])
-                                        loop.run_until_complete(channel.send(
-                                            account_id=account_id,
-                                            title="盘后分析",
-                                            content=content,
-                                            color="purple",
-                                            event_type="post_market_analysis",
-                                        ))
-                                    finally:
-                                        loop.close()
-
-                                _send_feishu()
+                                feishu_payload = {
+                                    "msg_type": "interactive",
+                                    "card": {
+                                        "config": {"wide_screen_mode": True},
+                                        "header": {
+                                            "title": {"tag": "plain_text", "content": "盘后分析"},
+                                            "template": "purple",
+                                        },
+                                        "elements": [
+                                            {"tag": "div", "text": {"tag": "lark_md", "content": content}},
+                                            {"tag": "hr"},
+                                            {"tag": "note", "elements": [
+                                                {"tag": "plain_text", "content": f"账户: {account_id} | StockWinner"}
+                                            ]},
+                                        ],
+                                    },
+                                }
+                                try:
+                                    with httpx.Client(timeout=10) as feishu_client:
+                                        feishu_resp = feishu_client.post(
+                                            config["webhook_url"],
+                                            json=feishu_payload,
+                                            headers={"Content-Type": "application/json"},
+                                        )
+                                        logger.info(f"飞书通知发送结果: {feishu_resp.text[:200]}")
+                                except Exception as fe:
+                                    logger.warning(f"发送飞书通知失败: {fe}")
 
                         total_analyzed += 1
                         logger.info(f"分析完成: {stock_code} {stock_name}")
@@ -1023,7 +1046,6 @@ class SchedulerService:
     def _register_strategy_tasks(self):
         """从 strategy_tasks 表读取 enabled 任务，注册到 APScheduler"""
         try:
-            import sqlite3
             from services.tasks import get_task
             db_path = Path(__file__).parent.parent.parent / "data" / "stockwinner.db"
             conn = sqlite3.connect(str(db_path))
@@ -1057,8 +1079,8 @@ class SchedulerService:
 
             logger.info(f"共注册 {count} 个任务")
 
-            # 注册交易监控自动启停任务
-            self._register_monitor_cron_jobs()
+            # 注册交易监控自动启停任务（已禁用）
+            # self._register_monitor_cron_jobs()
 
         except Exception as e:
             logger.error(f"注册任务失败: {e}", exc_info=True)
@@ -1066,7 +1088,6 @@ class SchedulerService:
     def reload_strategy_tasks(self):
         """重新加载策略任务：移除已有 job，重新注册"""
         try:
-            import sqlite3
             from services.tasks import get_task
 
             # 移除所有 task_ 前缀的 job
@@ -1113,7 +1134,6 @@ class SchedulerService:
     def _register_monitor_cron_jobs(self):
         """注册交易监控自动启停任务"""
         try:
-            import sqlite3
             db_path = Path(__file__).parent.parent.parent / "data" / "stockwinner.db"
             conn = sqlite3.connect(str(db_path))
             conn.row_factory = sqlite3.Row
@@ -1164,7 +1184,72 @@ class SchedulerService:
         except Exception as e:
             logger.error(f"注册监控任务失败: {e}", exc_info=True)
 
+    def is_today_trading_day(self) -> bool:
+        """判断今天是否为交易日（使用 SDK 交易日历）"""
+        try:
+            from services.common.sdk_manager import get_sdk_manager
+            sdk_mgr = get_sdk_manager()
+            calendar = sdk_mgr.get_calendar()  # int 列表，如 [19901219, 20260507, ...]
+            today = int(get_china_time().strftime('%Y%m%d'))
+            return today in calendar
+        except Exception as e:
+            logger.warning(f"获取交易日历失败，降级为工作日判断: {e}")
+            return get_china_time().weekday() < 5
+
+    def auto_start_monitoring_if_trading(self):
+        """服务启动时检查：如果当前在交易日交易时段，调度延时任务自动启动监控"""
+        now = get_china_time()
+        hour, minute = now.hour, now.minute
+        # 交易时段 09:15 ~ 15:10（覆盖盘前到收盘后）
+        in_session = (hour == 9 and minute >= 15) or (10 <= hour <= 14) or (hour == 15 and minute <= 10)
+
+        if not in_session:
+            logger.info(f"不在交易时段({hour}:{minute:02d})，跳过自动启动监控")
+            return
+
+        if not self.is_today_trading_day():
+            logger.info("今天不是交易日，跳过自动启动监控")
+            return
+
+        # 调度为 10 秒后执行的一次性任务，避免与主事件循环冲突
+        logger.info(f"检测到交易时段，10 秒后自动启动监控...")
+        self._scheduler.add_job(
+            self._do_auto_start_on_startup,
+            'interval',
+            seconds=10,
+            id='startup_monitor',
+            max_instances=1,
+            replace_existing=True,
+        )
+
+    def _do_auto_start_on_startup(self):
+        """延时执行的启动监控任务"""
+        try:
+            # 移除一次性任务
+            try:
+                self._scheduler.remove_job('startup_monitor')
+            except Exception:
+                pass
+
+            conn = sqlite3.connect(str(POSITIONS_DB_PATH))
+            conn.row_factory = sqlite3.Row
+            accounts = conn.execute("SELECT account_id FROM accounts WHERE is_active = 1").fetchall()
+            conn.close()
+
+            for acct in accounts:
+                acct_id = acct["account_id"]
+                thread = threading.Thread(
+                    target=lambda aid=acct_id: asyncio.run(self._do_start_monitor(aid))
+                )
+                thread.start()
+        except Exception as e:
+            logger.error(f"自动启动监控失败: {e}")
+
     def _auto_start_monitor_job(self, account_id: str):
+        """自动启动交易监控（先判断是否为交易日）"""
+        if not self.is_today_trading_day():
+            logger.info(f"今天不是交易日，跳过启动监控: {account_id}")
+            return
         """自动启动交易监控"""
         logger.info(f"自动启动交易监控: {account_id}")
         thread = threading.Thread(
@@ -1290,15 +1375,26 @@ class SchedulerService:
                 if not strategy:
                     raise ValueError(f"策略 {task['strategy_id']} 不存在")
 
-                # 获取候选组股票
-                stocks = await db.fetchall(
-                    "SELECT * FROM watchlist WHERE account_id = ? AND group_id = ? AND status IN ('pending', 'watching')",
-                    (task["account_id"], task["group_id"])
-                )
+                # 根据 code_scope 决定数据源
+                code_scope = strategy.get("code_scope", "screening")
 
-                # 策略执行前：重置该组所有股票状态为 watching
+                if code_scope == "trading":
+                    # 交易型策略：获取已买入的股票（watchlist status='bought'）
+                    stocks = await db.fetchall(
+                        "SELECT * FROM watchlist WHERE account_id = ? AND status = 'bought'",
+                        (task["account_id"],)
+                    )
+                    logger.info(f"交易型策略 '{strategy['name']}'，获取到 {len(stocks)} 只已买入股票")
+                else:
+                    # 选股型策略：获取候选组股票
+                    stocks = await db.fetchall(
+                        "SELECT * FROM watchlist WHERE account_id = ? AND group_id = ? AND status IN ('pending', 'watching')",
+                        (task["account_id"], task["group_id"])
+                    )
+
+                # 策略执行前：将该组 pending 状态重置为 watching（防重复买入）
                 await db.execute(
-                    "UPDATE watchlist SET status = 'watching' WHERE account_id = ? AND group_id = ?",
+                    "UPDATE watchlist SET status = 'watching' WHERE account_id = ? AND group_id = ? AND status = 'pending'",
                     (task["account_id"], task["group_id"])
                 )
 
@@ -1441,6 +1537,7 @@ class SchedulerService:
                     "today": get_china_time().strftime("%Y-%m-%d"),
                     "strategy": strategy,
                     "group_id": task["group_id"],
+                    "code_scope": code_scope,
                     "indicators": {
                         "calculate_ma": technical_indicators.calculate_ma,
                         "calculate_rsi": technical_indicators.calculate_rsi,
@@ -1463,6 +1560,14 @@ class SchedulerService:
                     "get_kline_smart": _get_kline_smart,              # 同步: 自动判断盘中/盘后
                     "get_realtime_quote": _get_realtime_quote,        # 同步: 预取当日 OHLCV
                 }
+
+                # 交易型策略：注入持仓数据（同步可用）
+                if code_scope == "trading":
+                    positions = await db.fetchall(
+                        "SELECT * FROM watchlist WHERE account_id = ? AND status = 'bought'",
+                        (task["account_id"],)
+                    )
+                    context["positions"] = [dict(p) for p in positions]
 
                 engine = get_strategy_engine()
                 signals = engine.execute_strategy(strategy, context)

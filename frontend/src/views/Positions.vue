@@ -23,9 +23,9 @@
         <template #header>
           <div class="card-header">
             <span>持仓明细</span>
-            <el-button type="primary" size="small" @click="loadPositions">
+            <el-button type="primary" size="small" @click="refreshPrices" :loading="refreshing">
               <el-icon><Refresh /></el-icon>
-              刷新
+              刷新行情
             </el-button>
           </div>
         </template>
@@ -153,6 +153,30 @@ const loadPositions = async () => {
     pnlPercent.value = (totalPnl.value / (totalAssets.value - availableCash.value)) * 100 || 0
   } catch (error) {
     console.error('加载持仓数据失败:', error)
+  }
+}
+
+const refreshing = ref(false)
+const refreshPrices = async () => {
+  refreshing.value = true
+  try {
+    const response = await fetch(`/api/v1/ui/${currentAccountId.value}/positions/refresh-prices`, { method: 'POST' })
+    const data = await response.json()
+
+    positions.value = data.positions || []
+    availableCash.value = data.available_cash || 0
+
+    marketValue.value = positions.value.reduce((sum, p) => sum + (p.market_value || 0), 0)
+    totalPnl.value = positions.value.reduce((sum, p) => sum + (p.profit_loss || 0), 0)
+    totalAssets.value = marketValue.value + availableCash.value
+    pnlPercent.value = (totalPnl.value / (totalAssets.value - availableCash.value)) * 100 || 0
+
+    ElMessage.success('行情已刷新')
+  } catch (error) {
+    console.error('刷新行情失败:', error)
+    ElMessage.error('刷新行情失败')
+  } finally {
+    refreshing.value = false
   }
 }
 

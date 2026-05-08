@@ -15,7 +15,7 @@ pending → submitted → partial → filled
 from datetime import datetime
 from typing import Dict, List, Optional
 from services.common.database import get_db_manager
-from services.common.timezone import get_china_time
+from services.common.timezone import get_china_time, format_china_time
 
 
 # 订单状态枚举
@@ -78,8 +78,8 @@ class OrderService:
             "stop_loss_price": stop_loss_price,
             "take_profit_price": take_profit_price,
             "order_no": order_id,
-            "created_at": get_china_time().isoformat(),
-            "updated_at": get_china_time().isoformat(),
+            "created_at": format_china_time(),
+            "updated_at": format_china_time(),
         }
 
         # 移除 None 值
@@ -117,7 +117,7 @@ class OrderService:
             return False
 
         # 更新
-        updates = {"status": new_status, "updated_at": get_china_time().isoformat()}
+        updates = {"status": new_status, "updated_at": format_china_time()}
         if broker_order_id:
             updates["broker_order_id"] = broker_order_id
         if filled_quantity is not None:

@@ -7,7 +7,7 @@ from typing import List, Optional
 from datetime import datetime
 from services.common.database import get_db_manager
 from services.monitoring.service import get_trading_monitor
-from services.common.timezone import get_china_time
+from services.common.timezone import get_china_time, format_china_time
 
 router = APIRouter()
 
@@ -161,11 +161,18 @@ async def execute_signal(
     signal_type = signal.get('signal_type')
 
     if signal_type == 'buy':
+        # 从 watchlist 查找对应的 signal_id
+        wl = await db.fetchone(
+            "SELECT id FROM watchlist WHERE account_id = ? AND stock_code = ? AND status IN ('pending','watching') ORDER BY created_at DESC LIMIT 1",
+            (account_id, stock_code)
+        )
         result = await execution.execute_buy(
             stock_code=stock_code,
             stock_name=signal.get('stock_name', ''),
             price=signal.get('price', 0),
-            target_quantity=signal.get('quantity', 100)
+            target_quantity=signal.get('quantity', 100),
+            strategy_id=signal.get('strategy_id'),
+            signal_id=wl['id'] if wl else None,
         )
     elif signal_type in ('sell_stop_loss', 'sell_take_profit'):
         result = await execution.execute_sell(
@@ -181,7 +188,7 @@ async def execute_signal(
         # 更新信号状态
         await db.update(
             "trading_signals",
-            {"status": "executed", "executed_at": get_china_time(), "result": str(result)},
+            {"status": "executed", "executed_at": format_china_time(), "result": str(result)},
             "id = ?",
             (signal_id,)
         )
@@ -190,14 +197,14 @@ async def execute_signal(
         if signal_type == 'buy':
             await db.update(
                 "watchlist",
-                {"status": "watching", "updated_at": get_china_time()},
+                {"status": "watching", "updated_at": format_china_time()},
                 "account_id = ? AND stock_code = ?",
                 (account_id, stock_code)
             )
         else:
             await db.update(
                 "watchlist",
-                {"status": "sold", "updated_at": get_china_time()},
+                {"status": "sold", "updated_at": format_china_time()},
                 "account_id = ? AND stock_code = ?",
                 (account_id, stock_code)
             )

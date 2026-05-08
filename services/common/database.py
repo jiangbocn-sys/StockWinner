@@ -26,6 +26,8 @@ class DatabaseManager:
         # 启用 WAL 模式提升并发性能
         await self._connection.execute("PRAGMA journal_mode = WAL")
         await self._connection.execute("PRAGMA foreign_keys = ON")
+        # 设置忙等待超时 5 秒，避免短暂锁竞争导致请求挂起
+        await self._connection.execute("PRAGMA busy_timeout = 5000")
 
     async def close(self):
         """关闭数据库连接"""
@@ -50,6 +52,14 @@ class DatabaseManager:
         if not self._connection:
             await self.connect()
         cursor = await self._connection.execute(query, params)
+        await self._connection.commit()
+        return cursor
+
+    async def executemany(self, query: str, params_list: List[Tuple]) -> aiosqlite.Cursor:
+        """批量执行 SQL（用于批量 UPDATE/INSERT）"""
+        if not self._connection:
+            await self.connect()
+        cursor = await self._connection.executemany(query, params_list)
         await self._connection.commit()
         return cursor
 

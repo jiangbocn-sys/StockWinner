@@ -8,7 +8,7 @@ from fastapi.background import BackgroundTasks
 import os
 from services.common.database import get_db_manager
 from services.screening.service import get_screening_service
-from services.common.timezone import get_china_time
+from services.common.timezone import get_china_time, format_china_time
 
 router = APIRouter()
 
@@ -769,7 +769,7 @@ async def update_watchlist_status(
     if not existing:
         raise HTTPException(status_code=404, detail="股票不在 watchlist 中")
 
-    await db.update("watchlist", {"status": status, "updated_at": get_china_time()},
+    await db.update("watchlist", {"status": status, "updated_at": format_china_time()},
                     "account_id = ? AND stock_code = ?", (account_id, stock_code))
 
     return {
@@ -811,13 +811,13 @@ async def batch_update_watchlist_status(
         placeholders = ",".join(["?"] * len(stock_codes))
         await db.execute(
             f"UPDATE watchlist SET status = ?, updated_at = ? WHERE group_id = ? AND stock_code IN ({placeholders})",
-            [status, get_china_time(), group_id] + stock_codes
+            [status, format_china_time(), group_id] + stock_codes
         )
         affected = len(stock_codes)
     else:
         await db.execute(
             "UPDATE watchlist SET status = ?, updated_at = ? WHERE group_id = ?",
-            [status, get_china_time(), group_id]
+            [status, format_china_time(), group_id]
         )
         affected = await db.fetchone("SELECT changes() as cnt")
         affected = affected["cnt"] if affected else 0
@@ -861,7 +861,7 @@ async def update_watchlist_prices(
     if not update_data:
         return {"success": False, "message": "未提供更新数据"}
 
-    update_data["updated_at"] = get_china_time()
+    update_data["updated_at"] = format_china_time()
 
     await db.update("watchlist", update_data,
                     "account_id = ? AND stock_code = ?", (account_id, stock_code))
@@ -900,7 +900,7 @@ async def update_watchlist_stock(
     if not existing:
         raise HTTPException(status_code=404, detail="该股票不在当前候选组中")
 
-    update_data = {"updated_at": get_china_time()}
+    update_data = {"updated_at": format_china_time()}
     if stock_name is not None: update_data["stock_name"] = stock_name
     if buy_price is not None: update_data["buy_price"] = buy_price
     if stop_loss_price is not None: update_data["stop_loss_price"] = stop_loss_price
@@ -997,7 +997,7 @@ async def create_candidate_group(
         if not strategy:
             raise HTTPException(status_code=404, detail="关联的选股策略不存在")
 
-    now = get_china_time().isoformat()
+    now = format_china_time()
     group_id = await db.insert("candidate_groups", {
         "account_id": account_id,
         "name": name,
@@ -1039,7 +1039,7 @@ async def update_candidate_group(
     if group['group_type'] == 'screening':
         raise HTTPException(status_code=400, detail="策略自动创建的候选组不可手动修改")
 
-    update_data = {"updated_at": get_china_time().isoformat()}
+    update_data = {"updated_at": format_china_time()}
     if name:
         update_data["name"] = name
     if screening_strategy_id is not None:
@@ -1142,7 +1142,7 @@ async def add_to_watchlist_manual(
     valid_statuses = {"watching", "pending", "bought", "sold", "ignored"}
     stock_status = status if status in valid_statuses else "watching"
 
-    now = get_china_time().isoformat()
+    now = format_china_time()
     await db.insert("watchlist", {
         "account_id": account_id,
         "strategy_id": None,
@@ -1303,7 +1303,7 @@ async def batch_add_to_watchlist(
 
     added = 0
     skipped = 0
-    now = get_china_time().isoformat()
+    now = format_china_time()
 
     for item in items:
         stock_code = item.get("stock_code", "").strip()

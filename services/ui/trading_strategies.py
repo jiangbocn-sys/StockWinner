@@ -8,7 +8,7 @@ from fastapi import APIRouter, HTTPException, Path, Body
 from typing import Optional, List
 from datetime import datetime
 from services.common.database import get_db_manager
-from services.common.timezone import get_china_time
+from services.common.timezone import get_china_time, format_china_time
 
 router = APIRouter()
 
@@ -56,7 +56,7 @@ async def upsert_stock_trading_strategy(
     if existing:
         # 更新已有策略
         update_fields = ["updated_at = ?"]
-        params = [get_china_time().isoformat()]
+        params = [format_china_time()]
 
         if entry_price is not None:
             update_fields.append("entry_price = ?")
@@ -106,7 +106,7 @@ async def upsert_stock_trading_strategy(
                 "stop_loss_pct": stop_loss_pct or 0,
                 "take_profit_pct": take_profit_pct or 0,
                 "max_trade_quantity": max_trade_quantity or 0,
-                "updated_at": get_china_time().isoformat()
+                "updated_at": format_china_time()
             }
         )
         message = "交易策略创建成功"
@@ -162,7 +162,7 @@ async def copy_trading_strategy(
                     source["stop_loss_pct"],
                     source["take_profit_pct"],
                     source["max_trade_quantity"],
-                    get_china_time().isoformat(),
+                    format_china_time(),
                     account_id,
                     target_code
                 )
@@ -180,7 +180,7 @@ async def copy_trading_strategy(
                     "stop_loss_pct": source["stop_loss_pct"],
                     "take_profit_pct": source["take_profit_pct"],
                     "max_trade_quantity": source["max_trade_quantity"],
-                    "updated_at": get_china_time().isoformat()
+                    "updated_at": format_china_time()
                 }
             )
         copied_count += 1
@@ -265,7 +265,7 @@ async def update_trading_strategy_per_stock(
 
     # 更新
     update_fields = ["updated_at = ?"]
-    params = [get_china_time().isoformat()]
+    params = [format_china_time()]
 
     if entry_price is not None:
         update_fields.append("entry_price = ?")

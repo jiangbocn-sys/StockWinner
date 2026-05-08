@@ -6,6 +6,7 @@
 
 from fastapi import APIRouter, Query, Path, Body, HTTPException
 from typing import Dict, List, Optional, Any
+from services.common.timezone import format_china_time
 
 router = APIRouter()
 
@@ -589,7 +590,7 @@ async def update_strategy_task(
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
 
-    update_data = {"updated_at": __import__("services.common.timezone", fromlist=["get_china_time"]).get_china_time().isoformat()}
+    update_data = {"updated_at": format_china_time()}
     if cron_expression is not None:
         update_data["cron_expression"] = cron_expression
     if enabled is not None:

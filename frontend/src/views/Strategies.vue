@@ -184,6 +184,25 @@
                   <el-table-column prop="name" label="策略名称" width="180" />
                   <el-table-column prop="description" label="描述" min-width="200" show-overflow-tooltip />
                   <el-table-column prop="function_name" label="入口函数" width="100" />
+                  <el-table-column label="卖出策略" width="180">
+                    <template #default="{ row }">
+                      <el-select
+                        v-model="row.sell_strategy_id"
+                        placeholder="选择卖出策略"
+                        clearable
+                        size="small"
+                        @change="saveSellStrategyLink(row)"
+                        @click="loadSellStrategyOptions"
+                      >
+                        <el-option
+                          v-for="s in sellStrategies"
+                          :key="s.id"
+                          :label="s.name"
+                          :value="s.id"
+                        />
+                      </el-select>
+                    </template>
+                  </el-table-column>
                   <el-table-column prop="status" label="状态" width="80">
                     <template #default="{ row }">
                       <el-tag :type="getStatusType(row.status)" size="small">{{ getStatusText(row.status) }}</el-tag>
@@ -775,6 +794,10 @@ const loadingCodeStrategies = ref(false)
 const showCodeDetailDialog = ref(false)
 const selectedCodeStrategy = ref(null)
 
+// 卖出策略选项（用于下拉选择）
+const sellStrategies = ref([])
+const sellStrategyOptionsLoaded = ref(false)
+
 // 策略试运行
 const candidateGroups = ref([])
 const showTestRunDialog = ref(false)
@@ -1114,6 +1137,43 @@ const saveCodeStrategy = async () => {
     ElMessage.error('保存失败')
   } finally {
     savingCodeStrategy.value = false
+  }
+}
+
+// 加载卖出策略选项（用于选股策略的下拉关联）
+const loadSellStrategyOptions = async () => {
+  if (sellStrategyOptionsLoaded.value) return
+  try {
+    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/sell-strategies`)
+    const data = await res.json()
+    if (data.success) {
+      sellStrategies.value = data.strategies
+      sellStrategyOptionsLoaded.value = true
+    }
+  } catch (e) {
+    console.error('加载卖出策略选项失败:', e)
+  }
+}
+
+// 保存选股策略的卖出策略关联
+const saveSellStrategyLink = async (row) => {
+  try {
+    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/strategies/${row.id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sell_strategy_id: row.sell_strategy_id || null }),
+    })
+    const data = await res.json()
+    if (data.success) {
+      ElMessage.success(row.sell_strategy_id ? '卖出策略已设置' : '卖出策略已清除')
+    } else {
+      ElMessage.error(data.detail || '保存失败')
+      // 恢复原值
+      await loadCodeStrategies()
+    }
+  } catch (e) {
+    ElMessage.error('保存失败')
+    await loadCodeStrategies()
   }
 }
 
@@ -1518,6 +1578,7 @@ const formatFilter = (value) => {
 onMounted(() => {
   loadAllData()
   loadKronosStatus()
+  loadSellStrategyOptions()
 })
 </script>
 

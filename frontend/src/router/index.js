@@ -60,6 +60,12 @@ const routes = [
     meta: { title: '交易信号' }
   },
   {
+    path: '/performance',
+    name: 'Performance',
+    component: () => import('../views/StrategyPerformance.vue'),
+    meta: { title: '策略效能' }
+  },
+  {
     path: '/accounts',
     name: 'Accounts',
     component: () => import('../views/AccountManagement.vue'),

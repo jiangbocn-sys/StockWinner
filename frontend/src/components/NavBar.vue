@@ -40,6 +40,10 @@
           <el-icon><Setting /></el-icon>
           <span>策略管理</span>
         </el-menu-item>
+        <el-menu-item index="/performance">
+          <el-icon><DataBoard /></el-icon>
+          <span>策略效能</span>
+        </el-menu-item>
         <el-menu-item index="/data-explorer">
           <el-icon><DataLine /></el-icon>
           <span>数据浏览器</span>
@@ -90,7 +94,7 @@
 import { computed, ref, onMounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { Lock, SwitchButton, ArrowDown, DataLine, Files } from '@element-plus/icons-vue'
+import { Lock, SwitchButton, ArrowDown, DataLine, Files, DataBoard } from '@element-plus/icons-vue'
 
 const router = useRouter()
 const route = useRoute()

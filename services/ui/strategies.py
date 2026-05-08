@@ -6,7 +6,7 @@ from fastapi import APIRouter, HTTPException, Path, Body
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 from services.common.database import get_db_manager
-from services.common.timezone import get_china_time
+from services.common.timezone import get_china_time, format_china_time
 import json
 
 router = APIRouter()
@@ -93,6 +93,8 @@ async def create_strategy(
     target_scope: Optional[str] = Body(None, description="作用域"),
     function_name: Optional[str] = Body(None, description="入口函数名"),
     status: Optional[str] = Body(None, description="策略状态"),
+    buy_strategy_id: Optional[int] = Body(None, description="关联买入策略 ID"),
+    sell_strategy_id: Optional[int] = Body(None, description="关联卖出策略 ID"),
 ):
     """创建新策略"""
     db = get_db_manager()
@@ -124,6 +126,8 @@ async def create_strategy(
     if code_scope is not None: strategy_data["code_scope"] = code_scope
     if target_scope is not None: strategy_data["target_scope"] = target_scope
     if function_name is not None: strategy_data["function_name"] = function_name
+    if buy_strategy_id is not None: strategy_data["buy_strategy_id"] = buy_strategy_id
+    if sell_strategy_id is not None: strategy_data["sell_strategy_id"] = sell_strategy_id
 
     strategy_id = await db.insert("strategies", strategy_data)
 
@@ -153,6 +157,8 @@ async def update_strategy(
     code_scope: Optional[str] = Body(None, description="代码范围"),
     target_scope: Optional[str] = Body(None, description="作用域"),
     function_name: Optional[str] = Body(None, description="入口函数名"),
+    buy_strategy_id: Optional[int] = Body(None, description="关联买入策略 ID"),
+    sell_strategy_id: Optional[int] = Body(None, description="关联卖出策略 ID"),
 ):
     """更新策略"""
     db = get_db_manager()
@@ -171,7 +177,7 @@ async def update_strategy(
     if not strategy:
         raise HTTPException(status_code=404, detail="策略不存在")
 
-    update_data = {"updated_at": get_china_time().isoformat()}
+    update_data = {"updated_at": format_china_time()}
     if name is not None: update_data["name"] = name
     if description is not None: update_data["description"] = description
     if strategy_type is not None: update_data["strategy_type"] = strategy_type
@@ -182,6 +188,30 @@ async def update_strategy(
     if code_scope is not None: update_data["code_scope"] = code_scope
     if target_scope is not None: update_data["target_scope"] = target_scope
     if function_name is not None: update_data["function_name"] = function_name
+    if buy_strategy_id is not None:
+        if buy_strategy_id == strategy_id:
+            raise HTTPException(status_code=400, detail="买入策略不能引用自身")
+        ref = await db.fetchone(
+            "SELECT strategy_type FROM strategies WHERE id = ? AND account_id = ?",
+            (buy_strategy_id, account_id),
+        )
+        if not ref:
+            raise HTTPException(status_code=400, detail="引用的买入策略不存在")
+        if ref["strategy_type"] != "python":
+            raise HTTPException(status_code=400, detail="买入策略必须是代码型策略 (python)")
+        update_data["buy_strategy_id"] = buy_strategy_id
+    if sell_strategy_id is not None:
+        if sell_strategy_id == strategy_id:
+            raise HTTPException(status_code=400, detail="卖出策略不能引用自身")
+        ref = await db.fetchone(
+            "SELECT strategy_type FROM strategies WHERE id = ? AND account_id = ?",
+            (sell_strategy_id, account_id),
+        )
+        if not ref:
+            raise HTTPException(status_code=400, detail="引用的卖出策略不存在")
+        if ref["strategy_type"] != "python":
+            raise HTTPException(status_code=400, detail="卖出策略必须是代码型策略 (python)")
+        update_data["sell_strategy_id"] = sell_strategy_id
 
     if len(update_data) > 1:
         await db.update("strategies", update_data, "id = ?", (strategy_id,))
@@ -214,8 +244,10 @@ async def delete_strategy(
     if not strategy:
         raise HTTPException(status_code=404, detail="策略不存在")
 
-    # 先删除关联的临时候选数据（避免外键约束失败）
+    # 先删除关联数据（避免外键约束失败）
     await db.execute("DELETE FROM temp_candidates WHERE strategy_id = ?", (strategy_id,))
+    await db.execute("DELETE FROM candidate_groups WHERE screening_strategy_id = ?", (strategy_id,))
+    await db.execute("DELETE FROM trading_signals WHERE strategy_id = ? AND account_id = ?", (strategy_id, account_id))
 
     # 删除策略
     await db.delete("strategies", "id = ?", (strategy_id,))
@@ -471,7 +503,7 @@ async def update_code_strategy(
     if strategy["strategy_type"] != "python":
         raise HTTPException(status_code=400, detail="该接口只能更新代码型策略")
 
-    update_data = {"updated_at": get_china_time().isoformat()}
+    update_data = {"updated_at": format_china_time()}
     if name is not None: update_data["name"] = name
     if description is not None: update_data["description"] = description
     if code is not None: update_data["code"] = code
@@ -487,6 +519,46 @@ async def update_code_strategy(
         (strategy_id,)
     )
     return {"success": True, "message": "策略已更新", "strategy": strategy}
+
+
+# ============== 关联策略查询 ==============
+
+@router.get("/api/v1/ui/{account_id}/sell-strategies")
+async def get_sell_strategy_options(account_id: str = Path(..., description="账户 ID")):
+    """获取可用作卖出策略的代码型策略列表"""
+    db = get_db_manager()
+    account = await db.fetchone(
+        "SELECT 1 FROM accounts WHERE account_id = ? AND is_active = 1",
+        (account_id,)
+    )
+    if not account:
+        raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
+    strategies = await db.fetchall(
+        "SELECT id, name, description, status FROM strategies "
+        "WHERE account_id = ? AND strategy_type = 'python' AND code_scope = 'trading' "
+        "ORDER BY name",
+        (account_id,)
+    )
+    return {"success": True, "strategies": strategies}
+
+
+@router.get("/api/v1/ui/{account_id}/buy-strategies")
+async def get_buy_strategy_options(account_id: str = Path(..., description="账户 ID")):
+    """获取可用作买入策略的代码型策略列表"""
+    db = get_db_manager()
+    account = await db.fetchone(
+        "SELECT 1 FROM accounts WHERE account_id = ? AND is_active = 1",
+        (account_id,)
+    )
+    if not account:
+        raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
+    strategies = await db.fetchall(
+        "SELECT id, name, description, status FROM strategies "
+        "WHERE account_id = ? AND strategy_type = 'python' "
+        "ORDER BY name",
+        (account_id,)
+    )
+    return {"success": True, "strategies": strategies}
 
 
 @router.post("/api/v1/ui/{account_id}/strategies/validate-code")

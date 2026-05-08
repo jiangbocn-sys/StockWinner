@@ -97,6 +97,9 @@ class TradingMonitor:
         # === 第三部分：刷新持仓盈亏 ===
         await self._refresh_positions_pnl(account_id)
 
+        # === 第四部分：更新 watchlist 现价 ===
+        await self._update_watchlist_current_price(account_id)
+
     async def _evaluate_trading_strategies(self, account_id: str):
         """评估交易策略配置中的触发条件"""
         executor = get_strategy_executor(account_id)
@@ -238,18 +241,150 @@ class TradingMonitor:
             if count > 0:
                 print(f"[Monitor] 已刷新 {count} 只持仓盈亏")
 
+    async def _update_watchlist_current_price(self, account_id: str):
+        """更新 watchlist 中所有股票的 current_price 字段
+
+        批量获取所有监控中股票的实时行情，写入数据库。
+        候选股票清单和持仓分析页面都依赖此字段显示实时价格。
+        """
+        db = get_db_manager()
+
+        # 获取所有需要更新现价的 watchlist 记录
+        watchlist = await db.fetchall(
+            "SELECT stock_code FROM watchlist WHERE account_id = ? AND status IN ('pending', 'watching', 'bought')",
+            (account_id,),
+        )
+        if not watchlist:
+            return
+
+        stock_codes = [w["stock_code"] for w in watchlist]
+
+        # 批量获取行情
+        try:
+            from services.trading.gateway import get_gateway
+            gateway = await get_gateway()
+            batch_data = await gateway.get_batch_market_data(stock_codes)
+        except Exception as e:
+            print(f"[Monitor] 批量获取行情失败，跳过现价更新: {e}")
+            return
+
+        # 批量更新
+        update_list = []
+        for code in stock_codes:
+            md = batch_data.get(code)
+            if md and md.current_price and md.current_price > 0:
+                update_list.append((md.current_price, account_id, code))
+
+        if update_list:
+            await db.executemany(
+                "UPDATE watchlist SET current_price = ?, updated_at = ? WHERE account_id = ? AND stock_code = ?",
+                [(price, get_china_time(), aid, code) for price, aid, code in update_list],
+            )
+            print(f"[Monitor] 已更新 {len(update_list)} 只 watchlist 现价")
+
+    async def _evaluate_sell_strategy_code(
+        self,
+        account_id: str,
+        stock_code: str,
+        sell_strategy_id: int,
+        current_price: float,
+        stock: Dict,
+    ) -> Dict:
+        """执行关联的卖出代码策略，返回卖出决策结果
+
+        Returns:
+            {"should_sell": bool, "reason": str, "stop_loss_price": float, "take_profit_price": float}
+        """
+        db = get_db_manager()
+
+        # 获取策略代码
+        strategy = await db.fetchone(
+            "SELECT * FROM strategies WHERE id = ? AND account_id = ? AND strategy_type = 'python'",
+            (sell_strategy_id, account_id),
+        )
+        if not strategy:
+            print(f"[Monitor] 卖出策略 #{sell_strategy_id} 不存在")
+            return {"should_sell": False, "reason": "sell_strategy_not_found"}
+
+        # 构建执行上下文
+        from services.data.local_data_service import get_local_data_service
+        from services.common import technical_indicators
+
+        lds = get_local_data_service()
+
+        def _get_kline_local(sc, limit=60, start_date=None):
+            return lds.get_kline_data(sc, start_date=start_date, limit=limit)
+
+        def _get_kline_local_single(sc, limit=60):
+            result = _get_kline_local(sc, limit=limit)
+            if hasattr(result, 'to_dict'):
+                return result.to_dict('records')
+            return result if result else []
+
+        def _get_realtime_quote_sync(sc):
+            return stock
+
+        kline_data = _get_kline_local_single(stock_code, limit=60)
+
+        context = {
+            "account_id": account_id,
+            "stock_code": stock_code,
+            "stock_name": stock.get("stock_name", stock_code),
+            "current_price": current_price,
+            "buy_price": stock.get("buy_price", 0),
+            "stop_loss_price": stock.get("stop_loss_price", 0),
+            "take_profit_price": stock.get("take_profit_price", 0),
+            "kline_data": kline_data,
+            "today": get_china_time().strftime("%Y-%m-%d"),
+            "get_kline_local": _get_kline_local,
+            "get_realtime_quote": _get_realtime_quote_sync,
+            "indicators": {
+                "calculate_ma": technical_indicators.calculate_ma,
+                "calculate_rsi": technical_indicators.calculate_rsi,
+                "calculate_macd": technical_indicators.calculate_macd,
+                "calculate_kdj": technical_indicators.calculate_kdj,
+                "calculate_bollinger_bands": technical_indicators.calculate_bollinger_bands,
+                "calculate_adx": technical_indicators.calculate_adx,
+                "calculate_atr": technical_indicators.calculate_atr,
+                "calculate_ema": technical_indicators.calculate_ema,
+            },
+        }
+
+        # 执行策略
+        from services.strategy.engine import get_strategy_engine
+        engine = get_strategy_engine()
+        try:
+            signals = engine.execute_strategy(strategy, context)
+        except Exception as e:
+            print(f"[Monitor] 卖出策略 {sell_strategy_id} 执行失败 {stock_code}: {e}")
+            return {"should_sell": False, "reason": f"strategy_execution_error: {e}"}
+
+        # 解析信号：查找卖出信号
+        for signal in signals:
+            if signal.get("action") == "sell":
+                return {
+                    "should_sell": True,
+                    "reason": signal.get("reason", "sell_strategy_code"),
+                    "stop_loss_price": signal.get("stop_loss_price", 0),
+                    "take_profit_price": signal.get("take_profit_price", 0),
+                }
+
+        return {"should_sell": False, "reason": "no_sell_signal"}
+
     async def _evaluate_sell_decision(
         self,
         account_id: str,
         stock_code: str,
         stock: Dict,
         current_price: float,
+        screening_strategy_id: Optional[int] = None,
     ) -> Dict:
         """评估是否应该卖出
 
         决策流程：
         1. 如果有个股策略(trading_strategies) → 执行策略逻辑（动态止盈止损）
-        2. 无个股策略 → 直接使用 watchlist 中的止盈止损价格
+        2. 如果选股策略关联了卖出代码策略 → 执行代码策略
+        3. 无上述配置 → 直接使用 watchlist 中的止盈止损价格
            - 这些价格在选股完成/买入执行时已填入
 
         Returns:
@@ -340,7 +475,21 @@ class TradingMonitor:
             # 未知策略类型，回退到 watchlist
             print(f"[Monitor] {stock_code} 未知策略类型: {strategy_type}，回退到 watchlist")
 
-        # === 优先级 2：watchlist 止盈止损值（选股完成/买入时已填入）===
+        # === 优先级 2：关联的卖出代码策略 ===
+        if screening_strategy_id:
+            sell_strategy_id = await db.fetchval(
+                "SELECT sell_strategy_id FROM strategies WHERE id = ? AND account_id = ?",
+                (screening_strategy_id, account_id),
+            )
+            if sell_strategy_id:
+                code_result = await self._evaluate_sell_strategy_code(
+                    account_id, stock_code, sell_strategy_id, current_price, stock,
+                )
+                if code_result["should_sell"]:
+                    return code_result
+                # 代码策略执行但未触发卖出，继续到优先级 3
+
+        # === 优先级 3：watchlist 止盈止损值（选股完成/买入时已填入）===
         sl = stock.get("stop_loss_price", 0) or 0
         tp = stock.get("take_profit_price", 0) or 0
         result["stop_loss_price"] = float(sl)
@@ -403,7 +552,10 @@ class TradingMonitor:
             )
             if not position:
                 return
-            decision = await self._evaluate_sell_decision(account_id, stock_code, stock, current_price)
+            decision = await self._evaluate_sell_decision(
+                account_id, stock_code, stock, current_price,
+                screening_strategy_id=stock.get("strategy_id"),
+            )
             if decision["should_sell"]:
                 reason = decision["reason"]
                 signal_type = "sell_stop_loss" if reason == "stop_loss" else (
@@ -451,7 +603,10 @@ class TradingMonitor:
             )
             if not position or position.get("quantity", 0) == 0:
                 return
-            decision = await self._evaluate_sell_decision(account_id, stock_code, stock, current_price)
+            decision = await self._evaluate_sell_decision(
+                account_id, stock_code, stock, current_price,
+                screening_strategy_id=stock.get("strategy_id"),
+            )
             if decision["should_sell"]:
                 reason = decision["reason"]
                 signal_type = "sell_stop_loss" if reason == "stop_loss" else (
