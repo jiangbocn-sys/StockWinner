@@ -30,6 +30,8 @@ class TradingMonitor:
         self._account_id = None
         # 冷却期记录：{strategy_id: last_trigger_time}
         self._cooldown: Dict[int, float] = {}
+        # 策略代码编译缓存：{strategy_id: compiled_code}
+        self._strategy_cache: Dict[int, Any] = {}
 
     async def start_monitoring(
         self,
@@ -172,7 +174,7 @@ class TradingMonitor:
         return 300  # 默认 5 分钟
 
     async def _monitor_watchlist(self, account_id: str):
-        """传统的 watchlist 止损止盈监控（批量行情）"""
+        """传统的 watchlist 止损止盈监控（批量行情 + 策略预加载）"""
         db = get_db_manager()
 
         # 获取 watchlist 中的股票
@@ -198,6 +200,68 @@ class TradingMonitor:
                 await self._check_stock_signals(account_id, stock)
             return
 
+        # === 优化 1：一次 SQL JOIN 预加载所有股票的策略配置 ===
+        # P1: trading_strategies（个股策略）
+        ts_rows = await db.fetchall(
+            "SELECT * FROM trading_strategies WHERE account_id = ?",
+            (account_id,),
+        )
+        ts_map: Dict[str, Dict] = {}
+        for ts in ts_rows:
+            code = ts.get("stock_code")
+            if code:
+                ts_map[code] = ts
+
+        # P2: 选股策略关联的卖出代码策略
+        sell_strategy_ids = set()
+        strategy_id_map: Dict[str, Optional[int]] = {}
+        for stock in watchlist:
+            sid = stock.get("strategy_id")
+            sell_sid = None
+            if sid:
+                row = await db.fetchone(
+                    "SELECT sell_strategy_id FROM strategies WHERE id = ? AND account_id = ? AND strategy_type = 'python'",
+                    (sid, account_id),
+                )
+                if row and row.get("sell_strategy_id"):
+                    sell_sid = row["sell_strategy_id"]
+                    sell_strategy_ids.add(sell_sid)
+            strategy_id_map[stock["stock_code"]] = sell_sid
+
+        # 预加载 P2 策略代码到编译缓存
+        if sell_strategy_ids:
+            placeholders = ",".join("?" for _ in sell_strategy_ids)
+            strategies = await db.fetchall(
+                f"SELECT id, code FROM strategies WHERE id IN ({placeholders}) AND strategy_type = 'python'",
+                list(sell_strategy_ids),
+            )
+            for s in strategies:
+                sid = s["id"]
+                code_text = s.get("code", "")
+                if code_text and sid not in self._strategy_cache:
+                    try:
+                        compiled = compile(code_text, f"<strategy_{sid}>", "exec")
+                        self._strategy_cache[sid] = compiled
+                        print(f"[Monitor] 策略 #{sid} 已编译缓存")
+                    except Exception as e:
+                        print(f"[Monitor] 策略 #{sid} 编译失败: {e}")
+                        self._strategy_cache[sid] = None
+
+        # === 优化 2：预加载 K 线缓存 ===
+        kline_cache: Dict[str, Any] = {}
+        try:
+            from services.data.local_data_service import get_local_data_service
+            lds = get_local_data_service()
+            for code in stock_codes:
+                try:
+                    kline = lds.get_kline_data(code, limit=60)
+                    if kline is not None and len(kline) > 0:
+                        kline_cache[code] = kline
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
         # 逐个检查止损止盈
         for stock in watchlist:
             stock_code = stock.get("stock_code")
@@ -207,7 +271,12 @@ class TradingMonitor:
 
             # 注入行情数据到 stock 对象
             stock_with_price = {**stock, "current_price": market_data.current_price}
-            await self._check_stock_signals_with_price(account_id, stock_with_price)
+            await self._check_stock_signals_with_price(
+                account_id, stock_with_price,
+                ts_map=ts_map,
+                sell_strategy_map=strategy_id_map,
+                kline_cache=kline_cache,
+            )
 
     async def _refresh_positions_pnl(self, account_id: str):
         """刷新持仓盈亏（从行情数据更新 current_price）"""
@@ -289,30 +358,65 @@ class TradingMonitor:
         sell_strategy_id: int,
         current_price: float,
         stock: Dict,
+        kline_cache: Optional[Dict[str, Any]] = None,
     ) -> Dict:
         """执行关联的卖出代码策略，返回卖出决策结果
+
+        Args:
+            kline_cache: K 线缓存字典，{stock_code: DataFrame}
 
         Returns:
             {"should_sell": bool, "reason": str, "stop_loss_price": float, "take_profit_price": float}
         """
         db = get_db_manager()
 
-        # 获取策略代码
-        strategy = await db.fetchone(
-            "SELECT * FROM strategies WHERE id = ? AND account_id = ? AND strategy_type = 'python'",
-            (sell_strategy_id, account_id),
-        )
+        # 获取策略配置（优先用编译缓存，其次 DB 查询）
+        strategy_code = None
+        if sell_strategy_id in self._strategy_cache:
+            # 已缓存，策略代码在监控循环预加载阶段已编译
+            # 但仍需要从 DB 获取策略元数据
+            strategy = await db.fetchone(
+                "SELECT id, name FROM strategies WHERE id = ? AND account_id = ? AND strategy_type = 'python'",
+                (sell_strategy_id, account_id),
+            )
+        else:
+            # 未缓存，完整查询
+            strategy = await db.fetchone(
+                "SELECT * FROM strategies WHERE id = ? AND account_id = ? AND strategy_type = 'python'",
+                (sell_strategy_id, account_id),
+            )
+            if strategy:
+                strategy_code = strategy.get("code", "")
+
         if not strategy:
             print(f"[Monitor] 卖出策略 #{sell_strategy_id} 不存在")
             return {"should_sell": False, "reason": "sell_strategy_not_found"}
 
-        # 构建执行上下文
-        from services.data.local_data_service import get_local_data_service
         from services.common import technical_indicators
 
-        lds = get_local_data_service()
+        # === 优化 2：使用 K 线缓存 ===
+        kline_df = None
+        if kline_cache and stock_code in kline_cache:
+            kline_df = kline_cache[stock_code]
+        else:
+            # 缓存未命中，实时查询
+            from services.data.local_data_service import get_local_data_service
+            lds = get_local_data_service()
+            kline_df = lds.get_kline_data(stock_code, limit=60)
+            if kline_df is not None:
+                if kline_cache is not None:
+                    kline_cache[stock_code] = kline_df
+
+        if kline_df is not None and hasattr(kline_df, 'to_dict'):
+            kline_data = kline_df.to_dict('records')
+        else:
+            kline_data = kline_df if kline_df else []
 
         def _get_kline_local(sc, limit=60, start_date=None):
+            if kline_cache and sc in kline_cache:
+                return kline_cache[sc]
+            from services.data.local_data_service import get_local_data_service
+            lds = get_local_data_service()
             return lds.get_kline_data(sc, start_date=start_date, limit=limit)
 
         def _get_kline_local_single(sc, limit=60):
@@ -323,8 +427,6 @@ class TradingMonitor:
 
         def _get_realtime_quote_sync(sc):
             return stock
-
-        kline_data = _get_kline_local_single(stock_code, limit=60)
 
         context = {
             "account_id": account_id,
@@ -378,6 +480,9 @@ class TradingMonitor:
         stock: Dict,
         current_price: float,
         screening_strategy_id: Optional[int] = None,
+        ts_config: Optional[Dict] = None,
+        sell_strategy_id: Optional[int] = None,
+        kline_cache: Optional[Dict[str, Any]] = None,
     ) -> Dict:
         """评估是否应该卖出
 
@@ -386,6 +491,11 @@ class TradingMonitor:
         2. 如果选股策略关联了卖出代码策略 → 执行代码策略
         3. 无上述配置 → 直接使用 watchlist 中的止盈止损价格
            - 这些价格在选股完成/买入执行时已填入
+
+        Args:
+            ts_config: 预加载的 trading_strategies 配置（避免循环内查询）
+            sell_strategy_id: 预加载的卖出策略 ID（避免循环内查询）
+            kline_cache: K 线缓存（避免重复查询）
 
         Returns:
             {
@@ -399,10 +509,13 @@ class TradingMonitor:
         result = {"should_sell": False, "reason": "", "stop_loss_price": 0, "take_profit_price": 0}
 
         # === 优先级 1：检查个股动态策略 ===
-        ts = await db.fetchone(
-            "SELECT * FROM trading_strategies WHERE account_id = ? AND stock_code = ?",
-            (account_id, stock_code),
-        )
+        # 如果传入 ts_config 则使用，否则回退到 DB 查询
+        ts = ts_config
+        if ts is None:
+            ts = await db.fetchone(
+                "SELECT * FROM trading_strategies WHERE account_id = ? AND stock_code = ?",
+                (account_id, stock_code),
+            )
 
         if ts:
             strategy_type = ts.get("strategy_type", "fixed")
@@ -477,13 +590,16 @@ class TradingMonitor:
 
         # === 优先级 2：关联的卖出代码策略 ===
         if screening_strategy_id:
-            sell_strategy_id = await db.fetchval(
-                "SELECT sell_strategy_id FROM strategies WHERE id = ? AND account_id = ?",
-                (screening_strategy_id, account_id),
-            )
+            # 如果传入 sell_strategy_id 则使用，否则回退到 DB 查询
+            if sell_strategy_id is None:
+                sell_strategy_id = await db.fetchval(
+                    "SELECT sell_strategy_id FROM strategies WHERE id = ? AND account_id = ?",
+                    (screening_strategy_id, account_id),
+                )
             if sell_strategy_id:
                 code_result = await self._evaluate_sell_strategy_code(
                     account_id, stock_code, sell_strategy_id, current_price, stock,
+                    kline_cache=kline_cache,
                 )
                 if code_result["should_sell"]:
                     return code_result
@@ -571,10 +687,20 @@ class TradingMonitor:
                     signal_type, target_quantity
                 )
 
-    async def _check_stock_signals_with_price(self, account_id: str, stock: Dict):
+    async def _check_stock_signals_with_price(
+        self, account_id: str, stock: Dict,
+        ts_map: Optional[Dict[str, Dict]] = None,
+        sell_strategy_map: Optional[Dict[str, Optional[int]]] = None,
+        kline_cache: Optional[Dict[str, Any]] = None,
+    ):
         """
         检查单只股票的交易信号（行情已预取版本）
         stock 对象中需包含 current_price 字段
+
+        Args:
+            ts_map: 预加载的 trading_strategies 配置
+            sell_strategy_map: 预加载的卖出策略 ID 映射
+            kline_cache: K 线缓存
         """
         stock_code = stock.get('stock_code')
         buy_price = stock.get('buy_price', 0)
@@ -603,9 +729,17 @@ class TradingMonitor:
             )
             if not position or position.get("quantity", 0) == 0:
                 return
+
+            # 使用预加载的策略配置（如果传入）
+            ts_config = ts_map.get(stock_code) if ts_map else None
+            sell_sid = sell_strategy_map.get(stock_code) if sell_strategy_map else None
+
             decision = await self._evaluate_sell_decision(
                 account_id, stock_code, stock, current_price,
                 screening_strategy_id=stock.get("strategy_id"),
+                ts_config=ts_config,
+                sell_strategy_id=sell_sid,
+                kline_cache=kline_cache,
             )
             if decision["should_sell"]:
                 reason = decision["reason"]

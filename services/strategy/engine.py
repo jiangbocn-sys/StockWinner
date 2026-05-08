@@ -83,6 +83,9 @@ def _restricted_import(name, globals=None, locals=None, fromlist=(), level=0):
 class StrategyEngine:
     """策略执行引擎"""
 
+    def __init__(self):
+        self._compile_cache: Dict[str, Any] = {}  # {code_hash: compiled_code}
+
     def execute_strategy(self, strategy: Dict, context: Dict) -> List[Dict]:
         """
         执行一条 Python 代码型策略
@@ -116,9 +119,21 @@ class StrategyEngine:
         # 构建执行环境
         env = self._build_env(context)
 
-        # 执行代码（定义函数）
+        # 策略编译缓存：避免重复解析和编译代码
+        code_hash = str(strategy.get("id", hash(code)))
+        compiled = self._compile_cache.get(code_hash)
+        if compiled is None:
+            try:
+                compiled = compile(code, f"<strategy_{strategy.get('id', 'unknown')}>", "exec")
+                self._compile_cache[code_hash] = compiled
+            except SyntaxError as e:
+                raise ValueError(f"策略代码语法错误: {e}")
+        else:
+            compiled = compiled
+
+        # 执行编译后的代码（定义函数）
         try:
-            exec(code, env)
+            exec(compiled, env)
         except SyntaxError as e:
             raise ValueError(f"策略代码语法错误: {e}")
 
