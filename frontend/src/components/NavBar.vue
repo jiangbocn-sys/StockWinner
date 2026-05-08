@@ -4,7 +4,7 @@
       <!-- Logo -->
       <div class="logo">
         <el-icon :size="24"><TrendCharts /></el-icon>
-        <span>StockWinner v6.2.3</span>
+        <span>StockWinner</span>
       </div>
 
       <!-- 导航菜单 -->
