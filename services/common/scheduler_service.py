@@ -896,10 +896,8 @@ class SchedulerService:
                         stop_loss = strategy.get("stop_loss", "-")
                         take_profit = strategy.get("take_profit", "-")
 
-                        # 同步发送飞书通知（使用 httpx 替代 asyncio.run）
-                        from services.common.database import get_db_manager
+                        # 同步发送飞书通知（使用新事件循环）
                         from services.notifications.channels.feishu import FeishuWebhookChannel
-                        from services.common.timezone import get_china_time
 
                         db = get_db_manager()
                         configs = await db.fetchall(
@@ -910,7 +908,6 @@ class SchedulerService:
                         if configs:
                             config = configs[0]
                             if config.get("notify_on_task", 1):
-                                channel = FeishuWebhookChannel(config["webhook_url"])
                                 content = (
                                     f"**股票代码：** {stock_code}\n"
                                     f"**股票名称：** {stock_name}\n"
@@ -921,13 +918,23 @@ class SchedulerService:
                                     f"**止损价：** {stop_loss}\n"
                                     f"**止盈价：** {take_profit}"
                                 )
-                                await channel.send(
-                                    account_id=account_id,
-                                    title="盘后分析",
-                                    content=content,
-                                    color="purple",
-                                    event_type="post_market_analysis",
-                                )
+
+                                def _send_feishu():
+                                    loop = asyncio.new_event_loop()
+                                    asyncio.set_event_loop(loop)
+                                    try:
+                                        channel = FeishuWebhookChannel(config["webhook_url"])
+                                        loop.run_until_complete(channel.send(
+                                            account_id=account_id,
+                                            title="盘后分析",
+                                            content=content,
+                                            color="purple",
+                                            event_type="post_market_analysis",
+                                        ))
+                                    finally:
+                                        loop.close()
+
+                                _send_feishu()
 
                         total_analyzed += 1
                         logger.info(f"分析完成: {stock_code} {stock_name}")
