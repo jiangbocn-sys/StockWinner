@@ -764,17 +764,25 @@ class SchedulerService:
             dsa_base_url = "http://localhost:8000"
             total_analyzed = 0
             total_failed = 0
+            max_wait = 300
+            interval = 5
 
             for idx, account_id in enumerate(account_positions.keys()):
                 stocks = account_positions[account_id]
                 logger.info(f"分析账户 {account_id}: {len(stocks)} 只持仓股")
 
-                for stock in stocks:
+                for stock_idx, stock in enumerate(stocks):
                     stock_code = stock['stock_code']
                     stock_name = stock['stock_name']
-                    current = idx + 1 if account_id == list(account_positions.keys())[0] else sum(
-                        len(s) for aid, s in account_positions.items() if aid != account_id
-                    ) + list(stocks).index(stock) + 1
+
+                    # 计算当前是第几只股票（全局序号）
+                    current = 0
+                    for aid, s_list in account_positions.items():
+                        if aid == account_id:
+                            current += stock_idx + 1
+                            break
+                        current += len(s_list)
+
                     progress_pct = int((current / total_count) * 100)
                     task_manager.update_progress(
                         task_type, progress_pct,
@@ -782,81 +790,104 @@ class SchedulerService:
                     )
 
                     try:
-                        with httpx.Client(timeout=30) as client:
-                            resp = client.post(
-                                f"{dsa_base_url}/api/v1/analysis/analyze",
-                                json={
-                                    "stock_code": stock_code,
-                                    "report_type": "detailed",
-                                    "async_mode": True,
-                                }
+                        # 检查当日是否已有分析报告
+                        today = get_china_time().strftime('%Y-%m-%d')
+                        report_data = None
+
+                        with httpx.Client(timeout=30) as hist_client:
+                            hist_resp = hist_client.get(
+                                f"{dsa_base_url}/api/v1/history",
+                                params={"limit": 100}
                             )
-                            if resp.status_code not in (200, 202):
-                                logger.warning(f"DSA 提交失败 ({stock_code}): {resp.status_code}")
-                                total_failed += 1
-                                continue
+                            if hist_resp.status_code == 200:
+                                hist_data = hist_resp.json()
+                                for item in hist_data.get("items", []):
+                                    if (item.get("stock_code") == stock_code and
+                                            item.get("created_at", "").startswith(today)):
+                                        # 已有今日报告，直接使用
+                                        record_id = item["id"]
+                                        report_resp = hist_client.get(
+                                            f"{dsa_base_url}/api/v1/history/{record_id}"
+                                        )
+                                        if report_resp.status_code == 200:
+                                            report_data = report_resp.json()
+                                            logger.info(f"使用今日已有报告: {stock_code} {stock_name}")
+                                        break
 
-                            task_data = resp.json()
-                            task_id_dsa = task_data.get("task_id")
-                            if not task_id_dsa:
-                                logger.warning(f"DSA 未返回 task_id ({stock_code})")
-                                total_failed += 1
-                                continue
-
-                        result_data = None
-                        max_wait = 300
-                        waited = 0
-                        interval = 5
-
-                        with httpx.Client(timeout=30) as client:
-                            while waited < max_wait:
-                                time.sleep(interval)
-                                waited += interval
-
-                                status_resp = client.get(
-                                    f"{dsa_base_url}/api/v1/analysis/status/{task_id_dsa}"
+                        if report_data is None:
+                            # 无今日报告，提交新的分析任务
+                            with httpx.Client(timeout=30) as client:
+                                resp = client.post(
+                                    f"{dsa_base_url}/api/v1/analysis/analyze",
+                                    json={
+                                        "stock_code": stock_code,
+                                        "report_type": "detailed",
+                                        "async_mode": True,
+                                    }
                                 )
-                                if status_resp.status_code != 200:
+                                if resp.status_code not in (200, 202):
+                                    logger.warning(f"DSA 提交失败 ({stock_code}): {resp.status_code}")
+                                    total_failed += 1
                                     continue
 
-                                status_data = status_resp.json()
-                                status = status_data.get("status")
-
-                                if status == "completed":
-                                    # DSA 的 status 接口 result 为 null，需从 history 获取报告
-                                    with httpx.Client(timeout=30) as hist_client:
-                                        hist_resp = hist_client.get(
-                                            f"{dsa_base_url}/api/v1/history",
-                                            params={"query_id": task_id_dsa, "limit": 1}
-                                        )
-                                        if hist_resp.status_code == 200:
-                                            hist_data = hist_resp.json()
-                                            items = hist_data.get("items", [])
-                                            if items:
-                                                record_id = items[0]["id"]
-                                                report_resp = hist_client.get(
-                                                    f"{dsa_base_url}/api/v1/history/{record_id}"
-                                                )
-                                                if report_resp.status_code == 200:
-                                                    result_data = report_resp.json()
-                                    break
-                                elif status == "failed":
-                                    logger.warning(
-                                        f"DSA 分析失败 ({stock_code}): {status_data.get('error', 'unknown')}"
-                                    )
+                                task_data = resp.json()
+                                task_id_dsa = task_data.get("task_id")
+                                if not task_id_dsa:
+                                    logger.warning(f"DSA 未返回 task_id ({stock_code})")
                                     total_failed += 1
-                                    break
+                                    continue
 
-                        if result_data is None and waited >= max_wait:
-                            logger.warning(f"DSA 分析超时 ({stock_code}), 等待 {max_wait}s")
-                            total_failed += 1
+                            # 轮询等待分析完成（最多 5 分钟）
+                            waited = 0
+
+                            with httpx.Client(timeout=30) as client:
+                                while waited < max_wait:
+                                    time.sleep(interval)
+                                    waited += interval
+
+                                    status_resp = client.get(
+                                        f"{dsa_base_url}/api/v1/analysis/status/{task_id_dsa}"
+                                    )
+                                    if status_resp.status_code != 200:
+                                        continue
+
+                                    status_data = status_resp.json()
+                                    status = status_data.get("status")
+
+                                    if status == "completed":
+                                        with httpx.Client(timeout=30) as hist_client:
+                                            hist_resp = hist_client.get(
+                                                f"{dsa_base_url}/api/v1/history",
+                                                params={"query_id": task_id_dsa, "limit": 1}
+                                            )
+                                            if hist_resp.status_code == 200:
+                                                hist_data = hist_resp.json()
+                                                items = hist_data.get("items", [])
+                                                if items:
+                                                    record_id = items[0]["id"]
+                                                    report_resp = hist_client.get(
+                                                        f"{dsa_base_url}/api/v1/history/{record_id}"
+                                                    )
+                                                    if report_resp.status_code == 200:
+                                                        report_data = report_resp.json()
+                                        break
+                                    elif status == "failed":
+                                        logger.warning(
+                                            f"DSA 分析失败 ({stock_code}): {status_data.get('error', 'unknown')}"
+                                        )
+                                        total_failed += 1
+                                        break
+
+                            if report_data is None and waited >= max_wait:
+                                logger.warning(f"DSA 分析超时 ({stock_code}), 等待 {max_wait}s")
+                                total_failed += 1
+                                continue
+
+                        if report_data is None:
                             continue
 
-                        if result_data is None:
-                            continue
-
-                        summary = result_data.get("summary", {})
-                        strategy = result_data.get("strategy", {})
+                        summary = report_data.get("summary", {})
+                        strategy = report_data.get("strategy", {})
 
                         analysis_summary = summary.get("analysis_summary", "暂无分析")
                         operation_advice = summary.get("operation_advice", "暂无建议")
@@ -865,22 +896,38 @@ class SchedulerService:
                         stop_loss = strategy.get("stop_loss", "-")
                         take_profit = strategy.get("take_profit", "-")
 
-                        from services.notifications import get_notification_service
-                        notification = get_notification_service()
-                        asyncio.run(notification.emit(
-                            event_type="post_market_analysis",
-                            account_id=account_id,
-                            payload={
-                                "stock_code": stock_code,
-                                "stock_name": stock_name,
-                                "analysis_summary": analysis_summary,
-                                "operation_advice": operation_advice,
-                                "sentiment_label": sentiment_label,
-                                "ideal_buy": ideal_buy,
-                                "stop_loss": stop_loss,
-                                "take_profit": take_profit,
-                            },
-                        ))
+                        # 同步发送飞书通知（使用 httpx 替代 asyncio.run）
+                        from services.common.database import get_db_manager
+                        from services.notifications.channels.feishu import FeishuWebhookChannel
+                        from services.common.timezone import get_china_time
+
+                        db = get_db_manager()
+                        configs = await db.fetchall(
+                            "SELECT * FROM notification_config WHERE account_id = ? AND enabled = 1",
+                            (account_id,),
+                        )
+
+                        if configs:
+                            config = configs[0]
+                            if config.get("notify_on_task", 1):
+                                channel = FeishuWebhookChannel(config["webhook_url"])
+                                content = (
+                                    f"**股票代码：** {stock_code}\n"
+                                    f"**股票名称：** {stock_name}\n"
+                                    f"**市场情绪：** {sentiment_label}\n"
+                                    f"**分析摘要：** {analysis_summary}\n"
+                                    f"**操作建议：** {operation_advice}\n"
+                                    f"**理想买入：** {ideal_buy}\n"
+                                    f"**止损价：** {stop_loss}\n"
+                                    f"**止盈价：** {take_profit}"
+                                )
+                                await channel.send(
+                                    account_id=account_id,
+                                    title="盘后分析",
+                                    content=content,
+                                    color="purple",
+                                    event_type="post_market_analysis",
+                                )
 
                         total_analyzed += 1
                         logger.info(f"分析完成: {stock_code} {stock_name}")
