@@ -23,18 +23,22 @@ async def execute(task_id: int = None, **kwargs):
 
     scheduler = get_scheduler()
 
-    # 直接执行，等待完成
-    scheduler._daily_kline_check_job()
-
-    result = {'success': True, 'message': 'K线增量检查完成'}
+    # 直接执行，等待完成，并根据实际结果更新状态
+    try:
+        scheduler._daily_kline_check_job()
+        result = {'success': True, 'message': 'K线增量检查完成'}
+        status = 'success'
+    except Exception as e:
+        result = {'success': False, 'message': f'K线增量检查异常: {e}'}
+        status = 'error'
 
     # 更新数据库任务状态
     if task_id is not None:
         db = get_db_manager()
         output = json.dumps(result, ensure_ascii=False)
         await db.execute(
-            "UPDATE strategy_tasks SET last_status = 'success', last_output = ?, updated_at = ? WHERE id = ?",
-            (output, get_china_time().isoformat(), task_id)
+            "UPDATE strategy_tasks SET last_status = ?, last_output = ?, updated_at = ? WHERE id = ?",
+            (status, output, get_china_time().isoformat(), task_id)
         )
 
     return result

@@ -413,13 +413,41 @@ class SchedulerService:
             task_manager.start_task(TaskType.DATA_DOWNLOAD)
             task_manager.update_progress(TaskType.DATA_DOWNLOAD, 5, "正在初始化...")
 
-            # 在当前线程执行（因为是后台任务）
             from services.data.local_data_service import download_incremental_kline_data_sync
             from dotenv import load_dotenv
             load_dotenv()
 
-            # 执行增量下载（行业指数随K线一起下载）
-            success = download_incremental_kline_data_sync()
+            # 检测是否已有运行中的 event loop（如从 _execute_strategy_task 调用时）
+            # 如果有，需要在独立线程中执行 sync 版本，sync 版本内部会创建新 loop
+            try:
+                asyncio.get_running_loop()
+                has_running_loop = True
+            except RuntimeError:
+                has_running_loop = False
+
+            if has_running_loop:
+                # 在新线程中执行，避免 run_until_complete 嵌套冲突
+                # task_manager 状态由外层管理（单例跨线程共享）
+                import concurrent.futures
+                result_container = [None]
+                error_container = [None]
+
+                def _run_download():
+                    try:
+                        result_container[0] = download_incremental_kline_data_sync()
+                    except Exception as e:
+                        error_container[0] = e
+
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                    future = executor.submit(_run_download)
+                    future.result()  # 等待下载完成
+
+                if error_container[0]:
+                    raise error_container[0]
+                success = result_container[0]
+            else:
+                # 直接执行（APScheduler 线程或独立进程）
+                success = download_incremental_kline_data_sync()
 
             # 更新任务状态
             result = {'success': success, 'message': '下载完成' if success else '部分下载失败'}
@@ -433,7 +461,6 @@ class SchedulerService:
 
         except Exception as e:
             logger.error(f"K线下载失败: {e}", exc_info=True)
-            # 重置任务状态，避免前端卡在旧状态
             try:
                 task_manager.reset_task(TaskType.DATA_DOWNLOAD)
             except Exception:
