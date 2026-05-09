@@ -903,16 +903,16 @@ class LocalKlineDataService:
                 latest_date = rows[-1].get('trade_date') if rows else None
                 if latest_date != today:
                     q = realtime_quotes[code]
-                rows.append({
-                    'stock_code': code,
-                    'trade_date': today,
-                    'open': q.get('open', 0),
-                    'high': q.get('high', 0),
-                    'low': q.get('low', 0),
-                    'close': q.get('close', 0),
-                    'volume': q.get('volume', 0),
-                    'amount': q.get('amount', 0),
-                })
+                    rows.append({
+                        'stock_code': code,
+                        'trade_date': today,
+                        'open': q.get('open', 0),
+                        'high': q.get('high', 0),
+                        'low': q.get('low', 0),
+                        'close': q.get('close', 0),
+                        'volume': q.get('volume', 0),
+                        'amount': q.get('amount', 0),
+                    })
 
             # 确保总条数不超过 lookback
             if len(rows) > lookback:

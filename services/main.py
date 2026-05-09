@@ -450,7 +450,7 @@ async def global_exception_handler(request: Request, exc: Exception):
     print(f"异常：{request.method} {request.url} - {str(exc)}")
     return JSONResponse(
         status_code=500,
-        content={"success": False, "message": f"服务器内部错误：{str(exc)}"}
+        content={"success": False, "message": "服务器内部错误"}
     )
 
 
@@ -477,7 +477,7 @@ app.include_router(notifications.router)  # 通知 API 路由
 app.include_router(strategy_performance.router)  # 策略效能评估 API 路由
 
 # 挂载前端静态文件
-frontend_dist = "/home/bobo/StockWinner/frontend/dist"
+frontend_dist = os.environ.get("FRONTEND_DIST", "/home/bobo/StockWinner/frontend/dist")
 if os.path.exists(frontend_dist):
     app.mount("/ui", StaticFiles(directory=frontend_dist, html=True), name="frontend")
 

@@ -269,9 +269,6 @@ class SchedulerService:
         elif pe_ratio < 0.85:  # PE填充率低于85%
             need_update = True
             logger.info(f"报告期 {expected_report} PE填充率仅 {pe_ratio*100:.1f}%（{has_pe}/{total}），需要更新")
-        elif total > 0 and has_pe < total * 0.5:  # PE填充率低于50%
-            need_update = True
-            logger.info(f"报告期 {expected_report} PE填充率仅 {has_pe/total*100:.1f}%，需要补充")
 
         return {
             'latest_report_period': latest_report,
@@ -399,10 +396,10 @@ class SchedulerService:
         """执行K线增量下载"""
         logger.info("开始K线增量下载...")
 
-        try:
-            from services.common.task_manager import get_task_manager, TaskType
+        from services.common.task_manager import get_task_manager, TaskType
+        task_manager = get_task_manager()
 
-            task_manager = get_task_manager()
+        try:
 
             # 检查是否有正在运行的下载任务
             if task_manager.is_running(TaskType.DATA_DOWNLOAD):
@@ -471,10 +468,10 @@ class SchedulerService:
         """执行日频因子计算"""
         logger.info(f"开始日频因子计算: {start_date or '全部'} 至 {end_date}, 强制全量={force_full}")
 
-        try:
-            from services.common.task_manager import get_task_manager, TaskType
+        from services.common.task_manager import get_task_manager, TaskType
+        task_manager = get_task_manager()
 
-            task_manager = get_task_manager()
+        try:
 
             # 检查是否有正在运行的因子计算任务
             if task_manager.is_running(TaskType.DAILY_FACTOR_CALC):

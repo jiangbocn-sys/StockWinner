@@ -12,6 +12,7 @@
 """
 
 import asyncio
+import time
 from typing import Dict, List, Optional, Any
 from services.common.database import get_db_manager
 from services.common.timezone import get_china_time
@@ -126,10 +127,9 @@ class TradingMonitor:
 
         for decision in decisions:
             strategy_id = decision["strategy_id"]
-            cooldown_seconds = self._get_cooldown_for_strategy(strategy_id)
+            cooldown_seconds = await self._get_cooldown_for_strategy(strategy_id)
 
             # 检查冷却期
-            import time
             last_trigger = self._cooldown.get(strategy_id, 0)
             if time.time() - last_trigger < cooldown_seconds:
                 continue  # 冷却期内，跳过
@@ -156,19 +156,16 @@ class TradingMonitor:
                     trigger_source=decision["strategy_name"],
                 )
 
-    def _get_cooldown_for_strategy(self, strategy_id: int) -> int:
+    async def _get_cooldown_for_strategy(self, strategy_id: int) -> int:
         """获取策略的冷却时间"""
-        import sqlite3
-        from pathlib import Path
-        db_path = Path(__file__).parent.parent.parent / "data" / "stockwinner.db"
         try:
-            conn = sqlite3.connect(str(db_path))
-            cursor = conn.cursor()
-            cursor.execute("SELECT cooldown_seconds FROM trading_strategy_config WHERE id = ?", (strategy_id,))
-            row = cursor.fetchone()
-            conn.close()
-            if row:
-                return row[0]
+            db = get_db_manager()
+            row = await db.fetchone(
+                "SELECT cooldown_seconds FROM trading_strategy_config WHERE id = ?",
+                (strategy_id,)
+            )
+            if row and row.get("cooldown_seconds"):
+                return row["cooldown_seconds"]
         except Exception:
             pass
         return 300  # 默认 5 分钟
@@ -373,10 +370,9 @@ class TradingMonitor:
         # 获取策略配置（优先用编译缓存，其次 DB 查询）
         strategy_code = None
         if sell_strategy_id in self._strategy_cache:
-            # 已缓存，策略代码在监控循环预加载阶段已编译
-            # 但仍需要从 DB 获取策略元数据
+            # 已缓存，但仍需从 DB 获取代码和元数据
             strategy = await db.fetchone(
-                "SELECT id, name FROM strategies WHERE id = ? AND account_id = ? AND strategy_type = 'python'",
+                "SELECT id, name, code FROM strategies WHERE id = ? AND account_id = ? AND strategy_type = 'python'",
                 (sell_strategy_id, account_id),
             )
         else:
@@ -684,7 +680,7 @@ class TradingMonitor:
                 await self._create_pending_signal(account_id, stock, signal_type, current_price, 0)
                 await self._execute_sell_signal(
                     account_id, stock, current_price,
-                    signal_type, target_quantity
+                    signal_type, 0  # 0 = 全部卖出
                 )
 
     async def _check_stock_signals_with_price(
@@ -753,7 +749,7 @@ class TradingMonitor:
                 await self._create_pending_signal(account_id, stock, signal_type, current_price, 0)
                 await self._execute_sell_signal(
                     account_id, stock, current_price,
-                    signal_type, target_quantity
+                    signal_type, 0  # 0 = 全部卖出
                 )
 
     async def _execute_buy_signal(
@@ -957,15 +953,17 @@ class TradingMonitor:
         if status == "executed":
             await db.execute(
                 "UPDATE trading_signals SET status = ?, target_quantity = ?, executed_at = ? "
+                "WHERE rowid = (SELECT rowid FROM trading_signals "
                 "WHERE account_id = ? AND stock_code = ? AND status = 'pending' "
-                "ORDER BY created_at DESC LIMIT 1",
+                "ORDER BY created_at DESC LIMIT 1)",
                 (status, quantity, now, account_id, stock_code),
             )
         else:
             await db.execute(
                 "UPDATE trading_signals SET status = ?, executed_at = ? "
+                "WHERE rowid = (SELECT rowid FROM trading_signals "
                 "WHERE account_id = ? AND stock_code = ? AND status = 'pending' "
-                "ORDER BY created_at DESC LIMIT 1",
+                "ORDER BY created_at DESC LIMIT 1)",
                 (status, now, account_id, stock_code),
             )
 

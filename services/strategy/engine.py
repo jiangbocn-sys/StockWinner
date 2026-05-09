@@ -10,9 +10,7 @@
 """
 
 import ast
-import asyncio
-import types
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional
 
 from services.common.database import get_db_manager
 from services.common.stock_code import normalize_stock_code
@@ -47,7 +45,6 @@ ALLOWED_BUILTINS = {
     "all": all,
     "isinstance": isinstance,
     "issubclass": issubclass,
-    "type": type,
     "print": print,
     "True": True,
     "False": False,
@@ -63,7 +60,7 @@ ALLOWED_BUILTINS = {
 ALLOWED_MODULES = {
     "pandas", "numpy", "datetime", "statistics", "json", "math", "re",
     "collections", "itertools", "functools", "dataclasses", "typing",
-    "time", "calendar", "decimal", "copy", "string", "sqlite3",
+    "time", "calendar", "decimal", "copy", "string",
 }
 
 # 黑名单：禁止使用的函数
@@ -84,7 +81,7 @@ class StrategyEngine:
     """策略执行引擎"""
 
     def __init__(self):
-        self._compile_cache: Dict[str, Any] = {}  # {code_hash: compiled_code}
+        self._compile_cache: Dict[str, object] = {}  # {code_hash: compiled_code}
 
     def execute_strategy(self, strategy: Dict, context: Dict) -> List[Dict]:
         """
@@ -119,8 +116,8 @@ class StrategyEngine:
         # 构建执行环境
         env = self._build_env(context)
 
-        # 策略编译缓存：避免重复解析和编译代码
-        code_hash = str(strategy.get("id", hash(code)))
+        # 策略编译缓存：基于代码内容哈希，代码修改后自动重新编译
+        code_hash = hash(code)
         compiled = self._compile_cache.get(code_hash)
         if compiled is None:
             try:
@@ -128,14 +125,12 @@ class StrategyEngine:
                 self._compile_cache[code_hash] = compiled
             except SyntaxError as e:
                 raise ValueError(f"策略代码语法错误: {e}")
-        else:
-            compiled = compiled
 
         # 执行编译后的代码（定义函数）
         try:
             exec(compiled, env)
         except SyntaxError as e:
-            raise ValueError(f"策略代码语法错误: {e}")
+            raise ValueError(f"策略代码语法错误: {e}") from e
 
         # 获取入口函数
         func = env.get(function_name)
@@ -146,7 +141,7 @@ class StrategyEngine:
         try:
             result = func(context)
         except Exception as e:
-            raise RuntimeError(f"策略执行错误: {e}")
+            raise RuntimeError(f"策略执行错误: {e}") from e
 
         # 验证返回值
         if result is None:
@@ -292,6 +287,34 @@ class StrategyEngine:
         # 注入工具函数
         env["normalize_stock_code"] = normalize_stock_code
         env["get_db_manager"] = get_db_manager
+
+        # 注入同步数据库访问函数（只读，替代直接 import sqlite3）
+        def _query_db(sql: str, params: tuple = None):
+            """同步执行 SQL 查询（只读）。返回 List[Dict]（SELECT）或 int（影响行数）。"""
+            import sqlite3
+            from services.common.database import DB_PATH
+            conn = sqlite3.connect(str(DB_PATH))
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            try:
+                if params:
+                    cursor.execute(sql, params)
+                else:
+                    cursor.execute(sql)
+                if sql.strip().upper().startswith("SELECT"):
+                    rows = [dict(r) for r in cursor.fetchall()]
+                    conn.close()
+                    return rows
+                else:
+                    conn.commit()
+                    count = cursor.rowcount
+                    conn.close()
+                    return count
+            except Exception:
+                conn.close()
+                raise
+
+        env["query_db"] = _query_db
 
         # 注入技术指标工具
         env["indicators"] = context.get("indicators", {})

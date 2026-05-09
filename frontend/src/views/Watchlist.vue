@@ -621,6 +621,8 @@ const stockSearchResults = ref([])
 // 可调分栏宽度
 const leftPanelWidth = ref(260)
 const isResizing = ref(false)
+const resizeMouseMoveRef = ref(null)
+const resizeMouseUpRef = ref(null)
 
 const startResize = (e) => {
   isResizing.value = true
@@ -635,8 +637,12 @@ const startResize = (e) => {
     isResizing.value = false
     document.removeEventListener('mousemove', onMouseMove)
     document.removeEventListener('mouseup', onMouseUp)
+    resizeMouseMoveRef.value = null
+    resizeMouseUpRef.value = null
     document.querySelector('.split-handle')?.classList.remove('active')
   }
+  resizeMouseMoveRef.value = onMouseMove
+  resizeMouseUpRef.value = onMouseUp
   document.addEventListener('mousemove', onMouseMove)
   document.addEventListener('mouseup', onMouseUp)
 }
@@ -1154,16 +1160,24 @@ const batchRemoveSelected = async () => {
       '批量移除确认',
       { type: 'warning', confirmButtonText: '确认移除', cancelButtonText: '取消' }
     )
+  } catch (e) {
+    // 用户取消
+    return
+  }
+  try {
     for (const row of selectedStocks.value) {
       const url = `/api/v1/ui/${currentAccountId.value}/watchlist/${row.stock_code}?group_id=${selectedGroupId.value}`
-      await fetch(url, { method: 'DELETE' })
+      const res = await fetch(url, { method: 'DELETE' })
+      if (!res.ok) {
+        ElMessage.error(`移除 ${row.stock_code} 失败: ${res.status}`)
+      }
     }
     ElMessage.success('已批量移除')
     selectedStocks.value = []
     await loadCurrentGroupStocks()
     await loadGroups()
   } catch (e) {
-    // 取消
+    ElMessage.error('批量移除异常: ' + e.message)
   }
 }
 
@@ -1422,7 +1436,12 @@ const getStatusType = (status) => ({ pending: 'info', watching: 'warning', bough
 const getStatusText = (status) => ({ pending: '待交易', watching: '观察中', bought: '已买入', sold: '已卖出', ignored: '已忽略' }[status] || status)
 
 import { onUnmounted } from 'vue'
-onUnmounted(() => { if (progressPollingTimer) { clearInterval(progressPollingTimer); progressPollingTimer = null } })
+onUnmounted(() => {
+  if (progressPollingTimer) { clearInterval(progressPollingTimer); progressPollingTimer = null }
+  if (resizeMouseMoveRef.value) document.removeEventListener('mousemove', resizeMouseMoveRef.value)
+  if (resizeMouseUpRef.value) document.removeEventListener('mouseup', resizeMouseUpRef.value)
+  isResizing.value = false
+})
 
 onMounted(async () => {
   await checkServiceStatus()
