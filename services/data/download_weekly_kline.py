@@ -231,17 +231,6 @@ async def _download_batch(
     total_stocks = len(stocks)
     total_saved = 0
 
-    # 构建市场级交易周参考表（一次构建，所有股票共用）
-    start_date_str = f"{start_date_int:08d}"
-    start_date_str = f"{start_date_str[:4]}-{start_date_str[4:6]}-{start_date_str[6:8]}"
-    end_date_str = f"{end_date_int:08d}"
-    end_date_str = f"{end_date_str[:4]}-{end_date_str[4:6]}-{end_date_str[6:8]}"
-    week_calendar = _build_market_week_calendar(
-        cursor, datetime.strptime(start_date_str, '%Y-%m-%d'), datetime.strptime(end_date_str, '%Y-%m-%d')
-    )
-    if week_calendar:
-        print(f"[WeeklyKline] 交易周参考: {week_calendar[0][2]} ~ {week_calendar[-1][3]} 共 {len(week_calendar)} 周")
-
     for i in range(0, total_stocks, batch_size):
         batch = stocks[i:i + batch_size]
         batch_codes = [s.get('stock_code') for s in batch]
@@ -279,7 +268,7 @@ async def _download_batch(
                         stock_name = s.get('stock_name', '')
                         break
 
-                saved = _save_weekly_data(cursor, code, stock_name, data, week_calendar)
+                saved = _save_weekly_data(cursor, code, stock_name, data)
                 total_saved += saved
 
             conn.commit()
@@ -304,22 +293,6 @@ async def _download_incremental(
     # 计算增量下载的起止日期
     end_dt_str = str(end_date_int).zfill(8)
     end_dt_str = f"{end_dt_str[:4]}-{end_dt_str[4:6]}-{end_dt_str[6:8]}"
-
-    # 找到所有股票中最早的起始日期，用于构建交易周参考表
-    earliest_start = None
-    for s in stocks:
-        latest = latest_map.get(s['stock_code'])
-        if latest:
-            start_dt = datetime.strptime(latest, '%Y-%m-%d') + timedelta(days=7)
-            if earliest_start is None or start_dt < earliest_start:
-                earliest_start = start_dt
-    if earliest_start is None:
-        return
-    earliest_start_str = earliest_start.strftime('%Y-%m-%d')
-
-    week_calendar = _build_market_week_calendar(
-        cursor, earliest_start, datetime.strptime(end_dt_str, '%Y-%m-%d')
-    )
 
     for i in range(0, total_stocks, batch_size):
         batch = stocks[i:i + batch_size]
@@ -366,7 +339,7 @@ async def _download_incremental(
 
                 data = kline_data.get(code)
                 if data is not None and len(data) > 0:
-                    saved = _save_weekly_data(cursor, code, stock_name, data, week_calendar, latest)
+                    saved = _save_weekly_data(cursor, code, stock_name, data, skip_existing_before=latest)
                     total_saved += saved
 
             except Exception as e:
@@ -378,13 +351,60 @@ async def _download_incremental(
     print(f"[WeeklyKline] 增量更新完成，保存 {total_saved} 条记录")
 
 
+def _build_stock_week_calendar(cursor, code: str,
+                                start_dt: datetime = None,
+                                end_dt: datetime = None) -> list:
+    """从个股自身的日K线数据构建交易周参考表
+
+    按 ISO 周分组该股票的交易日，返回 [(iso_year, iso_week, week_start, week_end), ...]
+    其中 week_start/end 是该股票实际最早/最晚交易日。
+
+    关键：个股可能停牌，只有用个股自身的交易日构建日历，SDK 返回的周K bar
+    数量才会与日历周数一一对应。市场级日历会包含停牌周，导致映射错位。
+    """
+    if start_dt and end_dt:
+        cursor.execute("""
+            SELECT DISTINCT trade_date FROM kline_data
+            WHERE stock_code = ? AND trade_date >= ? AND trade_date <= ?
+            ORDER BY trade_date
+        """, (code, start_dt.strftime('%Y-%m-%d'), end_dt.strftime('%Y-%m-%d')))
+    else:
+        cursor.execute("""
+            SELECT DISTINCT trade_date FROM kline_data
+            WHERE stock_code = ?
+            ORDER BY trade_date
+        """, (code,))
+    trade_days = [r[0] for r in cursor.fetchall()]
+
+    if not trade_days:
+        return []
+
+    # 按 ISO 周分组
+    weeks = {}
+    for day_str in trade_days:
+        d = datetime.strptime(day_str, '%Y-%m-%d')
+        iso_year, iso_week, _ = d.isocalendar()
+        key = (iso_year, iso_week)
+        if key not in weeks:
+            weeks[key] = [day_str]
+        else:
+            weeks[key].append(day_str)
+
+    result = []
+    for key in sorted(weeks.keys()):
+        days = weeks[key]
+        result.append((key[0], key[1], days[0], days[-1]))
+    return result
+
+
 def _build_market_week_calendar(cursor, start_dt: datetime, end_dt: datetime) -> list:
-    """从 kline_data 表构建市场级交易周参考表
+    """从 kline_data 表构建市场级交易周参考表（已弃用，保留兼容）
 
     按 ISO 周分组所有交易日，返回 [(iso_year, iso_week, week_start, week_end), ...]
     其中 week_start/end 是市场实际最早/最晚交易日（非固定周一/周五）。
 
-    个股可能停牌，但市场整体一定有足够多的交易日来标定每周范围。
+    注意：个股可能停牌，市场级日历会导致 SDK bar 数量与日历周数不匹配。
+    应优先使用 _build_stock_week_calendar。
     """
     cursor.execute("""
         SELECT DISTINCT trade_date FROM kline_data
@@ -422,16 +442,13 @@ def _save_weekly_data(cursor, code: str, stock_name: str, data,
     SDK 返回的周线不含 trade_date（为空字符串），因此不能直接推算周起止日期。
 
     解决方案：
-    1. 从 kline_data 表构建市场级交易周参考表（按 ISO 周分组）
+    1. 从 kline_data 表构建**个股自身**交易周参考表（按 ISO 周分组）
     2. SDK 周线按时间顺序返回，逐条匹配到对应的 ISO 周
     3. 对已有历史数据的股票，skip_existing_before 指定该股票已有数据的最新日期，
        跳过该日期之前的周线，只写入新增周
 
-    支持场景：
-    - 正常周：周一 ~ 周五
-    - 节假日开头：周二/三 ~ 周五（如清明后 04-07~04-10）
-    - 节假日结尾：周一 ~ 周四（如五一前 04-27~04-30）
-    - 个股停牌：用市场整体日历，不依赖个股自身日K
+    关键：必须用个股自身的日K线构建日历，因为个股可能停牌。
+    如果用市场级日历，停牌周的 SDK bar 缺失会导致映射错位。
     """
     import pandas as pd
 
@@ -442,6 +459,10 @@ def _save_weekly_data(cursor, code: str, stock_name: str, data,
 
     if df.empty:
         return 0
+
+    # 如果没有提供日历，用个股自身的日K线构建
+    if week_calendar is None:
+        week_calendar = _build_stock_week_calendar(cursor, code)
 
     saved = 0
     bar_index = 0

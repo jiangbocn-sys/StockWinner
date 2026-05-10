@@ -21,12 +21,13 @@ from services.strategy.api import router as strategy_v2_router
 from services.account_management.api import router as account_management_router
 from services.auth.api import router as auth_router
 from services.llm.api import router as llm_router
+from services.agent.api import register_agent_routers
 
 from services._version import VERSION, set_start_time
 _server_start_time = None
 
 # 数据库迁移版本号 —— 每次新增迁移时递增
-MIGRATION_VERSION = 1
+MIGRATION_VERSION = 3
 
 
 @asynccontextmanager
@@ -414,6 +415,60 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"Kronos 预加载跳过: {e}")
 
+    # v3: Agent 协作框架 — Agent 账户表 + 审计日志表 + 确认表（2026-05-10）
+    await run_migration(3, "Agent 协作框架", [
+        """CREATE TABLE IF NOT EXISTS agent_accounts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            agent_id TEXT UNIQUE NOT NULL,
+            user_id TEXT NOT NULL DEFAULT '',
+            name TEXT NOT NULL,
+            agent_type TEXT DEFAULT 'generic',
+            api_key_hash TEXT NOT NULL,
+            role TEXT NOT NULL DEFAULT 'viewer',
+            allowed_account_ids TEXT DEFAULT '["*"]',
+            allowed_permissions TEXT DEFAULT '[]',
+            denied_permissions TEXT DEFAULT '[]',
+            rate_limit_per_min INTEGER DEFAULT 60,
+            enabled INTEGER DEFAULT 1,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            last_used_at TIMESTAMP
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_agent_accounts_user ON agent_accounts(user_id)",
+        """CREATE TABLE IF NOT EXISTS agent_audit_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            agent_id TEXT NOT NULL,
+            user_id TEXT NOT NULL DEFAULT '',
+            action TEXT NOT NULL,
+            resource_type TEXT,
+            resource_id TEXT,
+            account_id TEXT,
+            status TEXT NOT NULL,
+            request_payload TEXT,
+            response_summary TEXT,
+            risk_level TEXT NOT NULL,
+            confirmation_id TEXT,
+            ip_address TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_agent_audit_agent ON agent_audit_log(agent_id)",
+        "CREATE INDEX IF NOT EXISTS idx_agent_audit_created ON agent_audit_log(created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_agent_audit_user ON agent_audit_log(user_id)",
+        """CREATE TABLE IF NOT EXISTS agent_confirmations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            confirmation_id TEXT UNIQUE NOT NULL,
+            agent_id TEXT NOT NULL,
+            action TEXT NOT NULL,
+            account_id TEXT,
+            request_payload TEXT,
+            risk_level TEXT NOT NULL,
+            status TEXT DEFAULT 'pending',
+            reviewed_by TEXT,
+            review_notes TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            expires_at TIMESTAMP
+        )""",
+    ])
+
     yield
 
     # 关闭时清理
@@ -475,6 +530,9 @@ app.include_router(auth_router)
 app.include_router(llm_router)  # LLM 配置路由
 app.include_router(notifications.router)  # 通知 API 路由
 app.include_router(strategy_performance.router)  # 策略效能评估 API 路由
+
+# Agent API 路由（独立路径，不影响 UI）
+register_agent_routers(app)
 
 # 挂载前端静态文件
 frontend_dist = os.environ.get("FRONTEND_DIST", "/home/bobo/StockWinner/frontend/dist")
