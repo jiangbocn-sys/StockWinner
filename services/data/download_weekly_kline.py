@@ -63,13 +63,18 @@ def _get_weekly_kline_latest(conn: sqlite3.Connection) -> Dict[str, str]:
 
 
 def _delete_incomplete_week(conn: sqlite3.Connection, cutoff_date: str):
-    """删除指定日期之后的不完整周数据"""
+    """删除指定日期之后的周数据（含本周未完成的部分）
+
+    注意：cutoff_date 是最近一个完整交易周的结束日期。
+    删除 week_end_date > cutoff_date 的记录（而非 week_start_date），
+    确保同一周内即使 week_start <= cutoff 也会被清理。
+    """
     cursor = conn.cursor()
-    cursor.execute("DELETE FROM weekly_kline_data WHERE week_start_date > ?", (cutoff_date,))
+    cursor.execute("DELETE FROM weekly_kline_data WHERE week_end_date > ?", (cutoff_date,))
     deleted = cursor.rowcount
     if deleted > 0:
         conn.commit()
-        print(f"[WeeklyKline] 删除不完整周数据 {deleted} 条（>{cutoff_date}）")
+        print(f"[WeeklyKline] 删除不完整周数据 {deleted} 条（week_end > {cutoff_date}）")
 
 
 async def download_weekly_kline_data(
@@ -226,6 +231,17 @@ async def _download_batch(
     total_stocks = len(stocks)
     total_saved = 0
 
+    # 构建市场级交易周参考表（一次构建，所有股票共用）
+    start_date_str = f"{start_date_int:08d}"
+    start_date_str = f"{start_date_str[:4]}-{start_date_str[4:6]}-{start_date_str[6:8]}"
+    end_date_str = f"{end_date_int:08d}"
+    end_date_str = f"{end_date_str[:4]}-{end_date_str[4:6]}-{end_date_str[6:8]}"
+    week_calendar = _build_market_week_calendar(
+        cursor, datetime.strptime(start_date_str, '%Y-%m-%d'), datetime.strptime(end_date_str, '%Y-%m-%d')
+    )
+    if week_calendar:
+        print(f"[WeeklyKline] 交易周参考: {week_calendar[0][2]} ~ {week_calendar[-1][3]} 共 {len(week_calendar)} 周")
+
     for i in range(0, total_stocks, batch_size):
         batch = stocks[i:i + batch_size]
         batch_codes = [s.get('stock_code') for s in batch]
@@ -263,7 +279,7 @@ async def _download_batch(
                         stock_name = s.get('stock_name', '')
                         break
 
-                saved = _save_weekly_data(cursor, code, stock_name, data)
+                saved = _save_weekly_data(cursor, code, stock_name, data, week_calendar)
                 total_saved += saved
 
             conn.commit()
@@ -284,6 +300,26 @@ async def _download_incremental(
     cursor = conn.cursor()
     total_stocks = len(stocks)
     total_saved = 0
+
+    # 计算增量下载的起止日期
+    end_dt_str = str(end_date_int).zfill(8)
+    end_dt_str = f"{end_dt_str[:4]}-{end_dt_str[4:6]}-{end_dt_str[6:8]}"
+
+    # 找到所有股票中最早的起始日期，用于构建交易周参考表
+    earliest_start = None
+    for s in stocks:
+        latest = latest_map.get(s['stock_code'])
+        if latest:
+            start_dt = datetime.strptime(latest, '%Y-%m-%d') + timedelta(days=7)
+            if earliest_start is None or start_dt < earliest_start:
+                earliest_start = start_dt
+    if earliest_start is None:
+        return
+    earliest_start_str = earliest_start.strftime('%Y-%m-%d')
+
+    week_calendar = _build_market_week_calendar(
+        cursor, earliest_start, datetime.strptime(end_dt_str, '%Y-%m-%d')
+    )
 
     for i in range(0, total_stocks, batch_size):
         batch = stocks[i:i + batch_size]
@@ -307,16 +343,14 @@ async def _download_incremental(
             stock_name = s['stock_name']
             latest = latest_map.get(code)
 
+            if not latest:
+                continue
+
             # 计算该股票的起始日期
-            if latest:
-                start_dt = datetime.strptime(latest, '%Y-%m-%d') + timedelta(days=7)
-            else:
-                continue  # 不应该走到这里
+            start_dt = datetime.strptime(latest, '%Y-%m-%d') + timedelta(days=7)
 
             # 如果起始日期已经超过结束日期，跳过
-            end_dt_str = str(end_date_int).zfill(8)
-            end_dt_obj = datetime.strptime(end_dt_str, '%Y%m%d') - timedelta(days=7)
-            if start_dt > end_dt_obj:
+            if start_dt > datetime.strptime(end_dt_str, '%Y-%m-%d'):
                 continue
 
             start_date_int = int(start_dt.strftime('%Y%m%d'))
@@ -332,7 +366,7 @@ async def _download_incremental(
 
                 data = kline_data.get(code)
                 if data is not None and len(data) > 0:
-                    saved = _save_weekly_data(cursor, code, stock_name, data)
+                    saved = _save_weekly_data(cursor, code, stock_name, data, week_calendar, latest)
                     total_saved += saved
 
             except Exception as e:
@@ -344,8 +378,61 @@ async def _download_incremental(
     print(f"[WeeklyKline] 增量更新完成，保存 {total_saved} 条记录")
 
 
-def _save_weekly_data(cursor, code: str, stock_name: str, data) -> int:
-    """保存单只股票的周K线数据"""
+def _build_market_week_calendar(cursor, start_dt: datetime, end_dt: datetime) -> list:
+    """从 kline_data 表构建市场级交易周参考表
+
+    按 ISO 周分组所有交易日，返回 [(iso_year, iso_week, week_start, week_end), ...]
+    其中 week_start/end 是市场实际最早/最晚交易日（非固定周一/周五）。
+
+    个股可能停牌，但市场整体一定有足够多的交易日来标定每周范围。
+    """
+    cursor.execute("""
+        SELECT DISTINCT trade_date FROM kline_data
+        WHERE trade_date >= ? AND trade_date <= ?
+        ORDER BY trade_date
+    """, (start_dt.strftime('%Y-%m-%d'), end_dt.strftime('%Y-%m-%d')))
+    trade_days = [r[0] for r in cursor.fetchall()]
+
+    if not trade_days:
+        return []
+
+    # 按 ISO 周分组
+    weeks = {}
+    for day_str in trade_days:
+        d = datetime.strptime(day_str, '%Y-%m-%d')
+        iso_year, iso_week, _ = d.isocalendar()
+        key = (iso_year, iso_week)
+        if key not in weeks:
+            weeks[key] = [day_str]
+        else:
+            weeks[key].append(day_str)
+
+    result = []
+    for key in sorted(weeks.keys()):
+        days = weeks[key]
+        result.append((key[0], key[1], days[0], days[-1]))
+    return result
+
+
+def _save_weekly_data(cursor, code: str, stock_name: str, data,
+                      week_calendar: list = None,
+                      skip_existing_before: str = None) -> int:
+    """保存单只股票的周K线数据
+
+    SDK 返回的周线不含 trade_date（为空字符串），因此不能直接推算周起止日期。
+
+    解决方案：
+    1. 从 kline_data 表构建市场级交易周参考表（按 ISO 周分组）
+    2. SDK 周线按时间顺序返回，逐条匹配到对应的 ISO 周
+    3. 对已有历史数据的股票，skip_existing_before 指定该股票已有数据的最新日期，
+       跳过该日期之前的周线，只写入新增周
+
+    支持场景：
+    - 正常周：周一 ~ 周五
+    - 节假日开头：周二/三 ~ 周五（如清明后 04-07~04-10）
+    - 节假日结尾：周一 ~ 周四（如五一前 04-27~04-30）
+    - 个股停牌：用市场整体日历，不依赖个股自身日K
+    """
     import pandas as pd
 
     if isinstance(data, pd.DataFrame):
@@ -353,23 +440,37 @@ def _save_weekly_data(cursor, code: str, stock_name: str, data) -> int:
     else:
         df = pd.DataFrame(data)
 
+    if df.empty:
+        return 0
+
     saved = 0
+    bar_index = 0
+    total_bars = len(df)
+
+    # 找到第一周需要写入的位置
+    # 如果指定了 skip_existing_before，跳过该日期所在周及之前的所有周
+    cal_index = 0
+    if week_calendar:
+        if skip_existing_before:
+            for i, (iso_y, iso_w, ws, we) in enumerate(week_calendar):
+                if we > skip_existing_before:
+                    cal_index = i
+                    break
+                # 消耗一个 SDK bar（该周已有数据，不需要写入）
+                bar_index += 1
+
     for _, row in df.iterrows():
+        if bar_index >= total_bars:
+            break
+
         try:
-            trade_date = row.get('trade_date', '')
-            if not trade_date or pd.isna(trade_date):
-                continue
-
-            if isinstance(trade_date, str):
-                dt = datetime.strptime(trade_date, '%Y-%m-%d')
-            elif isinstance(trade_date, pd.Timestamp):
-                dt = trade_date.to_pydatetime()
+            if week_calendar and cal_index < len(week_calendar):
+                _, _, week_start_str, week_end_str = week_calendar[cal_index]
+                cal_index += 1
             else:
-                dt = trade_date
-
-            week_start_str = dt.strftime('%Y-%m-%d')
-            week_end = dt + timedelta(days=4)
-            week_end_str = week_end.strftime('%Y-%m-%d')
+                # 无日历参考，跳过此 bar
+                bar_index += 1
+                continue
 
             cursor.execute("""
                 INSERT OR REPLACE INTO weekly_kline_data
@@ -388,8 +489,10 @@ def _save_weekly_data(cursor, code: str, stock_name: str, data) -> int:
                 float(row.get('amount', 0)) if not pd.isna(row.get('amount')) else None
             ))
             saved += 1
+            bar_index += 1
         except Exception:
-            pass
+            bar_index += 1
+            continue
 
     return saved
 
