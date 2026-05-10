@@ -499,6 +499,55 @@ app.add_middleware(
 
 
 # ============================================================
+# UI 端点认证中间件
+# 所有 /api/v1/ui/ 路径的请求必须携带有效的 X-Auth-Token 或 Authorization: Bearer
+# 白名单：/api/v1/health、/、静态文件 不受限制
+# Agent 请求（带 X-Agent-Key）不受此中间件影响
+# ============================================================
+
+_UI_AUTH_WHITELIST = {"/api/v1/health", "/", "/docs", "/openapi.json", "/redoc"}
+
+@app.middleware("http")
+async def ui_token_middleware(request: Request, call_next):
+    path = request.url.path
+
+    # 白名单路径、静态文件、/ui/ 前缀直接放行
+    if path in _UI_AUTH_WHITELIST or path.startswith("/ui/") or path.startswith("/static/"):
+        return await call_next(request)
+
+    # /api/v1/ui/ 路径需要 token 认证
+    if path.startswith("/api/v1/ui/"):
+        # 优先检查 X-Agent-Key，agent 请求由另一个中间件处理
+        if request.headers.get("X-Agent-Key"):
+            return await call_next(request)
+
+        # 获取 token：支持 X-Auth-Token 或 Authorization: Bearer
+        token = request.headers.get("X-Auth-Token")
+        if not token:
+            auth_header = request.headers.get("Authorization", "")
+            if auth_header.startswith("Bearer "):
+                token = auth_header[7:]
+
+        if not token:
+            return JSONResponse(status_code=401, content={"success": False, "message": "缺少认证 token"})
+
+        # 验证 token
+        from services.auth.service import get_auth_service
+        auth_service = get_auth_service()
+        account = auth_service.validate_token(token)
+
+        if not account:
+            return JSONResponse(status_code=401, content={"success": False, "message": "认证失败或会话已过期"})
+
+        # 将账户信息写入 request.state，供下游端点使用
+        request.state.auth_token = token
+        request.state.account_id = account.get("account_id", "")
+        request.state.account_name = account.get("name", "")
+
+    return await call_next(request)
+
+
+# ============================================================
 # Agent 安全约束中间件
 # 任何携带 X-Agent-Key 的请求（无论走哪个路径）都必须通过 Agent 认证 + 审计
 # 不携带该 header 的请求（浏览器/UI）完全不受影响

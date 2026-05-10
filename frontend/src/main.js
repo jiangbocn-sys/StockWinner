@@ -8,16 +8,34 @@ import router from './router'
 import App from './App.vue'
 
 // ============================================================
-// 全局 fetch 拦截：后端重启后内存 session 失效（401）自动跳登录页
+// 全局 fetch 拦截：
+// 1. 对 /api/v1/ui/ 请求自动注入 X-Auth-Token
+// 2. 后端重启后内存 session 失效（401）自动跳登录页
 // ============================================================
 const _originalFetch = window.fetch
 window.fetch = async (...args) => {
+  const url = typeof args[0] === 'string' ? args[0] : args[0]?.url || ''
+  const token = localStorage.getItem('auth_token')
+
+  // 自动注入 token 到 UI API 请求
+  if ((url.includes('/api/v1/ui/') || url.includes('/api/accounts/')) && token) {
+    // 合并 headers
+    const init = args[1] || {}
+    const headers = { ...init.headers, 'X-Auth-Token': token }
+    if (typeof args[0] === 'string') {
+      args[0] = args[0] // url unchanged
+    } else if (args[0]) {
+      args[0] = { ...args[0], headers }
+    } else {
+      args[1] = { ...init, headers }
+    }
+  }
+
   try {
     const response = await _originalFetch(...args)
     if (response.status === 401) {
       // 仅拦截 auth 相关端点，避免误伤
-      const url = typeof args[0] === 'string' ? args[0] : args[0]?.url || ''
-      if (url.includes('/api/auth/') || url.includes('/api/v1/ui/') || url.includes('/api/v1/agent/')) {
+      if (url.includes('/api/auth/') || url.includes('/api/v1/ui/') || url.includes('/api/v1/agent/') || url.includes('/api/accounts/')) {
         localStorage.removeItem('auth_token')
         localStorage.removeItem('current_user')
         // 避免重复跳转
