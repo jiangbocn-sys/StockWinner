@@ -1211,68 +1211,194 @@ async def delete_strategy(
 @router.post("/manage/scheduler/run-now")
 async def scheduler_run_now(
     request: Request,
-    task_id: int = Query(...),
+    task_id: int = Query(..., description="任务 ID（strategy_tasks 表）"),
     agent: dict = Depends(verify_agent_key),
     _: None = Depends(require_role(AgentRole.OPERATOR)),
 ):
-    """立即执行调度任务（Phase 3）"""
-    raise HTTPException(status_code=501, detail="此端点将在 Phase 3 实现")
+    """立即执行调度任务"""
+    from services.common.scheduler_service import get_scheduler
+
+    scheduler = get_scheduler()
+    if not scheduler._running or not scheduler._scheduler:
+        return {"success": False, "message": "调度服务未启动"}
+
+    result = scheduler.run_manual_strategy_task(task_id)
+    agent_id = agent.get("id", "")
+    log_action(
+        agent_id=agent_id, action="scheduler:run_now",
+        account_id="", resource_type="scheduler", resource_id=str(task_id),
+        request_payload={"task_id": task_id},
+        response_summary=str(result),
+        ip_address=request.client.host if request.client else None,
+    )
+    return result
 
 
 @router.post("/manage/scheduler/toggle")
 async def scheduler_toggle(
     request: Request,
-    task_id: int = Query(...),
-    enabled: int = Query(..., ge=0, le=1),
+    task_id: int = Query(..., description="任务 ID（strategy_tasks 表）"),
+    enabled: int = Query(..., ge=0, le=1, description="1=启用, 0=禁用"),
     agent: dict = Depends(verify_agent_key),
     _: None = Depends(require_role(AgentRole.OPERATOR)),
 ):
-    """启停定时任务（Phase 3）"""
-    raise HTTPException(status_code=501, detail="此端点将在 Phase 3 实现")
+    """启停定时任务（更新 DB enabled 字段 + 重新加载 APScheduler）"""
+    from services.common.scheduler_service import get_scheduler
+
+    db = get_db_manager()
+    task = await db.fetchone(
+        "SELECT id, name, cron_expression, enabled FROM strategy_tasks WHERE id = ?",
+        (task_id,)
+    )
+    if not task:
+        return {"success": False, "message": f"任务 {task_id} 不存在"}
+
+    await db.execute(
+        "UPDATE strategy_tasks SET enabled = ? WHERE id = ?",
+        (enabled, task_id)
+    )
+
+    scheduler = get_scheduler()
+    if scheduler._running and scheduler._scheduler:
+        reload_result = scheduler.reload_strategy_tasks()
+    else:
+        reload_result = {"success": False, "note": "调度服务未启动，重新加载已跳过"}
+
+    agent_id = agent.get("id", "")
+    log_action(
+        agent_id=agent_id, action="scheduler:toggle",
+        account_id="", resource_type="scheduler", resource_id=str(task_id),
+        request_payload={"task_id": task_id, "enabled": enabled},
+        response_summary=f"已{'启用' if enabled else '禁用'}: {task.get('name', 'unknown')}",
+        ip_address=request.client.host if request.client else None,
+    )
+    return {
+        "success": True,
+        "message": f"任务「{task['name']}」已{'启用' if enabled else '禁用'}",
+        "reload": reload_result,
+    }
 
 
 @router.post("/manage/monitoring/start")
 async def monitoring_start(
     request: Request,
     account_id: str = Query(...),
+    interval: int = Query(30, description="监控轮询间隔(秒)"),
     agent: dict = Depends(verify_agent_key),
     _: None = Depends(require_role(AgentRole.OPERATOR)),
 ):
-    """启动监控（Phase 3）"""
-    raise HTTPException(status_code=501, detail="此端点将在 Phase 3 实现")
+    """启动交易监控"""
+    from services.monitoring.service import get_trading_monitor
+
+    # 验证账户
+    db = get_db_manager()
+    account = await db.fetchone(
+        "SELECT account_id FROM accounts WHERE account_id = ? AND is_active = 1",
+        (account_id,)
+    )
+    if not account:
+        return {"success": False, "message": f"账户 {account_id} 不存在或未激活"}
+
+    monitor = get_trading_monitor()
+    result = await monitor.start_monitoring(account_id, interval)
+
+    agent_id = agent.get("id", "")
+    log_action(
+        agent_id=agent_id, action="monitoring:start",
+        account_id=account_id, resource_type="monitoring", resource_id=account_id,
+        request_payload={"account_id": account_id, "interval": interval},
+        response_summary=str(result),
+        ip_address=request.client.host if request.client else None,
+    )
+    return result
 
 
 @router.post("/manage/monitoring/stop")
 async def monitoring_stop(
     request: Request,
-    account_id: str = Query(...),
     agent: dict = Depends(verify_agent_key),
     _: None = Depends(require_role(AgentRole.OPERATOR)),
 ):
-    """停止监控（Phase 3）"""
-    raise HTTPException(status_code=501, detail="此端点将在 Phase 3 实现")
+    """停止交易监控"""
+    from services.monitoring.service import get_trading_monitor
+
+    monitor = get_trading_monitor()
+    result = await monitor.stop_monitoring()
+
+    agent_id = agent.get("id", "")
+    log_action(
+        agent_id=agent_id, action="monitoring:stop",
+        account_id="", resource_type="monitoring", resource_id="",
+        response_summary=str(result),
+        ip_address=request.client.host if request.client else None,
+    )
+    return result
 
 
 @router.post("/manage/screening/start")
 async def screening_start(
     request: Request,
     account_id: str = Query(...),
+    strategy_id: Optional[int] = Query(None, description="策略 ID，不传则扫描所有活跃策略"),
+    interval: int = Query(60, description="选股轮询间隔(秒)"),
     agent: dict = Depends(verify_agent_key),
     _: None = Depends(require_role(AgentRole.OPERATOR)),
 ):
-    """启动选股（Phase 3）"""
-    raise HTTPException(status_code=501, detail="此端点将在 Phase 3 实现")
+    """启动因子选股"""
+    from services.screening.service import get_screening_service
+
+    # 验证账户
+    db = get_db_manager()
+    account = await db.fetchone(
+        "SELECT account_id FROM accounts WHERE account_id = ? AND is_active = 1",
+        (account_id,)
+    )
+    if not account:
+        return {"success": False, "message": f"账户 {account_id} 不存在或未激活"}
+
+    # 如果指定了 strategy_id，验证策略存在
+    if strategy_id:
+        strategy = await db.fetchone(
+            "SELECT id, name FROM strategies WHERE id = ? AND account_id = ?",
+            (strategy_id, account_id)
+        )
+        if not strategy:
+            return {"success": False, "message": f"策略 {strategy_id} 不存在或不属于该账户"}
+
+    service = get_screening_service()
+    result = await service.start_screening(account_id, strategy_id, interval)
+
+    agent_id = agent.get("id", "")
+    log_action(
+        agent_id=agent_id, action="screening:start",
+        account_id=account_id, resource_type="screening", resource_id=str(strategy_id or 0),
+        request_payload={"account_id": account_id, "strategy_id": strategy_id, "interval": interval},
+        response_summary=str(result),
+        ip_address=request.client.host if request.client else None,
+    )
+    return result
 
 
 @router.post("/manage/screening/stop")
 async def screening_stop(
     request: Request,
-    account_id: str = Query(...),
     agent: dict = Depends(verify_agent_key),
     _: None = Depends(require_role(AgentRole.OPERATOR)),
 ):
-    """停止选股（Phase 3）"""
-    raise HTTPException(status_code=501, detail="此端点将在 Phase 3 实现")
+    """停止因子选股"""
+    from services.screening.service import get_screening_service
+
+    service = get_screening_service()
+    result = await service.stop_screening()
+
+    agent_id = agent.get("id", "")
+    log_action(
+        agent_id=agent_id, action="screening:stop",
+        account_id="", resource_type="screening", resource_id="",
+        response_summary=str(result),
+        ip_address=request.client.host if request.client else None,
+    )
+    return result
 
 
 @router.post("/manage/strategy/execute")
@@ -1283,40 +1409,177 @@ async def strategy_execute(
     agent: dict = Depends(verify_agent_key),
     _: None = Depends(require_role(AgentRole.OPERATOR)),
 ):
-    """执行策略（Phase 3）"""
-    raise HTTPException(status_code=501, detail="此端点将在 Phase 3 实现")
+    """执行代码型策略（返回信号，不写入 watchlist）"""
+    from services.strategy.engine import get_strategy_engine
+    from services.common import technical_indicators
+    from services.common.timezone import get_china_time
+    from services.data.local_data_service import get_local_data_service, is_trading_hours
+
+    db = get_db_manager()
+
+    # 验证账户
+    account = await db.fetchone(
+        "SELECT account_id FROM accounts WHERE account_id = ? AND is_active = 1",
+        (account_id,)
+    )
+    if not account:
+        return {"success": False, "message": f"账户 {account_id} 不存在或未激活"}
+
+    # 获取策略
+    strategy = await db.fetchone(
+        "SELECT * FROM strategies WHERE id = ? AND strategy_type = 'python'",
+        (strategy_id,)
+    )
+    if not strategy:
+        return {"success": False, "message": f"代码型策略 {strategy_id} 不存在"}
+
+    # 获取候选股票
+    code_scope = strategy.get("code_scope", "screening")
+    if code_scope == "trading":
+        stocks = await db.fetchall(
+            "SELECT * FROM watchlist WHERE account_id = ? AND status = 'bought'",
+            (account_id,)
+        )
+    else:
+        group_id = strategy.get("target_scope") or 0
+        stocks = await db.fetchall(
+            "SELECT * FROM watchlist WHERE account_id = ? AND group_id = ? AND status IN ('pending', 'watching')",
+            (account_id, group_id)
+        )
+
+    today = get_china_time().strftime("%Y-%m-%d")
+    stock_codes = [s["stock_code"] for s in stocks]
+    lds = get_local_data_service()
+
+    # 构建数据获取函数
+    def _get_kline(stock_code, limit=100, start_date=None):
+        return lds.get_kline_data(stock_code, start_date=start_date, limit=limit)
+
+    def _get_batch_kline(codes, limit=100):
+        return lds.get_batch_kline(codes, limit=limit)
+
+    def _get_factors(stock_code, date=None):
+        return lds.get_daily_factors(stock_code, date or today)
+
+    def _get_factors_batch(codes, date=None):
+        return lds.get_daily_factors_batch(codes, date or today)
+
+    def _get_market_data(stock_code):
+        return None
+
+    def _get_realtime_quote(stock_code):
+        return None
+
+    context = {
+        "stocks": stocks,
+        "account_id": account_id,
+        "today": today,
+        "indicators": technical_indicators,
+        "get_kline": _get_kline,
+        "get_batch_kline": _get_batch_kline,
+        "get_factors": _get_factors,
+        "get_factors_batch": _get_factors_batch,
+        "get_kline_smart": lambda codes, lookback=100: {c: _get_kline(c, limit=lookback) for c in codes},
+        "get_kline_spliced": lambda codes, lookback=100: {c: _get_kline(c, limit=lookback) for c in codes},
+        "get_market_data": _get_market_data,
+        "get_realtime_quote": _get_realtime_quote,
+    }
+
+    engine = get_strategy_engine()
+    signals = engine.execute_strategy(strategy, context)
+
+    agent_id = agent.get("id", "")
+    log_action(
+        agent_id=agent_id, action="strategy:execute",
+        account_id=account_id, resource_type="strategy", resource_id=str(strategy_id),
+        request_payload={"strategy_id": strategy_id, "account_id": account_id},
+        response_summary=f"生成 {len(signals)} 个信号",
+        ip_address=request.client.host if request.client else None,
+    )
+    return {"success": True, "strategy": strategy, "signals": signals, "count": len(signals)}
 
 
 # ============== 确认流程端点 ==============
-# Phase 3 实现
 
 @router.get("/confirmations/pending")
-async def list_pending_confirmations(
+async def list_pending_confirmations_endpoint(
     request: Request,
     agent: dict = Depends(verify_agent_key),
 ):
-    """列出待确认（Phase 3）"""
-    raise HTTPException(status_code=501, detail="此端点将在 Phase 3 实现")
+    """列出所有待处理的确认"""
+    from services.agent.confirm import list_pending_confirmations as _list_pending
+
+    results = await _list_pending()
+
+    agent_id = agent.get("id", "")
+    log_action(
+        agent_id=agent_id, action="confirmation:list_pending",
+        account_id="", resource_type="confirmation", resource_id="",
+        response_summary=f"返回 {len(results)} 条待确认",
+        ip_address=request.client.host if request.client else None,
+    )
+    return {"success": True, "count": len(results), "confirmations": results}
 
 
 @router.post("/confirmations/{confirmation_id}/approve")
 async def confirm_approve(
     request: Request,
     confirmation_id: str = Path(...),
+    review_notes: Optional[str] = Body(None, embed=True),
     agent: dict = Depends(verify_agent_key),
 ):
-    """批准确认（Phase 3）"""
-    raise HTTPException(status_code=501, detail="此端点将在 Phase 3 实现")
+    """批准一条确认"""
+    from services.agent.confirm import approve_confirmation, get_confirmation
+
+    # 验证记录存在
+    record = await get_confirmation(confirmation_id)
+    if not record:
+        return {"success": False, "message": "确认记录不存在"}
+    if record.get("status") != "pending":
+        return {"success": False, "message": f"记录状态为 {record.get('status')}，无法批准"}
+
+    reviewer = agent.get("id", "")
+    ok = await approve_confirmation(confirmation_id, reviewer, review_notes)
+
+    agent_id = agent.get("id", "")
+    log_action(
+        agent_id=agent_id, action="confirmation:approve",
+        account_id=record.get("account_id", ""),
+        resource_type="confirmation", resource_id=confirmation_id,
+        response_summary="已批准" if ok else "批准失败（可能已被其他人处理）",
+        ip_address=request.client.host if request.client else None,
+    )
+    return {"success": ok, "message": "已批准" if ok else "批准失败"}
 
 
 @router.post("/confirmations/{confirmation_id}/reject")
 async def confirm_reject(
     request: Request,
     confirmation_id: str = Path(...),
+    review_notes: Optional[str] = Body(None, embed=True),
     agent: dict = Depends(verify_agent_key),
 ):
-    """拒绝确认（Phase 3）"""
-    raise HTTPException(status_code=501, detail="此端点将在 Phase 3 实现")
+    """拒绝一条确认"""
+    from services.agent.confirm import reject_confirmation, get_confirmation
+
+    record = await get_confirmation(confirmation_id)
+    if not record:
+        return {"success": False, "message": "确认记录不存在"}
+    if record.get("status") != "pending":
+        return {"success": False, "message": f"记录状态为 {record.get('status')}，无法拒绝"}
+
+    reviewer = agent.get("id", "")
+    ok = await reject_confirmation(confirmation_id, reviewer, review_notes)
+
+    agent_id = agent.get("id", "")
+    log_action(
+        agent_id=agent_id, action="confirmation:reject",
+        account_id=record.get("account_id", ""),
+        resource_type="confirmation", resource_id=confirmation_id,
+        response_summary="已拒绝" if ok else "拒绝失败",
+        ip_address=request.client.host if request.client else None,
+    )
+    return {"success": ok, "message": "已拒绝" if ok else "拒绝失败"}
 
 
 # ============== 管理员端点 (admin only) ==============
