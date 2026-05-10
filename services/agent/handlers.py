@@ -644,17 +644,52 @@ async def query_notifications(
 # ============== 策略提交端点 (strategist+) ==============
 # Phase 2 实现
 
+
 @router.post("/submit/screening")
 async def submit_screening(
     request: Request,
     account_id: str = Query(...),
     name: str = Body(...),
-    conditions: dict = Body(...),
+    config: dict = Body(...),
+    target_scope: Optional[str] = Body(None),
+    match_score_threshold: Optional[float] = Body(None),
     agent: dict = Depends(verify_agent_key),
-    _: None = Depends(require_permission("screening:create")),
+    _: None = Depends(require_permission("strategy:create")),
 ):
-    """创建选股策略（Phase 2）"""
-    raise HTTPException(status_code=501, detail="此端点将在 Phase 2 实现")
+    """创建选股策略（配置型）"""
+    validate_account_scope(request, account_id)
+    db = get_db_manager()
+
+    account = await db.fetchone(
+        "SELECT 1 FROM accounts WHERE account_id = ? AND is_active = 1",
+        (account_id,)
+    )
+    if not account:
+        raise HTTPException(status_code=404, detail=f"账户不存在：{account_id}")
+
+    now = get_china_time().strftime("%Y-%m-%d %H:%M:%S")
+    strategy_data = {
+        "account_id": account_id,
+        "name": name,
+        "strategy_type": "screening",
+        "status": "active",
+        "config": json.dumps(config),
+        "match_score_threshold": match_score_threshold or 0.5,
+        "target_scope": target_scope or "group",
+        "created_at": now,
+        "updated_at": now,
+    }
+    strategy_id = await db.insert("strategies", strategy_data)
+    strategy = await db.fetchone("SELECT * FROM strategies WHERE id = ?", (strategy_id,))
+
+    await log_action(
+        agent_id=agent["agent_id"], action="submit.screening", risk_level="medium",
+        account_id=account_id, resource_type="strategy", resource_id=str(strategy_id),
+        request_payload={"name": name, "config_keys": list(config.keys())},
+        ip_address=request.client.host if request.client else None,
+    )
+
+    return {"success": True, "message": "选股策略已创建", "strategy": strategy}
 
 
 @router.post("/submit/strategy-config")
@@ -663,11 +698,16 @@ async def submit_strategy_config(
     account_id: str = Query(...),
     name: str = Body(...),
     config: dict = Body(...),
+    target_scope: Optional[str] = Body(None),
+    match_score_threshold: Optional[float] = Body(None),
     agent: dict = Depends(verify_agent_key),
     _: None = Depends(require_permission("strategy:create")),
 ):
-    """创建配置型策略（Phase 2）"""
-    raise HTTPException(status_code=501, detail="此端点将在 Phase 2 实现")
+    """创建配置型策略（screening 别名）"""
+    return await submit_screening(
+        request, account_id=account_id, name=name, config=config,
+        target_scope=target_scope, match_score_threshold=match_score_threshold, agent=agent
+    )
 
 
 @router.post("/submit/strategy-code")
@@ -676,11 +716,163 @@ async def submit_strategy_code(
     account_id: str = Query(...),
     name: str = Body(...),
     code: str = Body(...),
+    function_name: Optional[str] = Body(None),
+    code_scope: Optional[str] = Body("screening"),
     agent: dict = Depends(verify_agent_key),
     _: None = Depends(require_permission("strategy:create")),
 ):
-    """创建代码型策略（Phase 2，含 AST 校验）"""
-    raise HTTPException(status_code=501, detail="此端点将在 Phase 2 实现")
+    """创建代码型策略：AST 校验 + 试运行 + 入库"""
+    validate_account_scope(request, account_id)
+    db = get_db_manager()
+
+    account = await db.fetchone(
+        "SELECT 1 FROM accounts WHERE account_id = ? AND is_active = 1",
+        (account_id,)
+    )
+    if not account:
+        raise HTTPException(status_code=404, detail=f"账户不存在：{account_id}")
+
+    # 1. AST 校验
+    from services.strategy.engine import get_strategy_engine
+    engine = get_strategy_engine()
+    validation = engine.validate_code(code)
+    if not validation["valid"]:
+        await log_action(
+            agent_id=agent["agent_id"], action="submit.strategy-code", risk_level="medium",
+            account_id=account_id, resource_type="strategy",
+            request_payload={"name": name, "validation_error": validation["error"]},
+            ip_address=request.client.host if request.client else None,
+        )
+        raise HTTPException(status_code=400, detail=f"AST 校验失败：{validation['error']}")
+
+    # 2. 试运行：构建 context 并沙盒执行
+    today = get_china_time().strftime("%Y-%m-%d")
+    watchlist_rows = await db.fetchall(
+        "SELECT DISTINCT stock_code, stock_name FROM watchlist WHERE account_id = ? LIMIT 20",
+        (account_id,)
+    )
+    stocks = [dict(r) for r in watchlist_rows] if watchlist_rows else [
+        {"stock_code": "600000.SH", "stock_name": "浦发银行"},
+    ]
+    stock_codes = [s["stock_code"] for s in stocks]
+
+    from services.common import technical_indicators
+    from services.data.local_data_service import get_local_data_service
+
+    lds = get_local_data_service()
+
+    def _get_kline_local(sc, limit=100, start_date=None):
+        return lds.get_kline_data(sc, start_date=start_date, limit=limit)
+
+    def _get_batch_kline(codes, limit=100):
+        return lds.get_batch_kline(codes, limit=limit)
+
+    def _get_factors(sc, date=None):
+        return lds.get_daily_factors(sc, date or today)
+
+    def _get_factors_batch(codes, date=None):
+        return lds.get_daily_factors_batch(codes, date or today)
+
+    def _get_kline_spliced(codes, lookback=100):
+        return lds.get_kline_spliced(codes, lookback=lookback)
+
+    def _get_kline_smart(codes, lookback=100):
+        return lds.get_kline_with_realtime(codes, lookback=lookback)
+
+    test_run_result = None
+    test_run_error = None
+    test_run_output = ""
+    import io
+    import time
+
+    context = {
+        "stocks": stocks,
+        "account_id": account_id,
+        "today": today,
+        "indicators": {
+            "calculate_ma": technical_indicators.calculate_ma,
+            "calculate_rsi": technical_indicators.calculate_rsi,
+            "calculate_macd": technical_indicators.calculate_macd,
+            "calculate_kdj": technical_indicators.calculate_kdj,
+            "calculate_bollinger_bands": technical_indicators.calculate_bollinger_bands,
+            "calculate_adx": technical_indicators.calculate_adx,
+            "calculate_atr": technical_indicators.calculate_atr,
+            "calculate_ema": technical_indicators.calculate_ema,
+            "calculate_obv": technical_indicators.calculate_obv,
+            "calculate_historical_volatility": technical_indicators.calculate_historical_volatility,
+        },
+        "get_kline_local": _get_kline_local,
+        "get_batch_kline": _get_batch_kline,
+        "get_factors": _get_factors,
+        "get_factors_batch": _get_factors_batch,
+        "get_kline_spliced": _get_kline_spliced,
+        "get_kline_smart": _get_kline_smart,
+    }
+
+    old_stdout = __import__("sys").stdout
+    captured_output = io.StringIO()
+    __import__("sys").stdout = captured_output
+    start_time = time.time()
+
+    try:
+        strategy_dict = {"code": code, "function_name": function_name or "run", "name": name}
+        signals = engine.execute_strategy(strategy_dict, context)
+        duration_ms = int((time.time() - start_time) * 1000)
+        test_run_output = captured_output.getvalue()
+        test_run_result = {
+            "signals": signals[:10],  # 只返回前 10 条
+            "signal_count": len(signals),
+            "output": test_run_output,
+            "duration_ms": duration_ms,
+        }
+    except Exception as e:
+        test_run_error = f"{type(e).__name__}: {str(e)}"
+        test_run_output = captured_output.getvalue()
+    finally:
+        __import__("sys").stdout = old_stdout
+
+    # 3. 试运行有错误 → 报错
+    if test_run_error:
+        await log_action(
+            agent_id=agent["agent_id"], action="submit.strategy-code", risk_level="medium",
+            account_id=account_id, resource_type="strategy",
+            request_payload={"name": name, "test_run_error": test_run_error},
+            ip_address=request.client.host if request.client else None,
+        )
+        raise HTTPException(status_code=400, detail=f"试运行失败：{test_run_error}")
+
+    # 4. 入库
+    now = get_china_time().strftime("%Y-%m-%d %H:%M:%S")
+    strategy_data = {
+        "account_id": account_id,
+        "name": name,
+        "strategy_type": "python",
+        "status": "active",
+        "code": code,
+        "code_type": "python",
+        "code_scope": code_scope or "screening",
+        "function_name": function_name or "run",
+        "target_scope": "group",
+        "created_at": now,
+        "updated_at": now,
+    }
+    strategy_id = await db.insert("strategies", strategy_data)
+    strategy = await db.fetchone("SELECT * FROM strategies WHERE id = ?", (strategy_id,))
+
+    await log_action(
+        agent_id=agent["agent_id"], action="submit.strategy-code", risk_level="medium",
+        account_id=account_id, resource_type="strategy", resource_id=str(strategy_id),
+        request_payload={"name": name, "code_scope": code_scope, "signal_count": len(signals) if signals else 0},
+        ip_address=request.client.host if request.client else None,
+    )
+
+    return {
+        "success": True,
+        "message": "代码型策略已创建",
+        "strategy": strategy,
+        "validation": validation,
+        "test_run": test_run_result,
+    }
 
 
 @router.post("/submit/trading-strategy")
@@ -688,12 +880,85 @@ async def submit_trading_strategy(
     request: Request,
     account_id: str = Query(...),
     name: str = Body(...),
-    config: dict = Body(...),
+    code: str = Body(...),
+    function_name: Optional[str] = Body(None),
+    buy_strategy_id: Optional[int] = Body(None),
+    sell_strategy_id: Optional[int] = Body(None),
     agent: dict = Depends(verify_agent_key),
     _: None = Depends(require_permission("strategy:create")),
 ):
-    """创建交易策略配置（Phase 2）"""
-    raise HTTPException(status_code=501, detail="此端点将在 Phase 2 实现")
+    """创建交易策略（code_scope=trading）"""
+    validate_account_scope(request, account_id)
+    db = get_db_manager()
+
+    account = await db.fetchone(
+        "SELECT 1 FROM accounts WHERE account_id = ? AND is_active = 1",
+        (account_id,)
+    )
+    if not account:
+        raise HTTPException(status_code=404, detail=f"账户不存在：{account_id}")
+
+    # AST 校验
+    from services.strategy.engine import get_strategy_engine
+    engine = get_strategy_engine()
+    validation = engine.validate_code(code)
+    if not validation["valid"]:
+        raise HTTPException(status_code=400, detail=f"AST 校验失败：{validation['error']}")
+
+    # 校验引用的策略
+    if buy_strategy_id:
+        ref = await db.fetchone(
+            "SELECT strategy_type FROM strategies WHERE id = ? AND account_id = ?",
+            (buy_strategy_id, account_id)
+        )
+        if not ref:
+            raise HTTPException(status_code=400, detail="引用的买入策略不存在")
+        if ref["strategy_type"] != "python":
+            raise HTTPException(status_code=400, detail="买入策略必须是代码型策略")
+
+    if sell_strategy_id:
+        ref = await db.fetchone(
+            "SELECT strategy_type FROM strategies WHERE id = ? AND account_id = ?",
+            (sell_strategy_id, account_id)
+        )
+        if not ref:
+            raise HTTPException(status_code=400, detail="引用的卖出策略不存在")
+        if ref["strategy_type"] != "python":
+            raise HTTPException(status_code=400, detail="卖出策略必须是代码型策略")
+
+    # 入库
+    now = get_china_time().strftime("%Y-%m-%d %H:%M:%S")
+    strategy_data = {
+        "account_id": account_id,
+        "name": name,
+        "strategy_type": "python",
+        "status": "active",
+        "code": code,
+        "code_type": "python",
+        "code_scope": "trading",
+        "function_name": function_name or "run",
+        "target_scope": "group",
+        "buy_strategy_id": buy_strategy_id,
+        "sell_strategy_id": sell_strategy_id,
+        "created_at": now,
+        "updated_at": now,
+    }
+    strategy_id = await db.insert("strategies", strategy_data)
+    strategy = await db.fetchone("SELECT * FROM strategies WHERE id = ?", (strategy_id,))
+
+    await log_action(
+        agent_id=agent["agent_id"], action="submit.trading-strategy", risk_level="medium",
+        account_id=account_id, resource_type="strategy", resource_id=str(strategy_id),
+        request_payload={"name": name},
+        ip_address=request.client.host if request.client else None,
+    )
+
+    return {
+        "success": True,
+        "message": "交易策略已创建",
+        "strategy": strategy,
+        "validation": validation,
+    }
 
 
 @router.put("/strategy/{strategy_id}")
@@ -705,8 +970,50 @@ async def update_strategy(
     agent: dict = Depends(verify_agent_key),
     _: None = Depends(require_permission("strategy:update")),
 ):
-    """修改策略（Phase 2）"""
-    raise HTTPException(status_code=501, detail="此端点将在 Phase 2 实现")
+    """修改策略（代码型策略更新 code 时重新 AST 校验）"""
+    validate_account_scope(request, account_id)
+    db = get_db_manager()
+
+    strategy = await db.fetchone(
+        "SELECT * FROM strategies WHERE id = ? AND account_id = ?",
+        (strategy_id, account_id)
+    )
+    if not strategy:
+        raise HTTPException(status_code=404, detail="策略不存在")
+
+    # 如果更新 code → AST 校验
+    new_code = updates.get("code")
+    if new_code:
+        from services.strategy.engine import get_strategy_engine
+        validation = get_strategy_engine().validate_code(new_code)
+        if not validation["valid"]:
+            raise HTTPException(status_code=400, detail=f"AST 校验失败：{validation['error']}")
+
+    # 构建更新数据
+    update_data = {"updated_at": get_china_time().strftime("%Y-%m-%d %H:%M:%S")}
+    allowed_fields = {"name", "description", "strategy_type", "config", "status",
+                      "code", "code_type", "code_scope", "target_scope", "function_name",
+                      "match_score_threshold", "buy_strategy_id", "sell_strategy_id"}
+    for key, value in updates.items():
+        if key in allowed_fields:
+            if key == "config" and isinstance(value, dict):
+                update_data[key] = json.dumps(value, ensure_ascii=False)
+            else:
+                update_data[key] = value
+
+    if len(update_data) > 1:
+        await db.update("strategies", update_data, "id = ?", (strategy_id,))
+
+    updated = await db.fetchone("SELECT * FROM strategies WHERE id = ?", (strategy_id,))
+
+    await log_action(
+        agent_id=agent["agent_id"], action="strategy.update", risk_level="medium",
+        account_id=account_id, resource_type="strategy", resource_id=str(strategy_id),
+        request_payload={"updates": list(updates.keys())},
+        ip_address=request.client.host if request.client else None,
+    )
+
+    return {"success": True, "message": "策略已更新", "strategy": updated}
 
 
 @router.delete("/strategy/{strategy_id}")
@@ -717,8 +1024,31 @@ async def delete_strategy(
     agent: dict = Depends(verify_agent_key),
     _: None = Depends(require_permission("strategy:delete")),
 ):
-    """删除策略（Phase 2，需人工确认）"""
-    raise HTTPException(status_code=501, detail="此端点将在 Phase 2 实现")
+    """删除策略"""
+    validate_account_scope(request, account_id)
+    db = get_db_manager()
+
+    strategy = await db.fetchone(
+        "SELECT * FROM strategies WHERE id = ? AND account_id = ?",
+        (strategy_id, account_id)
+    )
+    if not strategy:
+        raise HTTPException(status_code=404, detail="策略不存在")
+
+    # 清理关联数据
+    await db.execute("DELETE FROM temp_candidates WHERE strategy_id = ?", (strategy_id,))
+    await db.execute("DELETE FROM candidate_groups WHERE screening_strategy_id = ?", (strategy_id,))
+    await db.execute("DELETE FROM trading_signals WHERE strategy_id = ? AND account_id = ?", (strategy_id, account_id))
+    await db.delete("strategies", "id = ?", (strategy_id,))
+
+    await log_action(
+        agent_id=agent["agent_id"], action="strategy.delete", risk_level="high",
+        account_id=account_id, resource_type="strategy", resource_id=str(strategy_id),
+        request_payload={"name": strategy.get("name")},
+        ip_address=request.client.host if request.client else None,
+    )
+
+    return {"success": True, "message": f"策略「{strategy['name']}」已删除"}
 
 
 # ============== 系统管理端点 (operator+) ==============

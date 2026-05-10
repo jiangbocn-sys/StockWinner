@@ -6,6 +6,7 @@ from typing import Dict, Any, Optional
 from services.auth.service import get_auth_service
 import logging
 from services.common.timezone import get_china_time
+from services.common.database import get_db_manager
 
 
 logger = logging.getLogger(__name__)
@@ -135,4 +136,146 @@ async def change_password(
     return {
         "success": True,
         "message": "密码修改成功"
+    }
+
+
+# ============================================================
+# Agent 绑定 API — 用户通过 UI token 为自己创建/管理 Agent
+# ============================================================
+
+@router.post("/agent/bind")
+async def bind_agent(
+    agent_data: Dict[str, str],
+    token: str = Depends(get_token_from_header),
+):
+    """为当前登录用户创建并绑定 Agent
+
+    请求体:
+    - name: Agent 名称（如 "OpenClaw-Agent"）
+    - agent_type: Agent 类型（openclaw / hermes / claude_code / generic）
+    - role: 角色（viewer / strategist / operator / admin，默认 viewer）
+
+    返回:
+    - agent_id, api_key, role 等
+    - api_key 仅返回一次，不会再次显示
+    """
+    import uuid
+    import hashlib
+    import secrets
+    import json
+
+    service = get_auth_service()
+    account = service.validate_token(token)
+    if not account:
+        raise HTTPException(status_code=401, detail="认证失败或会话已过期")
+
+    name = agent_data.get("name", "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Agent 名称不能为空")
+
+    agent_type = agent_data.get("agent_type", "generic")
+    role = agent_data.get("role", "viewer")
+    allowed_roles = ["viewer", "strategist", "operator", "admin"]
+    if role not in allowed_roles:
+        raise HTTPException(status_code=400, detail=f"角色必须是 {allowed_roles} 之一")
+
+    api_key = f"sk-agent-{secrets.token_hex(24)}"
+    key_hash = hashlib.sha256(api_key.encode()).hexdigest()
+    agent_id = str(uuid.uuid4())
+    user_id = account["account_id"]
+    now = get_china_time().strftime("%Y-%m-%dT%H:%M:%S")
+
+    db = get_db_manager()
+    await db.execute("""
+        INSERT INTO agent_accounts
+        (agent_id, user_id, name, agent_type, api_key_hash, role, allowed_account_ids, rate_limit_per_min, enabled, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 60, 1, ?)
+    """, (agent_id, user_id, name, agent_type, key_hash, role, json.dumps(["*"]), now))
+
+    return {
+        "success": True,
+        "agent_id": agent_id,
+        "name": name,
+        "agent_type": agent_type,
+        "role": role,
+        "user_id": user_id,
+        "api_key": api_key,
+        "warning": "请妥善保存 api_key，系统不会再次显示",
+    }
+
+
+@router.get("/agents")
+async def list_my_agents(token: str = Depends(get_token_from_header)):
+    """获取当前登录用户的所有 Agent"""
+    service = get_auth_service()
+    account = service.validate_token(token)
+    if not account:
+        raise HTTPException(status_code=401, detail="认证失败或会话已过期")
+
+    db = get_db_manager()
+    agents = await db.fetchall(
+        "SELECT agent_id, name, agent_type, role, rate_limit_per_min, enabled, created_at, last_used_at "
+        "FROM agent_accounts WHERE user_id = ? ORDER BY created_at DESC",
+        (account["account_id"],)
+    )
+
+    return {"success": True, "user_id": account["account_id"], "agents": agents}
+
+
+@router.delete("/agent/{agent_id}")
+async def unbind_agent(
+    agent_id: str,
+    token: str = Depends(get_token_from_header),
+):
+    """解绑（删除）当前用户的某个 Agent"""
+    service = get_auth_service()
+    account = service.validate_token(token)
+    if not account:
+        raise HTTPException(status_code=401, detail="认证失败或会话已过期")
+
+    db = get_db_manager()
+    result = await db.execute(
+        "DELETE FROM agent_accounts WHERE agent_id = ? AND user_id = ?",
+        (agent_id, account["account_id"])
+    )
+    if result.rowcount == 0:
+        raise HTTPException(status_code=404, detail="Agent 不存在或不属于你")
+
+    return {"success": True, "message": f"Agent {agent_id} 已解绑"}
+
+
+@router.post("/agent/{agent_id}/rotate-key")
+async def rotate_agent_key(
+    agent_id: str,
+    token: str = Depends(get_token_from_header),
+):
+    """重置 Agent 的 API Key（旧 key 立即失效）"""
+    import secrets
+    import hashlib
+
+    service = get_auth_service()
+    account = service.validate_token(token)
+    if not account:
+        raise HTTPException(status_code=401, detail="认证失败或会话已过期")
+
+    db = get_db_manager()
+    existing = await db.fetchone(
+        "SELECT * FROM agent_accounts WHERE agent_id = ? AND user_id = ?",
+        (agent_id, account["account_id"])
+    )
+    if not existing:
+        raise HTTPException(status_code=404, detail="Agent 不存在或不属于你")
+
+    new_key = f"sk-agent-{secrets.token_hex(24)}"
+    new_hash = hashlib.sha256(new_key.encode()).hexdigest()
+    await db.execute(
+        "UPDATE agent_accounts SET api_key_hash = ? WHERE agent_id = ?",
+        (new_hash, agent_id)
+    )
+
+    return {
+        "success": True,
+        "agent_id": agent_id,
+        "api_key": new_key,
+        "warning": "请妥善保存新 api_key，旧 key 已失效",
     }

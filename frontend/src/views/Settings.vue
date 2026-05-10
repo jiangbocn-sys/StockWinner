@@ -76,6 +76,60 @@
         </el-form>
       </el-card>
 
+      <!-- AI Agent 管理 -->
+      <el-card style="margin-top: 20px">
+        <template #header>
+          <div class="card-header">
+            <span>AI Agent 管理</span>
+            <el-tag type="info">外部 AI 客户端接入</el-tag>
+          </div>
+        </template>
+
+        <el-alert
+          title="通过 API Key 将 OpenClaw / Hermes / Claude Code 等 AI Agent 接入本系统"
+          type="info"
+          :closable="false"
+          style="margin-bottom: 20px;"
+        >
+          <ol style="padding-left: 20px; margin: 10px 0;">
+            <li>点击下方"创建 Agent"按钮，选择 Agent 类型和权限</li>
+            <li>复制返回的 API Key 到 AI Agent 的配置中</li>
+            <li>Agent 将通过 X-Agent-Key 请求头调用系统 API</li>
+          </ol>
+        </el-alert>
+
+        <el-table :data="agents" style="width: 100%" size="default">
+          <el-table-column prop="agent_id" label="Agent ID" width="120">
+            <template #default="{ row }">
+              <code style="font-size: 11px; color: #909399;">{{ row.agent_id.substring(0, 8) }}...</code>
+            </template>
+          </el-table-column>
+          <el-table-column prop="name" label="名称" width="150" />
+          <el-table-column prop="agent_type" label="类型" width="120" />
+          <el-table-column prop="role" label="角色" width="100">
+            <template #default="{ row }">
+              <el-tag :type="roleTagType(row.role)" size="small">{{ row.role }}</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column prop="rate_limit_per_min" label="限速" width="80">
+            <template #default="{ row }">{{ row.rate_limit_per_min }}/min</template>
+          </el-table-column>
+          <el-table-column prop="last_used_at" label="最后使用" width="160" />
+          <el-table-column label="操作" width="200">
+            <template #default="{ row }">
+              <el-button size="small" @click="showKeyDialog(row)" :icon="Key">查看 Key</el-button>
+              <el-button size="small" type="danger" @click="deleteAgent(row)" :loading="deletingAgentId === row.agent_id">删除</el-button>
+            </template>
+          </el-table-column>
+        </el-table>
+
+        <div style="margin-top: 15px; text-align: center;">
+          <el-button type="primary" @click="showCreateDialog" size="default">
+            + 创建 Agent
+          </el-button>
+        </div>
+      </el-card>
+
       <!-- LLM API 配置 -->
       <el-card style="margin-top: 20px">
         <template #header>
@@ -187,12 +241,65 @@
         </el-descriptions>
       </el-card>
     </el-main>
+
+    <!-- 创建 Agent 对话框 -->
+    <el-dialog v-model="createVisible" title="创建 AI Agent" width="450px">
+      <el-form label-width="100px">
+        <el-form-item label="Agent 名称">
+          <el-input v-model="createForm.name" placeholder="如: OpenClaw-Agent" />
+        </el-form-item>
+        <el-form-item label="Agent 类型">
+          <el-select v-model="createForm.agent_type" style="width: 200px">
+            <el-option label="OpenClaw" value="openclaw" />
+            <el-option label="Hermes" value="hermes" />
+            <el-option label="Claude Code" value="claude_code" />
+            <el-option label="通用" value="generic" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="角色">
+          <el-select v-model="createForm.role" style="width: 200px">
+            <el-option label="只读查询 (viewer)" value="viewer" />
+            <el-option label="策略管理 (strategist)" value="strategist" />
+            <el-option label="系统操作 (operator)" value="operator" />
+            <el-option label="管理员 (admin)" value="admin" />
+          </el-select>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="createVisible = false">取消</el-button>
+        <el-button type="primary" @click="createAgent" :loading="creating">创建</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 查看 API Key 对话框 -->
+    <el-dialog v-model="keyVisible" :title="keyResult ? '重置 API Key' : '查看 API Key'" width="500px">
+      <div v-if="newApiKey">
+        <el-alert type="warning" :closable="false" style="margin-bottom: 15px;">
+          <b>请妥善保存此 API Key，关闭后不会再次显示</b>
+        </el-alert>
+        <el-input v-model="newApiKey" readonly>
+          <template #append>
+            <el-button @click="copyKey">复制</el-button>
+          </template>
+        </el-input>
+        <div style="margin-top: 10px; color: #999; font-size: 12px;">
+          使用方式：在请求头中添加 <code>X-Agent-Key: {{ newApiKey }}</code>
+        </div>
+      </div>
+      <div v-else>
+        <p style="color: #999;">系统不会存储明文 API Key，如需新 Key 请点击"重置"。</p>
+      </div>
+      <template #footer>
+        <el-button v-if="keyResult" @click="resetKey(keyResult)" :loading="rotating">重置 Key</el-button>
+        <el-button @click="keyVisible = false">关闭</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script setup>
 import { ref, reactive, computed, onMounted } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { useAccountStore } from '../stores/account'
 import NavBar from '../components/NavBar.vue'
 
@@ -451,7 +558,146 @@ const deleteLLMConfig = async () => {
 onMounted(() => {
   loadLLMConfig()
   loadNotificationConfig()
+  loadAgents()
 })
+
+// === Agent 管理 ===
+const agents = ref([])
+const createVisible = ref(false)
+const keyVisible = ref(false)
+const creating = ref(false)
+const deletingAgentId = ref(null)
+const rotating = ref(false)
+const keyResult = ref(null)
+const newApiKey = ref('')
+
+const createForm = reactive({
+  name: '',
+  agent_type: 'claude_code',
+  role: 'viewer',
+})
+
+const roleTagType = (role) => {
+  const map = { viewer: 'info', strategist: '', operator: 'warning', admin: 'danger' }
+  return map[role] || 'info'
+}
+
+const getToken = () => localStorage.getItem('auth_token') || ''
+
+const loadAgents = async () => {
+  try {
+    const res = await fetch('/api/auth/agents', {
+      headers: { 'X-Auth-Token': getToken() }
+    })
+    const data = await res.json()
+    if (data.success) {
+      agents.value = data.agents
+    }
+  } catch (e) {
+    console.error('加载 Agent 列表失败:', e)
+  }
+}
+
+const showCreateDialog = () => {
+  createForm.name = ''
+  createForm.agent_type = 'claude_code'
+  createForm.role = 'viewer'
+  createVisible.value = true
+}
+
+const createAgent = async () => {
+  if (!createForm.name) {
+    ElMessage.warning('请输入 Agent 名称')
+    return
+  }
+  creating.value = true
+  try {
+    const res = await fetch('/api/auth/agent/bind', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Auth-Token': getToken() },
+      body: JSON.stringify(createForm)
+    })
+    const data = await res.json()
+    if (data.success) {
+      ElMessage.success('Agent 创建成功')
+      newApiKey.value = data.api_key
+      keyResult.value = data
+      keyVisible.value = true
+      createVisible.value = false
+      await loadAgents()
+    } else {
+      ElMessage.error(data.detail || '创建失败')
+    }
+  } catch (e) {
+    ElMessage.error('创建失败: ' + e.message)
+  } finally {
+    creating.value = false
+  }
+}
+
+const showKeyDialog = (agent) => {
+  keyResult.value = agent
+  newApiKey.value = ''
+  keyVisible.value = true
+}
+
+const resetKey = async (agent) => {
+  rotating.value = true
+  try {
+    const res = await fetch(`/api/auth/agent/${agent.agent_id}/rotate-key`, {
+      method: 'POST',
+      headers: { 'X-Auth-Token': getToken() }
+    })
+    const data = await res.json()
+    if (data.success) {
+      newApiKey.value = data.api_key
+      ElMessage.success('API Key 已重置，旧 Key 已失效')
+    } else {
+      ElMessage.error(data.detail || '重置失败')
+    }
+  } catch (e) {
+    ElMessage.error('重置失败: ' + e.message)
+  } finally {
+    rotating.value = false
+  }
+}
+
+const deleteAgent = async (agent) => {
+  try {
+    await ElMessageBox.confirm(`确定要删除 Agent "${agent.name}" 吗？此操作不可恢复。`, '确认删除', {
+      type: 'warning'
+    })
+  } catch {
+    return
+  }
+  deletingAgentId.value = agent.agent_id
+  try {
+    const res = await fetch(`/api/auth/agent/${agent.agent_id}`, {
+      method: 'DELETE',
+      headers: { 'X-Auth-Token': getToken() }
+    })
+    const data = await res.json()
+    if (data.success) {
+      ElMessage.success(`Agent "${agent.name}" 已删除`)
+      await loadAgents()
+    } else {
+      ElMessage.error(data.detail || '删除失败')
+    }
+  } catch (e) {
+    ElMessage.error('删除失败: ' + e.message)
+  } finally {
+    deletingAgentId.value = null
+  }
+}
+
+const copyKey = async () => {
+  try {
+    await navigator.clipboard.writeText(newApiKey.value)
+    ElMessage.success('已复制到剪贴板')
+  } catch {
+    ElMessage.error('复制失败')
+  }
+}
 </script>
 
 <style scoped>

@@ -498,6 +498,98 @@ app.add_middleware(
 )
 
 
+# ============================================================
+# Agent 安全约束中间件
+# 任何携带 X-Agent-Key 的请求（无论走哪个路径）都必须通过 Agent 认证 + 审计
+# 不携带该 header 的请求（浏览器/UI）完全不受影响
+# ============================================================
+
+@app.middleware("http")
+async def agent_security_middleware(request: Request, call_next):
+    agent_key = request.headers.get("X-Agent-Key")
+    if not agent_key:
+        return await call_next(request)
+
+    # 携带了 X-Agent-Key → 必须走 Agent 认证
+    from services.agent.models import hash_api_key, get_effective_permissions, ROLE_RATE_LIMITS
+    import json as _json
+
+    key_hash = hash_api_key(agent_key)
+    db = get_db_manager()
+    agent = await db.fetchone(
+        "SELECT * FROM agent_accounts WHERE api_key_hash = ? AND enabled = 1",
+        (key_hash,)
+    )
+
+    if not agent:
+        return JSONResponse(status_code=401, content={"success": False, "message": "无效的 Agent API Key"})
+
+    # 更新 last_used_at
+    now = get_china_time().strftime("%Y-%m-%dT%H:%M:%S")
+    try:
+        await db.execute("UPDATE agent_accounts SET last_used_at = ? WHERE agent_id = ?", (now, agent["agent_id"]))
+    except Exception:
+        pass
+
+    # 解析权限
+    allowed_perms = None
+    denied_perms = None
+    try:
+        if agent.get("allowed_permissions"):
+            allowed_perms = _json.loads(agent["allowed_permissions"])
+        if agent.get("denied_permissions"):
+            denied_perms = _json.loads(agent["denied_permissions"])
+    except Exception:
+        pass
+
+    effective_perms = get_effective_permissions(agent["role"], allowed_perms, denied_perms)
+    try:
+        allowed_accounts = _json.loads(agent.get("allowed_account_ids", '["*"]'))
+    except Exception:
+        allowed_accounts = ["*"]
+
+    # 写入 request.state
+    request.state.agent_id = agent["agent_id"]
+    request.state.user_id = agent.get("user_id", "")
+    request.state.agent_name = agent["name"]
+    request.state.agent_type = agent.get("agent_type", "generic")
+    request.state.agent_role = agent["role"]
+    request.state.agent_permissions = effective_perms
+    request.state.agent_allowed_accounts = allowed_accounts
+    request.state.agent_rate_limit = agent.get("rate_limit_per_min") or ROLE_RATE_LIMITS.get(agent["role"], 60)
+    request.state.is_agent_request = True
+
+    # 限速检查
+    from services.agent.middleware import check_rate_limit
+    try:
+        check_rate_limit(agent["agent_id"], request.state.agent_rate_limit)
+    except Exception as e:
+        if "429" in str(e):
+            return JSONResponse(status_code=429, content={"success": False, "message": "请求过于频繁，请稍后重试"})
+
+    # 放行请求
+    response = await call_next(request)
+
+    # 写审计日志（仅写操作路径）
+    method = request.method
+    path = request.url.path
+    if method in ("POST", "PUT", "DELETE", "PATCH"):
+        try:
+            from services.agent.audit import log_action
+            await log_action(
+                agent_id=agent["agent_id"],
+                action=f"middleware.{method.lower()}.{path.split('/')[-1]}",
+                risk_level="medium",
+                account_id=getattr(request.state, "agent_allowed_accounts", None),
+                request_payload={"method": method, "path": path},
+                ip_address=request.client.host if request.client else None,
+            )
+        except Exception:
+            pass
+
+    return response
+
+
 # 全局异常处理
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):

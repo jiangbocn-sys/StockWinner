@@ -24,9 +24,9 @@ async def get_performance_summary(
 
     db = get_db_manager()
 
-    # 策略列表（用于下拉选择）
+    # 策略列表（仅选股策略：code_scope != 'trading'）
     strategies = await db.fetchall(
-        "SELECT id, name, strategy_type, code_scope, status FROM strategies WHERE account_id = ? ORDER BY id",
+        "SELECT id, name, strategy_type, code_scope, status FROM strategies WHERE account_id = ? AND (code_scope IS NULL OR code_scope != 'trading') ORDER BY id",
         (account_id,)
     )
 

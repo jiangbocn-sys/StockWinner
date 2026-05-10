@@ -42,7 +42,7 @@
       </el-form>
 
       <div class="login-footer">
-        <p class="version">版本：v6.1.4</p>
+        <p class="version">版本：{{ version }}</p>
       </div>
     </el-card>
   </div>
@@ -56,6 +56,13 @@ import { ElMessage } from 'element-plus'
 const router = useRouter()
 const loginFormRef = ref(null)
 const loading = ref(false)
+const version = ref('加载中...')
+
+// 获取后端版本号
+fetch('/api/v1/health')
+  .then(r => r.json())
+  .then(data => { version.value = `v${data.version}` })
+  .catch(() => { version.value = 'v7.1.2' })
 
 const loginForm = reactive({
   name: '',
