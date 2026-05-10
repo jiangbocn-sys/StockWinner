@@ -73,116 +73,270 @@ async def get_agent_spec():
     - 数据表结构：可用表、字段含义、查询方式
     - API 端点列表：所有可用端点及权限要求
     - 策略编写规范：代码型策略的编写约束、可用资源
-    - 安全约束：幂等保护、限速、风险等级
+    - 行为约束：禁止行为清单、安全规则
     """
     return {
         "system": {
             "name": "StockWinner",
-            "description": "多账户智能股票交易系统，支持选股、策略管理、交易执行、持仓监控",
-            "version": "v6.2.4",
+            "description": "多账户智能股票交易系统。支持选股、策略管理、交易执行、持仓监控、信号推送。",
+            "version": "v7.1.6",
+            "architecture": "FastAPI 后端 + Vue 3 前端 + SQLite 双库（stockwinner.db 业务 / kline.db 行情）",
         },
         "capabilities": {
-            "market_data": "实时行情、日/周/月K线、技术指标（MA/RSI/MACD/BOLL/KDJ/ATR/CCI/ADX）",
-            "screening": "因子选股（日频因子、月频因子），支持自定义条件筛选",
+            "market_data": "实时行情（SDK 直连银河证券）、日/周/月 K 线、技术指标",
+            "screening": "因子选股（日频因子 62 字段 + 月频因子 23 字段），支持自定义条件筛选和代码型策略",
             "strategy": "策略创建（配置型/代码型）、策略执行、策略效能评估",
-            "trading": "模拟交易（买/卖）、持仓管理、交易记录查询",
+            "trading": "模拟交易（买/卖/持仓管理/交易记录）",
             "monitoring": "交易信号监控、通知推送（飞书 Webhook）",
-            "scheduling": "定时任务调度（K线检查、因子计算、选股任务）",
+            "scheduling": "APScheduler 定时任务（K线下载、因子计算、选股任务、盘后分析）",
             "notifications": "通知历史查询、通知配置管理",
         },
+
+        # ================================================================
+        # 数据表结构
+        # ================================================================
         "data_tables": {
-            "kline_data": {
-                "description": "日K线历史数据（本地缓存）",
-                "key_columns": ["stock_code", "trade_date", "open", "high", "low", "close", "volume", "amount"],
-                "query_hint": "WHERE stock_code = ? ORDER BY trade_date DESC LIMIT ?",
-            },
-            "weekly_kline_data": {
-                "description": "周K线历史数据（市场交易周日历对齐）",
-                "key_columns": ["stock_code", "stock_name", "week_start_date", "week_end_date", "open", "high", "low", "close", "volume", "amount"],
-            },
-            "stock_daily_factors": {
-                "description": "日频因子数据（~62个字段，技术指标为主）",
-                "key_columns": ["stock_code", "trade_date", "ma5", "ma10", "ma20", "ma60", "rsi_7", "rsi_14", "macd_dif", "macd_dea", "macd_hist", "boll_upper", "boll_mid", "boll_lower", "kdj_k", "kdj_d", "kdj_j", "atr_14", "cci_14", "adx_14", "vol_ratio", "turnover_rate"],
-            },
-            "stock_monthly_factors": {
-                "description": "月频因子数据（财务数据 + 盈利/成长因子）",
-                "key_columns": ["stock_code", "report_date", "pe_ttm", "pb", "ps_ttm", "roe", "roa", "gross_margin", "net_margin", "revenue_growth", "net_profit_growth"],
+            "accounts": {
+                "description": "用户账户信息",
+                "key_columns": ["account_id", "name", "display_name", "is_active", "available_cash", "commission_rate", "stamp_tax"],
+                "query": "SELECT * FROM accounts WHERE account_id = ? AND is_active = 1",
             },
             "stock_positions": {
-                "description": "持仓记录",
-                "key_columns": ["account_id", "stock_code", "stock_name", "quantity", "available_quantity", "avg_cost", "current_price", "market_value", "profit_loss"],
+                "description": "当前持仓记录",
+                "key_columns": ["account_id", "stock_code", "stock_name", "quantity", "available_quantity", "avg_cost", "current_price", "market_value", "profit_loss", "highest_price"],
+                "query": "SELECT * FROM stock_positions WHERE account_id = ? AND quantity > 0",
             },
             "trade_records": {
-                "description": "交易记录",
-                "key_columns": ["account_id", "stock_code", "stock_name", "trade_type", "price", "quantity", "amount", "trade_time", "commission"],
+                "description": "交易记录（含历史）",
+                "key_columns": ["account_id", "stock_code", "stock_name", "trade_type", "price", "quantity", "amount", "commission", "profit_loss", "trade_time", "trigger_source", "strategy_id"],
+                "query": "SELECT * FROM trade_records WHERE account_id = ? ORDER BY trade_time DESC LIMIT ?",
             },
             "strategies": {
-                "description": "选股策略配置",
-                "key_columns": ["id", "account_id", "name", "type", "config", "code", "code_type", "status"],
+                "description": "策略配置表（配置型 + 代码型）",
+                "key_columns": ["id", "account_id", "name", "strategy_type", "config", "status", "code", "code_type", "code_scope", "target_scope", "function_name", "buy_strategy_id", "sell_strategy_id"],
+                "note": "strategy_type: 'screening'=配置型选股, 'python'=代码型; code_scope: 'screening'=选股, 'trading'=交易",
+                "query": "SELECT * FROM strategies WHERE account_id = ? ORDER BY created_at DESC",
             },
             "watchlist": {
-                "description": "观察清单（含候选股组关联）",
-                "key_columns": ["account_id", "stock_code", "stock_name", "group_id", "source_type", "status", "current_price"],
+                "description": "观察清单（候选股组 + 信号）",
+                "key_columns": ["account_id", "stock_code", "stock_name", "group_id", "source_type", "status", "current_price", "buy_price", "stop_loss_price", "take_profit_price", "bought", "strategy_id"],
+                "note": "status: pending/watching/bought/sold/ignored; source_type: manual/strategy; bought=1 表示已实际买入",
+                "query": "SELECT * FROM watchlist WHERE account_id = ? AND status = ?",
+            },
+            "candidate_groups": {
+                "description": "候选股分组",
+                "key_columns": ["id", "account_id", "name", "group_type", "screening_strategy_id"],
+                "note": "group_type: 'manual'=手动创建, 'screening'=策略自动创建",
             },
             "candidate_stocks": {
-                "description": "候选股明细",
-                "key_columns": ["group_id", "stock_code", "stock_name", "reason", "created_at"],
+                "description": "候选股明细（组级别）",
+                "key_columns": ["group_id", "stock_code", "stock_name", "reason"],
+            },
+            "temp_candidates": {
+                "description": "临时候选股（待确认）",
+                "key_columns": ["account_id", "stock_code", "stock_name", "match_score", "reason"],
             },
             "trading_signals": {
                 "description": "交易信号记录",
-                "key_columns": ["account_id", "stock_code", "signal_type", "price", "created_at"],
+                "key_columns": ["account_id", "stock_code", "stock_name", "signal_type", "price", "reason", "strategy_id", "created_at"],
+                "note": "signal_type: buy/sell/watch",
+            },
+            "kline_data": {
+                "description": "日 K 线历史（kline.db）",
+                "key_columns": ["stock_code", "stock_name", "trade_date", "open", "high", "low", "close", "volume", "amount", "turnover_rate"],
+                "query": "SELECT * FROM kline_data WHERE stock_code = ? ORDER BY trade_date DESC LIMIT ?",
+            },
+            "weekly_kline_data": {
+                "description": "周 K 线历史（kline.db，市场交易周日历对齐）",
+                "key_columns": ["stock_code", "stock_name", "week_start_date", "week_end_date", "open", "high", "low", "close", "volume", "amount"],
+                "query": "SELECT * FROM weekly_kline_data WHERE stock_code = ? ORDER BY week_end_date DESC LIMIT ?",
+            },
+            "stock_daily_factors": {
+                "description": "日频因子数据（kline.db，~62 字段，技术指标为主）",
+                "key_columns": ["stock_code", "trade_date", "ma5", "ma10", "ma20", "ma60", "rsi_7", "rsi_14", "macd_dif", "macd_dea", "macd_hist", "boll_upper", "boll_mid", "boll_lower", "kdj_k", "kdj_d", "kdj_j", "atr_14", "cci_14", "adx_14", "vol_ratio", "turnover_rate"],
+                "query": "SELECT * FROM stock_daily_factors WHERE stock_code = ? AND trade_date = ?",
+            },
+            "stock_monthly_factors": {
+                "description": "月频因子数据（kline.db，财务 + 盈利/成长因子，23 字段）",
+                "key_columns": ["stock_code", "report_date", "pe_ttm", "pb", "ps_ttm", "roe", "roa", "gross_margin", "net_margin", "revenue_growth", "net_profit_growth"],
+                "query": "SELECT * FROM stock_monthly_factors WHERE stock_code = ? ORDER BY report_date DESC LIMIT 1",
             },
             "notification_history": {
                 "description": "通知发送历史",
                 "key_columns": ["account_id", "channel", "event_type", "title", "status", "created_at"],
+                "note": "event_type: trade/signal_triggered/task_completed/screening_completed",
+            },
+            "strategy_tasks": {
+                "description": "调度任务配置",
+                "key_columns": ["id", "account_id", "task_type", "module", "strategy_id", "group_id", "cron_expression", "enabled", "last_status"],
+                "note": "task_type: 'strategy'=用户策略任务, 'builtin'=系统内置任务",
             },
         },
+
+        # ================================================================
+        # Agent API 端点
+        # ================================================================
+        "agent_api": {
+            "authentication": {
+                "header": "X-Agent-Key: sk-agent-xxxx",
+                "note": "所有 /api/v1/agent/ 端点必须携带此 header，否则 401",
+            },
+            "query_endpoints": {
+                "description": "只读查询，viewer 及以上角色可用",
+                "endpoints": [
+                    {"method": "GET", "path": "/api/v1/agent/query/dashboard?account_id=xxx", "desc": "仪表盘数据（仓位、现金、今日交易）"},
+                    {"method": "GET", "path": "/api/v1/agent/query/positions?account_id=xxx", "desc": "当前持仓列表"},
+                    {"method": "GET", "path": "/api/v1/agent/query/trades?account_id=xxx&start_date=&end_date=&limit=50", "desc": "交易记录"},
+                    {"method": "GET", "path": "/api/v1/agent/query/signals?account_id=xxx&limit=50", "desc": "交易信号"},
+                    {"method": "GET", "path": "/api/v1/agent/query/watchlist?account_id=xxx&group_id=", "desc": "观察清单"},
+                    {"method": "GET", "path": "/api/v1/agent/query/candidates?account_id=xxx&group_id=", "desc": "候选股明细"},
+                    {"method": "GET", "path": "/api/v1/agent/query/strategies?account_id=xxx", "desc": "策略列表（含 config JSON）"},
+                    {"method": "GET", "path": "/api/v1/agent/query/strategy/{id}", "desc": "策略详情"},
+                    {"method": "GET", "path": "/api/v1/agent/query/market?stock_code=600000.SH", "desc": "实时行情（SDK）"},
+                    {"method": "GET", "path": "/api/v1/agent/query/kline?stock_code=600000.SH&period=day&limit=100", "desc": "K 线数据（day/week/month）"},
+                    {"method": "GET", "path": "/api/v1/agent/query/factors?stock_code=600000.SH&date=2026-05-10", "desc": "日频因子"},
+                    {"method": "GET", "path": "/api/v1/agent/query/notifications?account_id=xxx&limit=50", "desc": "通知历史"},
+                ],
+            },
+            "submit_endpoints": {
+                "description": "策略创建，strategist 及以上角色可用",
+                "endpoints": [
+                    {"method": "POST", "path": "/api/v1/agent/submit/screening?account_id=xxx", "desc": "创建配置型选股策略", "body": '{"name":"策略名","config":{"buy_conditions":[{"condition":"RSI_14 < 30","operator":"and"}]},"target_scope":"group","match_score_threshold":0.5}'},
+                    {"method": "POST", "path": "/api/v1/agent/submit/strategy-code?account_id=xxx", "desc": "创建代码型策略（AST 校验 + 试运行）", "body": '{"name":"策略名","code":"def run(context):\\n    ...","function_name":"run","code_scope":"screening"}'},
+                    {"method": "POST", "path": "/api/v1/agent/submit/trading-strategy?account_id=xxx", "desc": "创建交易策略（code_scope=trading）", "body": '{"name":"策略名","code":"def run(context):\\n    ...","function_name":"run","buy_strategy_id":38,"sell_strategy_id":39}'},
+                    {"method": "PUT", "path": "/api/v1/agent/strategy/{id}?account_id=xxx", "desc": "修改策略（代码变更时重新 AST 校验）", "body": '{"name":"新名称","code":"..."}'},
+                    {"method": "DELETE", "path": "/api/v1/agent/strategy/{id}?account_id=xxx", "desc": "删除策略（需 strategist 角色，清理关联数据）"},
+                ],
+            },
+            "admin_endpoints": {
+                "description": "管理员功能，admin 角色",
+                "endpoints": [
+                    {"method": "GET", "path": "/api/v1/agent/admin/audit?limit=50&offset=0", "desc": "审计日志"},
+                    {"method": "POST", "path": "/api/v1/agent/admin/agents", "desc": "创建新 Agent"},
+                    {"method": "GET", "path": "/api/v1/agent/admin/agents", "desc": "列出所有 Agent"},
+                    {"method": "PUT", "path": "/api/v1/agent/admin/agents/{id}", "desc": "更新 Agent"},
+                    {"method": "DELETE", "path": "/api/v1/agent/admin/agents/{id}", "desc": "删除 Agent"},
+                    {"method": "POST", "path": "/api/v1/agent/admin/agents/{id}/rotate-key", "desc": "重置 Agent API Key"},
+                ],
+            },
+        },
+
+        # ================================================================
+        # 策略编写规范
+        # ================================================================
         "code_strategy_spec": {
             "description": "代码型策略编写规范",
-            "language": "Python 3 (安全沙盒执行)",
-            "entry_point": "函数名由 strategy.function_name 字段指定，默认 run()",
-            "function_signature": "def run(context: dict) -> dict:",
-            "context_input": {
-                "account_id": "str — 当前账户 ID",
-                "strategy_id": "int — 策略 ID",
-                "group_id": "int — 关联候选股组 ID",
-                "db_query": "async function — SELECT 查询，返回行列表",
-                "db_fetchone": "async function — 单行查询",
-                "get_today": "function — 返回今天日期字符串 YYYY-MM-DD",
-            },
+            "language": "Python 3（安全沙盒执行，AST 校验 + 受限 __builtins__）",
+            "entry_point": "def run(context) 函数，名称由 strategy.function_name 指定（默认 run）",
+            "function_signature": "def run(context: dict) -> list:",
             "return_value": {
-                "stocks": "list[dict] — 筛选出的股票列表，每项含 stock_code, stock_name, reason",
-                "message": "str — 执行摘要（可选）",
+                "format": "list[dict] — 每只股票一个信号字典",
+                "required_fields": {"stock_code": "str，如 600000.SH"},
+                "optional_fields": {"action": "'buy'/'sell'/'watch'，默认 buy", "stock_name": "str", "buy_price": "float", "target_quantity": "int", "stop_loss_pct": "float，默认 0.05", "take_profit_pct": "float，默认 0.15", "reason": "str"},
             },
-            "available_modules": "json, math, datetime, statistics, collections",
-            "prohibited": [
-                "禁止 import os/sys/subprocess/socket/http 等模块",
-                "禁止使用 eval/exec/open/input/print（print 可改用）",
-                "禁止访问网络、文件系统、系统命令",
-                "最大 500 行代码，最多 10 个函数",
-            ],
-            "example": """def run(context):
-    # 查询今日因子数据
-    rows = await context['db_query'](
-        "SELECT stock_code, rsi_14, vol_ratio FROM stock_daily_factors WHERE trade_date = ? AND rsi_14 < 30",
-        (context['get_today'](),)
+            "context_available": {
+                "stocks": "list[dict] — 当前候选股票列表 [{stock_code, stock_name}]",
+                "account_id": "str — 当前账户 ID",
+                "today": "str — 今天日期 YYYY-MM-DD",
+                "indicators": "dict — {calculate_ma, calculate_rsi, calculate_macd, calculate_kdj, calculate_bollinger_bands, calculate_adx, calculate_atr, calculate_ema, calculate_obv, calculate_historical_volatility}",
+                "get_kline_smart(codes, lookback)": "智能 K 线（盘中实时/盘后本地）",
+                "get_batch_kline(codes, limit)": "批量获取 K 线",
+                "get_factors(code, date)": "获取单只股票日频因子",
+                "get_factors_batch(codes, date)": "批量获取日频因子",
+                "get_kline_spliced(codes, lookback)": "拼接 K 线",
+                "get_kline_local(code, limit, start_date)": "本地 K 线（同步）",
+                "query_db(sql, params)": "同步只读 SQL 查询，返回 list[dict]",
+                "kronos_predict(df_hist, pred_len)": "Kronos 时间序列预测",
+            },
+            "allowed_imports": ["pandas", "numpy", "datetime", "statistics", "json", "math", "re", "collections", "itertools", "functools", "dataclasses", "typing", "time", "calendar", "decimal", "copy", "string"],
+            "prohibited_imports": ["os", "sys", "subprocess", "socket", "http", "requests", "urllib", "sqlite3", "torch", "safetensors"],
+            "prohibited_calls": ["eval", "exec", "compile", "open", "input", "breakpoint", "getattr", "setattr", "delattr", "globals", "locals", "__import__"],
+            "limits": "最大 500 行代码，最多 10 个函数，不能是 async def",
+            "example_screening": """def run(context):
+    today = context['today']
+    stocks = context['stocks']
+    get_factors = context['get_factors']
+
+    results = []
+    for s in stocks:
+        factors = get_factors(s['stock_code'], today)
+        if factors and factors.get('rsi_14', 100) < 30:
+            results.append({
+                'stock_code': s['stock_code'],
+                'stock_name': s['stock_name'],
+                'action': 'buy',
+                'reason': f"RSI超卖 {factors['rsi_14']:.1f}",
+            })
+    return results""",
+            "example_trading": """def run(context):
+    # 交易型策略：检查持仓决定是否卖出
+    query_db = context['query_db']
+    today = context['today']
+
+    positions = query_db(
+        "SELECT stock_code, avg_cost, current_price FROM stock_positions WHERE account_id = ? AND quantity > 0",
+        (context['account_id'],)
     )
-    return {
-        "stocks": [{"stock_code": r["stock_code"], "reason": f"RSI超卖 {r['rsi_14']:.1f}"} for r in rows],
-        "message": f"筛选出 {len(rows)} 只RSI超卖股票"
-    }""",
-            "validation": "提交时执行 AST 语法校验 + 沙盒试运行（用历史数据跑一次，返回结果供调试）",
+    results = []
+    for p in positions:
+        if p['current_price'] and p['avg_cost']:
+            loss_pct = (p['avg_cost'] - p['current_price']) / p['avg_cost']
+            if loss_pct > 0.08:  # 亏损超 8%
+                results.append({
+                    'stock_code': p['stock_code'],
+                    'action': 'sell',
+                    'reason': f"止损 亏损{loss_pct*100:.1f}%",
+                })
+    return results""",
         },
+
+        # ================================================================
+        # 行为约束（禁止行为清单）
+        # ================================================================
+        "behavioral_constraints": {
+            "description": "Agent 行为约束 — 违反将导致请求被拒绝或触发安全审计",
+            "never": [
+                "禁止绕过 /api/v1/agent/ 路径直接 curl /api/v1/ui/ 端点 — 必须携带 X-Agent-Key 通过 agent API 操作，否则行为无法审计",
+                "禁止在非交易时段（9:15 之前、11:30-13:00、15:00 之后）执行买入/卖出操作",
+                "禁止删除未引用的策略（策略被其他策略通过 buy_strategy_id/sell_strategy_id 引用时）",
+                "禁止对同一股票在同一天内创建多个重复的买入信号",
+                "禁止使用硬编码的 account_id — 应从 /me 端点或用户配置中获取",
+                "禁止修改 system 级别的任务（task_type='builtin' 的 strategy_tasks 记录）",
+                "禁止直接操作数据库文件（stockwinner.db / kline.db）— 必须通过 API",
+                "禁止在策略代码中 import os/sys/subprocess/socket/http 等模块",
+                "禁止使用 eval/exec/open 等危险函数",
+                "禁止在策略中建立网络连接或读写文件系统",
+            ],
+            "must": [
+                "创建代码型策略后必须先通过 test-run 验证再激活",
+                "执行交易操作前必须确认账户可用资金充足",
+                "修改或删除策略前必须先查询策略详情确认影响范围",
+                "所有写操作（POST/PUT/DELETE）必须使用幂等请求或接受可能的重复执行后果",
+                "使用 get_kline_smart 而非直接调用 SDK 获取行情数据",
+                "策略代码必须返回 list 类型，不能返回 dict 或其他类型",
+            ],
+            "should": [
+                "优先使用批量接口（get_factors_batch, get_batch_kline）减少 TGW 连接占用",
+                "策略代码尽量简洁，优先使用已注入的 context 工具函数",
+                "查询数据时使用 LIMIT 防止返回过多记录",
+                "交易策略应设置合理的 stop_loss_pct（0.05-0.10）和 take_profit_pct（0.15-0.30）",
+            ],
+        },
+
+        # ================================================================
+        # 安全约束
+        # ================================================================
         "security": {
-            "rate_limit": "每 Agent 有独立 token bucket 限速，默认 30-120 请求/分钟",
-            "idempotency": "相同操作的重复请求会被去重（如 K 线下载、监控启停），系统返回上次结果",
+            "rate_limit": "每 Agent 独立 token bucket，默认 30-120 请求/分钟（按角色），超限返回 429",
+            "idempotency": "相同请求（method+path+body 的 MD5）5 分钟内去重，返回上次结果",
             "risk_levels": {
                 "low": "只读查询 — 自动放行",
                 "medium": "创建/修改策略 — 审计记录 + AST 校验",
-                "high": "删除/启停服务 — 需人工确认",
+                "high": "删除策略/启停服务 — 审计记录，operator+ 可执行",
                 "critical": "交易/账户变更 — 必须人工确认",
             },
-            "account_scope": "Agent 只能访问 allowed_account_ids 指定的账户",
+            "account_scope": "Agent 只能访问 allowed_account_ids 指定的账户，越权返回 403",
+            "audit": "所有写操作（POST/PUT/DELETE）自动记录到 agent_audit_log 表",
         },
     }
 
