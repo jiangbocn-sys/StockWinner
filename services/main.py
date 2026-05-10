@@ -578,9 +578,10 @@ async def agent_security_middleware(request: Request, call_next):
             from services.agent.audit import log_action
             await log_action(
                 agent_id=agent["agent_id"],
-                action=f"middleware.{method.lower()}.{path.split('/')[-1]}",
+                user_id=agent.get("user_id", ""),
+                action=f"middleware.{method.lower()}.{path.rstrip('/').split('/')[-1]}",
                 risk_level="medium",
-                account_id=getattr(request.state, "agent_allowed_accounts", None),
+                account_id=agent.get("user_id", ""),
                 request_payload={"method": method, "path": path},
                 ip_address=request.client.host if request.client else None,
             )
