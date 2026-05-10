@@ -19,15 +19,12 @@ window.fetch = async (...args) => {
 
   // 自动注入 token 到 UI API 请求
   if ((url.includes('/api/v1/ui/') || url.includes('/api/accounts/')) && token) {
-    // 合并 headers
-    const init = args[1] || {}
-    const headers = { ...init.headers, 'X-Auth-Token': token }
-    if (typeof args[0] === 'string') {
-      args[0] = args[0] // url unchanged
-    } else if (args[0]) {
-      args[0] = { ...args[0], headers }
+    const existingHeaders = (typeof args[1]?.headers === 'object') ? args[1].headers : {}
+    const headers = { ...existingHeaders, 'X-Auth-Token': token }
+    if (args[1]) {
+      args[1] = { ...args[1], headers }
     } else {
-      args[1] = { ...init, headers }
+      args[1] = { headers }
     }
   }
 
