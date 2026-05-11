@@ -17,6 +17,9 @@ from services.common.timezone import CHINA_TZ, get_china_time
 # 导入下载进度跟踪器
 from services.common.download_progress import get_progress_tracker, DownloadStatus
 
+# 统一因子计算管道（替代本地重复实现）
+from services.factors.factor_pipeline import calculate_technical_factors, add_signal_indicators
+
 
 def get_trading_day_end_date(current_time: Optional[datetime] = None,
                               use_sdk_calendar: bool = True) -> Tuple[str, str]:
@@ -1076,7 +1079,7 @@ def calculate_and_save_factors_for_dates(
     1. 获取日期范围内有数据的所有股票
     2. 对于每只股票，只计算 stock_daily_factors 表中缺失的日期
     3. 批量读取每只股票的 k 线数据
-    4. 调用 DailyFactorCalculator 计算所有因子
+    4. 通过 factor_pipeline 计算所有技术指标 + 信号指标
     5. 计算市值和上市天数
     6. 批量插入到 stock_daily_factors 表
 
@@ -1091,8 +1094,6 @@ def calculate_and_save_factors_for_dates(
     返回：
     - 成功计算的记录数
     """
-    from services.factors.daily_factor_calculator import DailyFactorCalculator
-
     conn = sqlite3.connect(str(DB_PATH), timeout=60)
     cursor = conn.cursor()
     # 启用WAL模式减少锁竞争，设置busy_timeout为60秒
@@ -1116,7 +1117,6 @@ def calculate_and_save_factors_for_dates(
     total_stocks = len(stock_codes)
     print(f"[FactorCalc] 将为 {total_stocks} 只股票计算因子 ({start_date} 至 {end_date})")
 
-    calculator = DailyFactorCalculator()
     total_inserted = 0
     BATCH_SIZE = 50  # 每批处理的股票数
     processed = 0
@@ -1221,56 +1221,9 @@ def calculate_and_save_factors_for_dates(
                 if only_new_dates and i == 0 and stock_code == batch_stocks[0]:
                     print(f"  [DEBUG] {stock_code}: calc={calc_start}~{calc_end}, K线={df['trade_date'].min()}~{df['trade_date'].max()}")
 
-                # 计算技术指标因子
-                df = calculator.calculate_price_performance(df)
-                df = calculator.calculate_kdj(df)
-                df = calculator.calculate_macd(df)
-
-                # 计算扩展技术指标（MA5/10/20/60, RSI14, 布林带等）
-                from services.common.technical_indicators import add_all_extended_technical_indicators_to_df
-                from services.common.sdk_column_mapping import map_tech_columns
-                df = add_all_extended_technical_indicators_to_df(df)
-                # 转换列名：ma_5 -> ma5 等
-                df = map_tech_columns(df)
-
-                # 计算补充技术信号指标
-                # 1. 金叉死叉信号
-                df['golden_cross'] = ((df['ma5'] > df['ma10']) & (df['ma5'].shift(1) <= df['ma10'].shift(1))).astype(int)
-                df['death_cross'] = ((df['ma5'] < df['ma10']) & (df['ma5'].shift(1) >= df['ma10'].shift(1))).astype(int)
-
-                # 2. 涨停统计（涨幅>9.5%视为涨停）
-                df['is_limit_up'] = (df['change_pct'] * 100 > 9.5).astype(int)
-                df['limit_up_count_10d'] = df['is_limit_up'].rolling(10, min_periods=1).sum()
-                df['limit_up_count_20d'] = df['is_limit_up'].rolling(20, min_periods=1).sum()
-                df['limit_up_count_30d'] = df['is_limit_up'].rolling(30, min_periods=1).sum()
-
-                # 3. 连续涨停天数
-                df['consecutive_limit_up'] = 0
-                consec_count = 0
-                for i in range(len(df)):
-                    if df['is_limit_up'].iloc[i] == 1:
-                        consec_count += 1
-                    else:
-                        consec_count = 0
-                    df.loc[df.index[i], 'consecutive_limit_up'] = consec_count
-
-                # 4. 大涨大跌统计（涨幅>5%或跌幅>5%）
-                df['large_gain_5d_count'] = (df['change_pct'] * 100 > 5).rolling(5, min_periods=1).sum().astype(int)
-                df['large_loss_5d_count'] = (df['change_pct'] * 100 < -5).rolling(5, min_periods=1).sum().astype(int)
-
-                # 5. 价格位置（距250日高低点比例）
-                high_250 = df['high'].rolling(250, min_periods=1).max()
-                low_250 = df['low'].rolling(250, min_periods=1).min()
-                range_val = high_250 - low_250
-                df['close_to_high_250d'] = (df['close'] - low_250) / range_val * 100
-                df['close_to_low_250d'] = (high_250 - df['close']) / range_val * 100
-
-                # 6. 缺口比例（跳空高开统计）
-                df['gap_up'] = ((df['open'] > df['high'].shift(1)) & (df['open'] > df['low'].shift(1))).astype(int)
-                df['gap_up_ratio'] = df['gap_up'].rolling(20, min_periods=1).sum() / 20 * 100
-
-                df['next_period_change'] = df['close'].pct_change().shift(-1)
-                df['is_traded'] = (df['volume'] > 0).astype(int)
+                # 计算技术指标因子（统一管道，替代本地重复实现）
+                df = calculate_technical_factors(df)
+                df = add_signal_indicators(df)
 
                 # 从 stock_base_info 获取股本数据用于计算市值
                 float_share = None  # 流通股本（万股）
@@ -1664,16 +1617,8 @@ def fill_empty_factor_values(
                 df['stock_code'] = stock_code
                 df['change_pct'] = df['close'].pct_change()
 
-                from services.factors.daily_factor_calculator import DailyFactorCalculator
-                from services.common.technical_indicators import add_all_extended_technical_indicators_to_df
-                from services.common.sdk_column_mapping import map_tech_columns
-
-                calculator = DailyFactorCalculator()
-                df = calculator.calculate_price_performance(df)
-                df = calculator.calculate_kdj(df)
-                df = calculator.calculate_macd(df)
-                df = add_all_extended_technical_indicators_to_df(df)
-                df = map_tech_columns(df)
+                # 计算技术指标因子（统一管道）
+                df = calculate_technical_factors(df)
 
                 # 更新空值字段
                 factor_fields = [
@@ -1772,10 +1717,6 @@ def smart_update_factors(
         'skipped': int      # 跳过已有完整记录数
       }
     """
-    from services.factors.daily_factor_calculator import DailyFactorCalculator
-    from services.common.technical_indicators import add_all_extended_technical_indicators_to_df
-    from services.common.sdk_column_mapping import map_tech_columns
-
     # numpy类型转换函数：避免numpy.int64/float64被SQLite存储为blob
     def to_python_value(val):
         if val is None:
@@ -1876,7 +1817,6 @@ def smart_update_factors(
 
     total_inserted = 0
     total_updated = 0
-    calculator = DailyFactorCalculator()
 
     BATCH_SIZE = 50
     all_stocks_list = list(all_stocks)
@@ -1939,39 +1879,9 @@ def smart_update_factors(
                 df['stock_code'] = stock_code
                 df['change_pct'] = df['close'].pct_change()
 
-                # 计算技术指标
-                df = calculator.calculate_price_performance(df)
-                df = calculator.calculate_kdj(df)
-                df = calculator.calculate_macd(df)
-                df = add_all_extended_technical_indicators_to_df(df)
-                df = map_tech_columns(df)
-
-                # 计算补充技术信号指标
-                df['golden_cross'] = ((df['ma5'] > df['ma10']) & (df['ma5'].shift(1) <= df['ma10'].shift(1))).astype(int)
-                df['death_cross'] = ((df['ma5'] < df['ma10']) & (df['ma5'].shift(1) >= df['ma10'].shift(1))).astype(int)
-                df['is_limit_up'] = (df['change_pct'] * 100 > 9.5).astype(int)
-                df['limit_up_count_10d'] = df['is_limit_up'].rolling(10, min_periods=1).sum()
-                df['limit_up_count_20d'] = df['is_limit_up'].rolling(20, min_periods=1).sum()
-                df['limit_up_count_30d'] = df['is_limit_up'].rolling(30, min_periods=1).sum()
-                df['consecutive_limit_up'] = 0
-                consec_count = 0
-                for idx in range(len(df)):
-                    if df['is_limit_up'].iloc[idx] == 1:
-                        consec_count += 1
-                    else:
-                        consec_count = 0
-                    df.loc[df.index[idx], 'consecutive_limit_up'] = consec_count
-                df['large_gain_5d_count'] = (df['change_pct'] * 100 > 5).rolling(5, min_periods=1).sum().astype(int)
-                df['large_loss_5d_count'] = (df['change_pct'] * 100 < -5).rolling(5, min_periods=1).sum().astype(int)
-                high_250 = df['high'].rolling(250, min_periods=1).max()
-                low_250 = df['low'].rolling(250, min_periods=1).min()
-                range_val = high_250 - low_250
-                df['close_to_high_250d'] = (df['close'] - low_250) / range_val * 100
-                df['close_to_low_250d'] = (high_250 - df['close']) / range_val * 100
-                df['gap_up'] = ((df['open'] > df['high'].shift(1)) & (df['open'] > df['low'].shift(1))).astype(int)
-                df['gap_up_ratio'] = df['gap_up'].rolling(20, min_periods=1).sum() / 20 * 100
-                df['next_period_change'] = df['close'].pct_change().shift(-1)
-                df['is_traded'] = (df['volume'] > 0).astype(int)
+                # 计算技术指标因子（统一管道）
+                df = calculate_technical_factors(df)
+                df = add_signal_indicators(df)
 
                 # 获取市值数据
                 float_share = None
