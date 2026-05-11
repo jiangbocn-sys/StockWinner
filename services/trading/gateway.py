@@ -268,7 +268,7 @@ class TradingGateway(TradingGatewayInterface):
 
         if kline_data and stock_code in kline_data:
             df = kline_data[stock_code]
-            if len(df) > 0:
+            if df is not None and len(df) > 0:
                 last_row = df.iloc[-1]
 
                 current_price = float(last_row.get('close', 0)) if 'close' in last_row else 0
@@ -804,7 +804,7 @@ class TradingGateway(TradingGatewayInterface):
 
         if kline_data and stock_code in kline_data:
             df = kline_data[stock_code]
-            if len(df) > 0:
+            if df is not None and len(df) > 0:
                 if len(df) > limit:
                     df = df.tail(limit)
 

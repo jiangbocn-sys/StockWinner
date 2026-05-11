@@ -1224,8 +1224,8 @@ async def scheduler_run_now(
 
     result = scheduler.run_manual_strategy_task(task_id)
     agent_id = agent.get("id", "")
-    log_action(
-        agent_id=agent_id, action="scheduler:run_now",
+    await log_action(
+        agent_id=agent_id, action="scheduler:run_now", risk_level="low",
         account_id="", resource_type="scheduler", resource_id=str(task_id),
         request_payload={"task_id": task_id},
         response_summary=str(result),
@@ -1265,8 +1265,8 @@ async def scheduler_toggle(
         reload_result = {"success": False, "note": "调度服务未启动，重新加载已跳过"}
 
     agent_id = agent.get("id", "")
-    log_action(
-        agent_id=agent_id, action="scheduler:toggle",
+    await log_action(
+        agent_id=agent_id, action="scheduler:toggle", risk_level="low",
         account_id="", resource_type="scheduler", resource_id=str(task_id),
         request_payload={"task_id": task_id, "enabled": enabled},
         response_summary=f"已{'启用' if enabled else '禁用'}: {task.get('name', 'unknown')}",
@@ -1303,8 +1303,8 @@ async def monitoring_start(
     result = await monitor.start_monitoring(account_id, interval)
 
     agent_id = agent.get("id", "")
-    log_action(
-        agent_id=agent_id, action="monitoring:start",
+    await log_action(
+        agent_id=agent_id, action="monitoring:start", risk_level="medium",
         account_id=account_id, resource_type="monitoring", resource_id=account_id,
         request_payload={"account_id": account_id, "interval": interval},
         response_summary=str(result),
@@ -1326,8 +1326,8 @@ async def monitoring_stop(
     result = await monitor.stop_monitoring()
 
     agent_id = agent.get("id", "")
-    log_action(
-        agent_id=agent_id, action="monitoring:stop",
+    await log_action(
+        agent_id=agent_id, action="monitoring:stop", risk_level="low",
         account_id="", resource_type="monitoring", resource_id="",
         response_summary=str(result),
         ip_address=request.client.host if request.client else None,
@@ -1369,8 +1369,8 @@ async def screening_start(
     result = await service.start_screening(account_id, strategy_id, interval)
 
     agent_id = agent.get("id", "")
-    log_action(
-        agent_id=agent_id, action="screening:start",
+    await log_action(
+        agent_id=agent_id, action="screening:start", risk_level="medium",
         account_id=account_id, resource_type="screening", resource_id=str(strategy_id or 0),
         request_payload={"account_id": account_id, "strategy_id": strategy_id, "interval": interval},
         response_summary=str(result),
@@ -1392,8 +1392,8 @@ async def screening_stop(
     result = await service.stop_screening()
 
     agent_id = agent.get("id", "")
-    log_action(
-        agent_id=agent_id, action="screening:stop",
+    await log_action(
+        agent_id=agent_id, action="screening:stop", risk_level="low",
         account_id="", resource_type="screening", resource_id="",
         response_summary=str(result),
         ip_address=request.client.host if request.client else None,
@@ -1489,8 +1489,8 @@ async def strategy_execute(
     signals = engine.execute_strategy(strategy, context)
 
     agent_id = agent.get("id", "")
-    log_action(
-        agent_id=agent_id, action="strategy:execute",
+    await log_action(
+        agent_id=agent_id, action="strategy:execute", risk_level="medium",
         account_id=account_id, resource_type="strategy", resource_id=str(strategy_id),
         request_payload={"strategy_id": strategy_id, "account_id": account_id},
         response_summary=f"生成 {len(signals)} 个信号",
@@ -1512,8 +1512,8 @@ async def list_pending_confirmations_endpoint(
     results = await _list_pending()
 
     agent_id = agent.get("id", "")
-    log_action(
-        agent_id=agent_id, action="confirmation:list_pending",
+    await log_action(
+        agent_id=agent_id, action="confirmation:list_pending", risk_level="low",
         account_id="", resource_type="confirmation", resource_id="",
         response_summary=f"返回 {len(results)} 条待确认",
         ip_address=request.client.host if request.client else None,
@@ -1542,8 +1542,8 @@ async def confirm_approve(
     ok = await approve_confirmation(confirmation_id, reviewer, review_notes)
 
     agent_id = agent.get("id", "")
-    log_action(
-        agent_id=agent_id, action="confirmation:approve",
+    await log_action(
+        agent_id=agent_id, action="confirmation:approve", risk_level="high",
         account_id=record.get("account_id", ""),
         resource_type="confirmation", resource_id=confirmation_id,
         response_summary="已批准" if ok else "批准失败（可能已被其他人处理）",
@@ -1572,8 +1572,8 @@ async def confirm_reject(
     ok = await reject_confirmation(confirmation_id, reviewer, review_notes)
 
     agent_id = agent.get("id", "")
-    log_action(
-        agent_id=agent_id, action="confirmation:reject",
+    await log_action(
+        agent_id=agent_id, action="confirmation:reject", risk_level="high",
         account_id=record.get("account_id", ""),
         resource_type="confirmation", resource_id=confirmation_id,
         response_summary="已拒绝" if ok else "拒绝失败",
