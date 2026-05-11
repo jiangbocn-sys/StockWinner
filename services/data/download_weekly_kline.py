@@ -9,71 +9,22 @@
 import sys
 sys.path.insert(0, '/home/bobo/StockWinner')
 
-import asyncio
 import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List, Optional, Dict, Any, Tuple
 
-# 时区配置
-from zoneinfo import ZoneInfo
-CHINA_TZ = ZoneInfo("Asia/Shanghai")
+from services.factors.kline_manager import get_kline_manager, KlineManager
+from services.common.async_helper import run_sync_in_thread
 
 # 数据库路径
 DB_PATH = Path("/home/bobo/StockWinner/data/kline.db")
 
 
-def _get_last_completed_week_end(now: datetime) -> datetime:
-    """
-    计算最近一个完整的交易周结束日期（周五）
-
-    规则：
-    - 周一到周五 16:00 前：本周未完成，返回上周五
-    - 周五 16:00 后 或 周末：本周已完成，返回本周五
-    """
-    weekday = now.weekday()  # 0=周一, 4=周五, 5=周六, 6=周日
-
-    if weekday <= 3:
-        # 周一到周四 → 本周未完成，返回上周五
-        return now - timedelta(days=weekday + 3)
-    elif weekday == 4:
-        # 周五
-        if now.hour < 16:
-            # 16:00 前 → 返回上周五
-            return now - timedelta(days=7)
-        else:
-            # 16:00 后 → 返回本周五
-            return now
-    else:
-        # 周六或周日 → 本周五已完成
-        return now - timedelta(days=weekday - 4)
-
-
-def _get_weekly_kline_latest(conn: sqlite3.Connection) -> Dict[str, str]:
-    """获取每只股票已有周K线的最新日期
-
-    Returns:
-        {stock_code: latest_week_end_date}
-    """
-    cursor = conn.cursor()
-    cursor.execute("""
-        SELECT stock_code, MAX(week_end_date) FROM weekly_kline_data GROUP BY stock_code
-    """)
-    return {row[0]: row[1] for row in cursor.fetchall()}
-
-
-def _delete_incomplete_week(conn: sqlite3.Connection, cutoff_date: str):
-    """删除指定日期之后的周数据（含本周未完成的部分）
-
-    注意：cutoff_date 是最近一个完整交易周的结束日期。
-    删除 week_end_date > cutoff_date 的记录（而非 week_start_date），
-    确保同一周内即使 week_start <= cutoff 也会被清理。
-    """
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM weekly_kline_data WHERE week_end_date > ?", (cutoff_date,))
-    deleted = cursor.rowcount
+def _delete_incomplete_week(km: KlineManager, cutoff_date: str):
+    """删除指定日期之后的周数据（含本周未完成的部分）"""
+    deleted = km.delete_incomplete_week(cutoff_date)
     if deleted > 0:
-        conn.commit()
         print(f"[WeeklyKline] 删除不完整周数据 {deleted} 条（week_end > {cutoff_date}）")
 
 
@@ -92,17 +43,9 @@ async def download_weekly_kline_data(
     重要：
     - 只下载到最近一个完整交易周，不创建本周未完成的数据
     - 下载前自动清理超过 cutoff 的不完整周数据
-
-    Args:
-        years: 无历史数据时下载的年数（默认 10 年）
-        start_date: 开始日期（YYYY-MM-DD），指定则覆盖增量逻辑
-        end_date: 结束日期（YYYY-MM-DD），可选
-        broker_account: 券商账户
-        broker_password: 券商密码
-        batch_size: 每批次下载的股票数量
-        market_filter: 市场筛选（默认沪深）
     """
     from services.trading.gateway import get_gateway_for_account
+    from services.common.database import get_sync_connection
 
     # 连接网关
     broker_creds = {
@@ -122,28 +65,32 @@ async def download_weekly_kline_data(
     gateway_name = type(gateway).__name__
     print(f"[WeeklyKline] 使用交易网关：{gateway_name}")
 
-    now = datetime.now(CHINA_TZ)
+    km = get_kline_manager()
 
     # 计算最近一个完整交易周
-    last_complete_week = _get_last_completed_week_end(now)
+    last_complete_week = km.get_last_completed_week_end()
     cutoff_date = last_complete_week.strftime('%Y-%m-%d')
     print(f"[WeeklyKline] 最近完整交易周截止: {cutoff_date}")
 
-    # 连接数据库
-    conn = sqlite3.connect(str(DB_PATH))
-    cursor = conn.cursor()
-
     # 清理不完整周数据
-    _delete_incomplete_week(conn, cutoff_date)
+    _delete_incomplete_week(km, cutoff_date)
 
-    # 从数据库获取股票列表
-    cursor.execute("SELECT DISTINCT stock_code, stock_name FROM kline_data ORDER BY stock_code")
+    # 获取股票列表
+    all_stocks = km.get_all_stocks()
+    if not all_stocks:
+        print("[WeeklyKline] 错误：无股票数据")
+        return False
+
+    # 获取股票名称映射
+    conn = get_sync_connection("kline", path=DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT DISTINCT stock_code, stock_name FROM kline_data")
     stock_rows = cursor.fetchall()
+    stock_names = {row[0]: row[1] or '' for row in stock_rows}
 
     stock_list = []
-    for row in stock_rows:
-        code = row[0]
-        name = row[1] or ''
+    for code in all_stocks:
+        name = stock_names.get(code, '')
         if market_filter:
             if code.endswith('.SH') and 'SH' not in market_filter:
                 continue
@@ -156,19 +103,17 @@ async def download_weekly_kline_data(
         stock_list.append({'stock_code': code, 'stock_name': name})
 
     if not stock_list:
-        print("[WeeklyKline] 错误：无股票数据")
-        conn.close()
+        print("[WeeklyKline] 错误：过滤后无股票数据")
         return False
 
-    # 增量逻辑：获取每只股票已有周K线的最新日期
-    latest_map = _get_weekly_kline_latest(conn)
+    # 获取每只股票已有周K线的最新日期
+    latest_map = km.get_weekly_latest()
 
-    # 过滤掉已有数据超过 cutoff 的股票（防止重复）
+    # 过滤掉已有数据超过 cutoff 的股票
     for s in stock_list:
         code = s['stock_code']
         latest = latest_map.get(code)
         if latest and latest > cutoff_date:
-            # 理论上不会发生，因为上面已经清理了
             del latest_map[code]
 
     # 分组：有历史数据 vs 无历史数据
@@ -191,12 +136,12 @@ async def download_weekly_kline_data(
 
     # 先处理初始下载
     if needs_initial:
-        initial_start = now.replace(tzinfo=None) - timedelta(days=years * 365) if not start_date else datetime.strptime(start_date, '%Y-%m-%d')
+        initial_start = end_dt - timedelta(days=years * 365) if not start_date else datetime.strptime(start_date, '%Y-%m-%d')
         end_date_int = int((end_dt + timedelta(days=7)).strftime('%Y%m%d'))
         start_date_int = int(initial_start.strftime('%Y%m%d'))
 
         print(f"[WeeklyKline] 初始下载: {len(needs_initial)} 只股票, {initial_start.strftime('%Y-%m-%d')} ~ {cutoff_date}")
-        await _download_batch(gateway, conn, needs_initial, start_date_int, end_date_int, years, batch_size, 0)
+        await _download_batch(gateway, needs_initial, start_date_int, end_date_int, years, batch_size)
 
     # 再处理增量更新
     if needs_update:
@@ -212,22 +157,20 @@ async def download_weekly_kline_data(
 
         print(f"[WeeklyKline] 增量更新: {len(needs_update)} 只股票, 从 {earliest_start_str or 'N/A'} 开始")
 
-        offset = len(needs_initial) * 1
-        await _download_incremental(gateway, conn, needs_update, latest_map, end_date_int, batch_size, offset)
-
-    conn.close()
+        await _download_incremental(gateway, needs_update, latest_map, end_date_int, batch_size)
 
     print(f"[WeeklyKline] ====== 下载完成 ======")
     return True
 
 
 async def _download_batch(
-    gateway, conn: sqlite3.Connection, stocks: List[dict],
+    gateway, stocks: List[dict],
     start_date_int: int, end_date_int: int, years: int,
-    batch_size: int, progress_offset: int
+    batch_size: int
 ):
     """批量下载（相同日期范围）"""
-    cursor = conn.cursor()
+    from services.factors.kline_manager import KlineManager
+    km = get_kline_manager()
     total_stocks = len(stocks)
     total_saved = 0
 
@@ -268,10 +211,8 @@ async def _download_batch(
                         stock_name = s.get('stock_name', '')
                         break
 
-                saved = _save_weekly_data(cursor, code, stock_name, data)
+                saved = km.save_weekly_kline_data(code, stock_name, data)
                 total_saved += saved
-
-            conn.commit()
 
         except Exception as e:
             print(f"[WeeklyKline] 批次下载失败：{e}")
@@ -281,12 +222,13 @@ async def _download_batch(
 
 
 async def _download_incremental(
-    gateway, conn: sqlite3.Connection, stocks: List[dict],
+    gateway, stocks: List[dict],
     latest_map: Dict[str, str], end_date_int: int,
-    batch_size: int, progress_offset: int
+    batch_size: int
 ):
     """增量下载（每只股票从自己的最新日期开始）"""
-    cursor = conn.cursor()
+    from services.factors.kline_manager import KlineManager
+    km = get_kline_manager()
     total_stocks = len(stocks)
     total_saved = 0
 
@@ -339,183 +281,16 @@ async def _download_incremental(
 
                 data = kline_data.get(code)
                 if data is not None and len(data) > 0:
-                    saved = _save_weekly_data(cursor, code, stock_name, data, skip_existing_before=latest)
+                    saved = km.save_weekly_kline_data(
+                        code, stock_name, data, skip_existing_before=latest
+                    )
                     total_saved += saved
 
             except Exception as e:
                 print(f"[WeeklyKline] {code} 增量下载失败: {e}")
                 continue
 
-        conn.commit()
-
     print(f"[WeeklyKline] 增量更新完成，保存 {total_saved} 条记录")
-
-
-def _build_stock_week_calendar(cursor, code: str,
-                                start_dt: datetime = None,
-                                end_dt: datetime = None) -> list:
-    """从个股自身的日K线数据构建交易周参考表
-
-    按 ISO 周分组该股票的交易日，返回 [(iso_year, iso_week, week_start, week_end), ...]
-    其中 week_start/end 是该股票实际最早/最晚交易日。
-
-    关键：个股可能停牌，只有用个股自身的交易日构建日历，SDK 返回的周K bar
-    数量才会与日历周数一一对应。市场级日历会包含停牌周，导致映射错位。
-    """
-    if start_dt and end_dt:
-        cursor.execute("""
-            SELECT DISTINCT trade_date FROM kline_data
-            WHERE stock_code = ? AND trade_date >= ? AND trade_date <= ?
-            ORDER BY trade_date
-        """, (code, start_dt.strftime('%Y-%m-%d'), end_dt.strftime('%Y-%m-%d')))
-    else:
-        cursor.execute("""
-            SELECT DISTINCT trade_date FROM kline_data
-            WHERE stock_code = ?
-            ORDER BY trade_date
-        """, (code,))
-    trade_days = [r[0] for r in cursor.fetchall()]
-
-    if not trade_days:
-        return []
-
-    # 按 ISO 周分组
-    weeks = {}
-    for day_str in trade_days:
-        d = datetime.strptime(day_str, '%Y-%m-%d')
-        iso_year, iso_week, _ = d.isocalendar()
-        key = (iso_year, iso_week)
-        if key not in weeks:
-            weeks[key] = [day_str]
-        else:
-            weeks[key].append(day_str)
-
-    result = []
-    for key in sorted(weeks.keys()):
-        days = weeks[key]
-        result.append((key[0], key[1], days[0], days[-1]))
-    return result
-
-
-def _build_market_week_calendar(cursor, start_dt: datetime, end_dt: datetime) -> list:
-    """从 kline_data 表构建市场级交易周参考表（已弃用，保留兼容）
-
-    按 ISO 周分组所有交易日，返回 [(iso_year, iso_week, week_start, week_end), ...]
-    其中 week_start/end 是市场实际最早/最晚交易日（非固定周一/周五）。
-
-    注意：个股可能停牌，市场级日历会导致 SDK bar 数量与日历周数不匹配。
-    应优先使用 _build_stock_week_calendar。
-    """
-    cursor.execute("""
-        SELECT DISTINCT trade_date FROM kline_data
-        WHERE trade_date >= ? AND trade_date <= ?
-        ORDER BY trade_date
-    """, (start_dt.strftime('%Y-%m-%d'), end_dt.strftime('%Y-%m-%d')))
-    trade_days = [r[0] for r in cursor.fetchall()]
-
-    if not trade_days:
-        return []
-
-    # 按 ISO 周分组
-    weeks = {}
-    for day_str in trade_days:
-        d = datetime.strptime(day_str, '%Y-%m-%d')
-        iso_year, iso_week, _ = d.isocalendar()
-        key = (iso_year, iso_week)
-        if key not in weeks:
-            weeks[key] = [day_str]
-        else:
-            weeks[key].append(day_str)
-
-    result = []
-    for key in sorted(weeks.keys()):
-        days = weeks[key]
-        result.append((key[0], key[1], days[0], days[-1]))
-    return result
-
-
-def _save_weekly_data(cursor, code: str, stock_name: str, data,
-                      week_calendar: list = None,
-                      skip_existing_before: str = None) -> int:
-    """保存单只股票的周K线数据
-
-    SDK 返回的周线不含 trade_date（为空字符串），因此不能直接推算周起止日期。
-
-    解决方案：
-    1. 从 kline_data 表构建**个股自身**交易周参考表（按 ISO 周分组）
-    2. SDK 周线按时间顺序返回，逐条匹配到对应的 ISO 周
-    3. 对已有历史数据的股票，skip_existing_before 指定该股票已有数据的最新日期，
-       跳过该日期之前的周线，只写入新增周
-
-    关键：必须用个股自身的日K线构建日历，因为个股可能停牌。
-    如果用市场级日历，停牌周的 SDK bar 缺失会导致映射错位。
-    """
-    import pandas as pd
-
-    if isinstance(data, pd.DataFrame):
-        df = data
-    else:
-        df = pd.DataFrame(data)
-
-    if df.empty:
-        return 0
-
-    # 如果没有提供日历，用个股自身的日K线构建
-    if week_calendar is None:
-        week_calendar = _build_stock_week_calendar(cursor, code)
-
-    saved = 0
-    bar_index = 0
-    total_bars = len(df)
-
-    # 找到第一周需要写入的位置
-    # 如果指定了 skip_existing_before，跳过该日期所在周及之前的所有周
-    cal_index = 0
-    if week_calendar:
-        if skip_existing_before:
-            for i, (iso_y, iso_w, ws, we) in enumerate(week_calendar):
-                if we > skip_existing_before:
-                    cal_index = i
-                    break
-                # 消耗一个 SDK bar（该周已有数据，不需要写入）
-                bar_index += 1
-
-    for _, row in df.iterrows():
-        if bar_index >= total_bars:
-            break
-
-        try:
-            if week_calendar and cal_index < len(week_calendar):
-                _, _, week_start_str, week_end_str = week_calendar[cal_index]
-                cal_index += 1
-            else:
-                # 无日历参考，跳过此 bar
-                bar_index += 1
-                continue
-
-            cursor.execute("""
-                INSERT OR REPLACE INTO weekly_kline_data
-                (stock_code, stock_name, week_start_date, week_end_date, open, high, low, close, volume, amount)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                code,
-                stock_name,
-                week_start_str,
-                week_end_str,
-                float(row.get('open', 0)) if not pd.isna(row.get('open')) else None,
-                float(row.get('high', 0)) if not pd.isna(row.get('high')) else None,
-                float(row.get('low', 0)) if not pd.isna(row.get('low')) else None,
-                float(row.get('close', 0)) if not pd.isna(row.get('close')) else None,
-                int(row.get('volume', 0)) if not pd.isna(row.get('volume')) else None,
-                float(row.get('amount', 0)) if not pd.isna(row.get('amount')) else None
-            ))
-            saved += 1
-            bar_index += 1
-        except Exception:
-            bar_index += 1
-            continue
-
-    return saved
 
 
 def download_weekly_kline_sync(
@@ -527,58 +302,11 @@ def download_weekly_kline_sync(
     batch_size: int = 50,
     market_filter: Optional[List[str]] = ['SH', 'SZ']
 ):
-    """同步版本的周K线下载函数"""
-    import asyncio
-    import concurrent.futures
-
-    async def _download():
-        return await download_weekly_kline_data(
-            years=years,
-            start_date=start_date,
-            end_date=end_date,
-            broker_account=broker_account,
-            broker_password=broker_password,
-            batch_size=batch_size,
-            market_filter=market_filter
-        )
-
-    # 检测是否有运行中的事件循环（如在 FastAPI lifespan 或 APScheduler 中调用）
-    try:
-        asyncio.get_running_loop()
-        has_running_loop = True
-    except RuntimeError:
-        has_running_loop = False
-
-    if has_running_loop:
-        # 在独立线程中执行，避免事件循环冲突
-        result_container = [None]
-        error_container = [None]
-
-        def _run_in_thread():
-            try:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                result_container[0] = loop.run_until_complete(_download())
-            except Exception as e:
-                error_container[0] = e
-            finally:
-                loop.close()
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(_run_in_thread)
-            future.result()
-
-        if error_container[0]:
-            raise error_container[0]
-        return result_container[0]
-    else:
-        # 直接执行
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            return loop.run_until_complete(_download())
-        finally:
-            loop.close()
+    """同步版本的周K线下载函数（使用 async_helper 处理事件循环冲突）"""
+    return run_sync_in_thread(download_weekly_kline_data,
+        years=years, start_date=start_date, end_date=end_date,
+        broker_account=broker_account, broker_password=broker_password,
+        batch_size=batch_size, market_filter=market_filter)
 
 
 if __name__ == "__main__":

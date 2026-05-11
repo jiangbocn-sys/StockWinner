@@ -22,6 +22,8 @@ from apscheduler.triggers.cron import CronTrigger
 from services.common.timezone import get_china_time, CHINA_TZ
 from services.factors.kline_manager import get_kline_manager
 from services.common.async_helper import run_async_safe
+from services.common.database import get_sync_connection
+import sqlite3
 
 # 配置日志
 logging.basicConfig(
@@ -262,8 +264,6 @@ class SchedulerService:
         has_pe = row[1]
         pe_ratio = has_pe / total if total > 0 else 0
 
-        conn.close()
-
         # 判断是否需要更新
         need_update = False
         if latest_report is None:
@@ -319,7 +319,7 @@ class SchedulerService:
 
     def _check_factor_coverage(self, target_date: str) -> Dict:
         """检查因子覆盖率（检查最近5个交易日）"""
-        conn = sqlite3.connect(str(DB_PATH))
+        conn = get_sync_connection("kline", path=DB_PATH)
         cursor = conn.cursor()
 
         # 获取最近5个交易日
@@ -331,7 +331,6 @@ class SchedulerService:
         recent_dates = [row[0] for row in cursor.fetchall()]
 
         if not recent_dates:
-            conn.close()
             return {'need_calc': False, 'coverage_pct': 100}
 
         # 检查每个日期的覆盖率
@@ -364,8 +363,6 @@ class SchedulerService:
             if missing_count > 0:
                 total_missing += missing_count
                 logger.info(f"  {date}: 因子{factor_count}/{kline_count}, 覆盖率{coverage_pct:.1f}%")
-
-        conn.close()
 
         # 判断是否需要补充（最低覆盖率低于95%）
         need_calc = min_coverage < 95
@@ -680,54 +677,27 @@ class SchedulerService:
         2. 数据是否包含最近一个已完成周（截至上周五）
         防止周中手动下载导致数据不完整
         """
-        conn = sqlite3.connect(str(DB_PATH))
-        cursor = conn.cursor()
+        km = get_kline_manager()
 
         # 获取最近一个有周K线数据的周末
-        cursor.execute("SELECT MAX(week_end_date) FROM weekly_kline_data")
-        latest_week = cursor.fetchone()[0]
+        latest_week = km.get_weekly_latest_date()
 
         if not latest_week:
-            conn.close()
             return True, "无周K线数据"
 
         # 计算最近一个已完成的周五
-        # 如果今天是周五且在交易时间内，本周尚未结束，取上周五
-        today = get_china_time().date()
-        weekday = today.weekday()  # 0=周一, 4=周五, 5=周六, 6=周日
-
-        if weekday == 4:
-            # 今天是周五，检查是否在交易时间内
-            from services.data.local_data_service import is_trading_hours
-            if is_trading_hours():
-                # 盘中：本周未完成，取上周五
-                last_friday = today - timedelta(days=7)
-            else:
-                # 盘后：本周已完成，今天就是最近的周五
-                last_friday = today
-        elif weekday >= 5:
-            # 周六/周日 → 上周五
-            last_friday = today - timedelta(days=(weekday - 4))
-        else:
-            # 周一~周四 → 上周五
-            last_friday = today - timedelta(days=(weekday + 3))
-
-        last_friday_str = last_friday.strftime('%Y-%m-%d')
+        today = km.get_last_completed_week_end().date()
+        last_friday_str = today.strftime('%Y-%m-%d')
 
         # 检查是否已包含最近一个完整周的数据
         if latest_week < last_friday_str:
-            conn.close()
             return True, f"数据截至 {latest_week}，需更新到 {last_friday_str}"
 
         # 统计有多少股票有周K线数据
-        cursor.execute("SELECT COUNT(DISTINCT stock_code) FROM weekly_kline_data")
-        weekly_stocks = cursor.fetchone()[0]
+        weekly_stocks = km.get_weekly_stock_count()
 
         # 统计总股票数
-        cursor.execute("SELECT COUNT(DISTINCT stock_code) FROM kline_data")
-        total_stocks = cursor.fetchone()[0]
-
-        conn.close()
+        total_stocks = km.get_total_stock_count()
 
         coverage_pct = weekly_stocks / total_stocks * 100 if total_stocks > 0 else 0
 
@@ -772,14 +742,13 @@ class SchedulerService:
         self._task_status['last_post_market_analysis'] = get_china_time().isoformat()
 
         try:
-            conn = sqlite3.connect(str(POSITIONS_DB_PATH))
+            conn = get_sync_connection(path=POSITIONS_DB_PATH)
             cursor = conn.cursor()
 
             cursor.execute(
                 "SELECT DISTINCT account_id, stock_code, stock_name FROM stock_positions WHERE quantity > 0"
             )
             positions = cursor.fetchall()
-            conn.close()
 
             if not positions:
                 logger.info("当前无持仓，跳过盘后分析")
@@ -936,7 +905,7 @@ class SchedulerService:
 
                         configs = []
                         try:
-                            conn = sqlite3.connect(str(POSITIONS_DB_PATH))
+                            conn = get_sync_connection(path=POSITIONS_DB_PATH)
                             conn.row_factory = sqlite3.Row
                             cursor = conn.cursor()
                             cursor.execute(
@@ -944,7 +913,6 @@ class SchedulerService:
                                 (account_id,),
                             )
                             configs = [dict(r) for r in cursor.fetchall()]
-                            conn.close()
                         except Exception as qe:
                             logger.warning(f"查询通知配置失败: {qe}")
 
@@ -1079,10 +1047,9 @@ class SchedulerService:
         try:
             from services.tasks import get_task
             db_path = Path(__file__).parent.parent.parent / "data" / "stockwinner.db"
-            conn = sqlite3.connect(str(db_path))
+            conn = get_sync_connection(path=db_path)
             conn.row_factory = sqlite3.Row
             rows = conn.execute("SELECT * FROM strategy_tasks WHERE enabled = 1").fetchall()
-            conn.close()
 
             count = 0
             for task in rows:
@@ -1127,10 +1094,9 @@ class SchedulerService:
                     self._scheduler.remove_job(job.id)
 
             db_path = Path(__file__).parent.parent.parent / "data" / "stockwinner.db"
-            conn = sqlite3.connect(str(db_path))
+            conn = get_sync_connection(path=db_path)
             conn.row_factory = sqlite3.Row
             rows = conn.execute("SELECT * FROM strategy_tasks WHERE enabled = 1").fetchall()
-            conn.close()
 
             count = 0
             for task in rows:
@@ -1166,14 +1132,13 @@ class SchedulerService:
         """注册交易监控自动启停任务"""
         try:
             db_path = Path(__file__).parent.parent.parent / "data" / "stockwinner.db"
-            conn = sqlite3.connect(str(db_path))
+            conn = get_sync_connection(path=db_path)
             conn.row_factory = sqlite3.Row
 
             # 获取所有激活账户
             accounts = conn.execute(
                 "SELECT account_id FROM accounts WHERE is_active = 1"
             ).fetchall()
-            conn.close()
 
             for acct in accounts:
                 acct_id = acct["account_id"]
@@ -1262,17 +1227,14 @@ class SchedulerService:
             except Exception:
                 pass
 
-            conn = sqlite3.connect(str(POSITIONS_DB_PATH))
+            # 自动启动交易监控
+            conn = get_sync_connection(path=POSITIONS_DB_PATH)
             conn.row_factory = sqlite3.Row
             accounts = conn.execute("SELECT account_id FROM accounts WHERE is_active = 1").fetchall()
-            conn.close()
 
             for acct in accounts:
                 acct_id = acct["account_id"]
-                thread = threading.Thread(
-                    target=lambda aid=acct_id: asyncio.run(self._do_start_monitor(aid))
-                )
-                thread.start()
+                run_async_safe(self._do_start_monitor, acct_id)
         except Exception as e:
             logger.error(f"自动启动监控失败: {e}")
 
@@ -1283,10 +1245,7 @@ class SchedulerService:
             return
         """自动启动交易监控"""
         logger.info(f"自动启动交易监控: {account_id}")
-        thread = threading.Thread(
-            target=lambda: asyncio.run(self._do_start_monitor(account_id))
-        )
-        thread.start()
+        run_async_safe(self._do_start_monitor, account_id)
 
     async def _do_start_monitor(self, account_id: str):
         """执行启动监控"""
@@ -1298,10 +1257,7 @@ class SchedulerService:
     def _auto_stop_monitor_job(self, account_id: str):
         """自动停止交易监控"""
         logger.info(f"自动停止交易监控: {account_id}")
-        thread = threading.Thread(
-            target=lambda: asyncio.run(self._do_stop_monitor(account_id))
-        )
-        thread.start()
+        run_async_safe(self._do_stop_monitor, account_id)
 
     async def _do_stop_monitor(self, account_id: str):
         """执行停止监控"""
@@ -1313,10 +1269,7 @@ class SchedulerService:
     def _auto_unfreeze_positions_job(self):
         """T+1 持仓解冻"""
         logger.info("开始 T+1 持仓解冻")
-        thread = threading.Thread(
-            target=lambda: asyncio.run(self._do_unfreeze())
-        )
-        thread.start()
+        run_async_safe(self._do_unfreeze)
 
     async def _do_unfreeze(self):
         """执行 T+1 解冻 + 重置 pending 状态为 watching"""
@@ -1661,10 +1614,7 @@ class SchedulerService:
     def run_manual_strategy_task(self, task_id: int) -> Dict:
         """手动触发策略任务"""
         logger.info(f"手动触发策略任务 ID={task_id}")
-        thread = threading.Thread(
-            target=lambda: asyncio.run(self._execute_strategy_task(task_id))
-        )
-        thread.start()
+        run_async_safe(self._execute_strategy_task, task_id)
         return {'success': True, 'message': f'策略任务 {task_id} 已启动'}
 
 
