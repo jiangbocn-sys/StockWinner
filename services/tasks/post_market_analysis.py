@@ -21,12 +21,14 @@ async def execute(task_id: int = None, **kwargs):
     scheduler = get_scheduler()
     result = scheduler._post_market_analysis_job()
 
+    status = 'success' if result and result.get('success') else 'error'
+
     if task_id is not None:
         db = get_db_manager()
-        output = json.dumps(result, ensure_ascii=False)
+        output = json.dumps(result or {'success': False, 'message': '任务未返回结果'}, ensure_ascii=False)
         await db.execute(
-            "UPDATE strategy_tasks SET last_status = 'success', last_output = ?, updated_at = ? WHERE id = ?",
-            (output, get_china_time().isoformat(), task_id)
+            "UPDATE strategy_tasks SET last_status = ?, last_output = ?, updated_at = ? WHERE id = ?",
+            (status, output, get_china_time().isoformat(), task_id)
         )
 
     return result

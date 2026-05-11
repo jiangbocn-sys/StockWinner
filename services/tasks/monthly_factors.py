@@ -19,16 +19,16 @@ async def execute(task_id: int = None, **kwargs):
     import json
 
     scheduler = get_scheduler()
-    scheduler._monthly_factor_check_job()
+    result = scheduler._monthly_factor_check_job()
 
-    result = {'success': True, 'message': '月频因子检查完成'}
+    status = 'success' if result and result.get('success') else 'error'
 
     if task_id is not None:
         db = get_db_manager()
-        output = json.dumps(result, ensure_ascii=False)
+        output = json.dumps(result or {'success': False, 'message': '任务未返回结果'}, ensure_ascii=False)
         await db.execute(
-            "UPDATE strategy_tasks SET last_status = 'success', last_output = ?, updated_at = ? WHERE id = ?",
-            (output, get_china_time().isoformat(), task_id)
+            "UPDATE strategy_tasks SET last_status = ?, last_output = ?, updated_at = ? WHERE id = ?",
+            (status, output, get_china_time().isoformat(), task_id)
         )
 
     return result

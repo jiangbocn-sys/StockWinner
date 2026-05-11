@@ -207,15 +207,19 @@ class SchedulerService:
                 logger.info(f"月频因子更新完成: {result}")
             else:
                 logger.info(f"月频因子已是最新: {monthly_check['latest_report_period']}")
+                result = {'success': True, 'message': '因子已是最新'}
                 self._task_status['monthly_factor_status'] = {'status': 'up_to_date'}
 
             logger.info("=" * 60)
             logger.info("月频因子更新任务完成")
             logger.info("=" * 60)
 
+            return result
+
         except Exception as e:
             logger.error(f"月频因子更新任务失败: {e}", exc_info=True)
             self._task_status['monthly_factor_status'] = {'status': 'error', 'message': str(e)}
+            return {'success': False, 'message': str(e)}
 
     def _check_monthly_factors(self) -> Dict:
         """检查月频因子是否需要更新"""
@@ -459,7 +463,7 @@ class SchedulerService:
         except Exception as e:
             logger.error(f"K线下载失败: {e}", exc_info=True)
             try:
-                task_manager.reset_task(TaskType.DATA_DOWNLOAD)
+                task_manager.fail_task(TaskType.DATA_DOWNLOAD, str(e))
             except Exception:
                 pass
             return {'success': False, 'message': str(e)}
@@ -510,7 +514,7 @@ class SchedulerService:
         except Exception as e:
             logger.error(f"日频因子计算失败: {e}", exc_info=True)
             try:
-                task_manager.reset_task(TaskType.DAILY_FACTOR_CALC)
+                task_manager.fail_task(TaskType.DAILY_FACTOR_CALC, str(e))
             except Exception:
                 pass
             return {'success': False, 'message': str(e)}
@@ -551,7 +555,7 @@ class SchedulerService:
         except Exception as e:
             logger.error(f"月频因子更新失败: {e}", exc_info=True)
             try:
-                task_manager.reset_task(TaskType.MONTHLY_FACTOR_UPDATE)
+                task_manager.fail_task(TaskType.MONTHLY_FACTOR_UPDATE, str(e))
             except Exception:
                 pass
             return {'success': False, 'message': str(e)}
@@ -589,7 +593,7 @@ class SchedulerService:
         except Exception as e:
             logger.error(f"K线全量下载失败: {e}", exc_info=True)
             try:
-                task_manager.reset_task(TaskType.DATA_DOWNLOAD)
+                task_manager.fail_task(TaskType.DATA_DOWNLOAD, str(e))
             except Exception:
                 pass
             return {'success': False, 'message': str(e)}
@@ -620,13 +624,16 @@ class SchedulerService:
 
             result = {'success': success, 'message': '下载完成' if success else '部分下载失败'}
             task_manager.update_progress(TaskType.WEEKLY_KLINE_DOWNLOAD, 100, "下载完成")
-            task_manager.complete_task(TaskType.WEEKLY_KLINE_DOWNLOAD, result)
+            if result['success']:
+                task_manager.complete_task(TaskType.WEEKLY_KLINE_DOWNLOAD, result)
+            else:
+                task_manager.fail_task(TaskType.WEEKLY_KLINE_DOWNLOAD, result.get('message', '下载失败'))
             return result
 
         except Exception as e:
             logger.error(f"周K线下载失败: {e}", exc_info=True)
             try:
-                task_manager.reset_task(TaskType.WEEKLY_KLINE_DOWNLOAD)
+                task_manager.fail_task(TaskType.WEEKLY_KLINE_DOWNLOAD, str(e))
             except Exception:
                 pass
             return {'success': False, 'message': str(e)}
@@ -655,15 +662,19 @@ class SchedulerService:
                     logger.warning(f"周K线下载失败: {result}")
             else:
                 logger.info(f"周K线数据已覆盖: {msg}")
+                result = {'success': True, 'message': '数据已覆盖', 'detail': msg}
                 self._task_status['weekly_kline_status'] = {'status': 'up_to_date'}
 
             logger.info("=" * 60)
             logger.info("周K线数据下载任务完成")
             logger.info("=" * 60)
 
+            return result
+
         except Exception as e:
             logger.error(f"周K线下载任务异常: {e}", exc_info=True)
             self._task_status['weekly_kline_status'] = {'success': False, 'message': str(e)}
+            return {'success': False, 'message': str(e)}
 
     def _check_weekly_kline_coverage(self) -> Tuple[bool, str]:
         """检查周K线覆盖度
