@@ -54,14 +54,12 @@ async def lifespan(app: FastAPI):
     start_scheduler()
     print("调度服务已启动")
 
-    # 启动时检查周K线是否包含最近一周数据
+    # 启动时检查周K线覆盖情况（仅检查，不阻塞下载）
     try:
         scheduler = get_scheduler()
         need, msg = scheduler._check_weekly_kline_coverage()
         if need:
-            print(f"周K线数据不完整: {msg}，启动下载")
-            result = scheduler._run_weekly_kline_download()
-            print(f"周K线下载结果: {result}")
+            print(f"周K线数据不完整: {msg}，将在周六 02:00 自动补下载")
         else:
             print(f"周K线数据已覆盖: {msg}")
     except Exception as e:

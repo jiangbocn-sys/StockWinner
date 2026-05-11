@@ -4,9 +4,13 @@ SQLite 异步数据库操作
 """
 
 import aiosqlite
+import asyncio
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from contextlib import asynccontextmanager
+import logging
+
+logger = logging.getLogger('Database')
 
 DB_PATH = Path(__file__).parent.parent.parent / "data" / "stockwinner.db"
 
@@ -17,29 +21,47 @@ class DatabaseManager:
     def __init__(self, db_path: Path = DB_PATH):
         self.db_path = db_path
         self._connection: Optional[aiosqlite.Connection] = None
+        self._lock = asyncio.Lock()
 
     async def connect(self):
         """连接数据库"""
         self.db_path.parent.mkdir(exist_ok=True)
         self._connection = await aiosqlite.connect(str(self.db_path))
         self._connection.row_factory = aiosqlite.Row
-        # 启用 WAL 模式提升并发性能
         await self._connection.execute("PRAGMA journal_mode = WAL")
         await self._connection.execute("PRAGMA foreign_keys = ON")
-        # 设置忙等待超时 5 秒，避免短暂锁竞争导致请求挂起
         await self._connection.execute("PRAGMA busy_timeout = 5000")
 
     async def close(self):
         """关闭数据库连接"""
         if self._connection:
-            await self._connection.close()
+            try:
+                await self._connection.close()
+            except Exception:
+                pass
             self._connection = None
+
+    async def _ensure_connection(self):
+        """确保连接有效，如果损坏则重建"""
+        if self._connection is not None:
+            try:
+                # 尝试一个轻量查询检测连接是否存活
+                await self._connection.execute("SELECT 1")
+                return
+            except Exception:
+                logger.warning("数据库连接已损坏，正在重建...")
+                try:
+                    await self._connection.close()
+                except Exception:
+                    pass
+                self._connection = None
+
+        await self.connect()
 
     @asynccontextmanager
     async def transaction(self):
         """事务上下文"""
-        if not self._connection:
-            await self.connect()
+        await self._ensure_connection()
         try:
             yield self._connection
             await self._connection.commit()
@@ -49,40 +71,35 @@ class DatabaseManager:
 
     async def execute(self, query: str, params: Tuple = ()) -> aiosqlite.Cursor:
         """执行 SQL"""
-        if not self._connection:
-            await self.connect()
+        await self._ensure_connection()
         cursor = await self._connection.execute(query, params)
         await self._connection.commit()
         return cursor
 
     async def executemany(self, query: str, params_list: List[Tuple]) -> aiosqlite.Cursor:
-        """批量执行 SQL（用于批量 UPDATE/INSERT）"""
-        if not self._connection:
-            await self.connect()
+        """批量执行 SQL"""
+        await self._ensure_connection()
         cursor = await self._connection.executemany(query, params_list)
         await self._connection.commit()
         return cursor
 
     async def fetchone(self, query: str, params: Tuple = ()) -> Optional[Dict]:
         """查询单条记录"""
-        if not self._connection:
-            await self.connect()
+        await self._ensure_connection()
         cursor = await self._connection.execute(query, params)
         row = await cursor.fetchone()
         return dict(row) if row else None
 
     async def fetchall(self, query: str, params: Tuple = ()) -> List[Dict]:
         """查询多条记录"""
-        if not self._connection:
-            await self.connect()
+        await self._ensure_connection()
         cursor = await self._connection.execute(query, params)
         rows = await cursor.fetchall()
         return [dict(row) for row in rows]
 
     async def fetchval(self, query: str, params: Tuple = ()) -> Optional[Any]:
         """查询单个值"""
-        if not self._connection:
-            await self.connect()
+        await self._ensure_connection()
         cursor = await self._connection.execute(query, params)
         row = await cursor.fetchone()
         if row:
@@ -134,6 +151,6 @@ def get_db_manager() -> DatabaseManager:
 
 
 def reset_db_manager():
-    """重置数据库管理器（用于测试）"""
+    """重置数据库管理器"""
     global _db_manager
     _db_manager = None

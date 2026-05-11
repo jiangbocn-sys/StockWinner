@@ -4,12 +4,20 @@ SDK 登录管理器
 统一管理 AmazingData SDK 的登录状态和实例
 避免多处重复登录和实例创建
 
-重要：所有 SDK 实例（BaseData、MarketData、InfoData）都通过此管理器缓存
-其他模块应该通过 get_sdk_manager() 获取实例，避免创建独立连接导致 TGW 连接数超限
+重要：
+1. 所有 SDK 实例（BaseData、MarketData、InfoData）都通过此管理器缓存
+2. 所有 SDK 数据调用自动通过 SDKConnectionManager 排队，避免 TGW 连接数超限
+3. 其他模块应该通过 get_sdk_manager() 获取实例，禁止自行创建 SDK 连接
+
+设计原则：
+- SDKManager 负责：登录状态 + 实例缓存
+- SDKConnectionManager 负责：并发排队 + 超时控制
+- 所有数据获取方法内部自动 acquire/release token，调用方无需手动处理
 """
 
 from typing import Optional, Dict
 import pandas as pd
+import asyncio
 
 
 class SDKManager:
@@ -56,6 +64,60 @@ class SDKManager:
 
         return SDKManager._login_cache
 
+    # ================================================================
+    # 连接令牌管理 — 所有 SDK 数据调用自动排队
+    # ================================================================
+
+    def _get_conn_manager(self):
+        """获取 SDK 连接管理器"""
+        from services.common.sdk_connection_manager import get_connection_manager
+        return get_connection_manager()
+
+    def _acquire_sync(self, task_type="download"):
+        """同步获取连接令牌"""
+        from services.common.sdk_connection_manager import TaskType
+        conn_mgr = self._get_conn_manager()
+        ttype = TaskType.DOWNLOAD if task_type == "download" else (
+            TaskType.SCREENING if task_type == "screening" else TaskType.QUERY
+        )
+        # 需要在事件循环中执行
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # 无运行中的事件循环，在新事件循环中执行
+            loop = asyncio.new_event_loop()
+            try:
+                token = loop.run_until_complete(conn_mgr.acquire(task_type=ttype))
+            finally:
+                loop.close()
+            return token
+
+        # 已有事件循环，创建新循环避免冲突
+        import concurrent.futures
+        result_container = [None]
+
+        def _acquire_in_new_loop():
+            new_loop = asyncio.new_event_loop()
+            try:
+                result_container[0] = new_loop.run_until_complete(conn_mgr.acquire(task_type=ttype))
+            finally:
+                new_loop.close()
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(_acquire_in_new_loop)
+            future.result()
+
+        return result_container[0]
+
+    def _release_sync(self, token):
+        """同步释放连接令牌"""
+        if token:
+            token.release()
+
+    # ================================================================
+    # 实例获取方法 — 这些方法本身不发起 SDK 调用，不需要排队
+    # ================================================================
+
     def get_info(self):
         """获取 InfoData 实例（缓存）"""
         self._ensure_login()
@@ -88,9 +150,14 @@ class SDKManager:
             SDKManager._market_data_instance = MarketData(calendar)
         return SDKManager._market_data_instance
 
+    # ================================================================
+    # 数据获取方法 — 所有 SDK 数据调用自动 acquire/release token
+    # ================================================================
+
     def get_equity_structure(self, stock_codes: list) -> pd.DataFrame:
-        """获取股本结构数据"""
+        """获取股本结构数据（自动排队）"""
         info = self.get_info()
+        token = self._acquire_sync("download")
         try:
             result = info.get_equity_structure(stock_codes, is_local=False)
             if isinstance(result, dict):
@@ -103,10 +170,13 @@ class SDKManager:
         except Exception as e:
             print(f"[SDK] 获取股本结构数据失败：{e}")
             return pd.DataFrame()
+        finally:
+            self._release_sync(token)
 
     def get_income_statement(self, stock_codes: list) -> pd.DataFrame:
-        """获取利润表数据"""
+        """获取利润表数据（自动排队）"""
         info = self.get_info()
+        token = self._acquire_sync("download")
         try:
             result = info.get_income(stock_codes, is_local=False)
             if isinstance(result, dict):
@@ -119,10 +189,13 @@ class SDKManager:
         except Exception as e:
             print(f"[SDK] 获取利润表数据失败：{e}")
             return pd.DataFrame()
+        finally:
+            self._release_sync(token)
 
     def get_balance_sheet(self, stock_codes: list) -> pd.DataFrame:
-        """获取资产负债表数据"""
+        """获取资产负债表数据（自动排队）"""
         info = self.get_info()
+        token = self._acquire_sync("download")
         try:
             result = info.get_balance_sheet(stock_codes, is_local=False)
             if isinstance(result, dict):
@@ -135,10 +208,13 @@ class SDKManager:
         except Exception as e:
             print(f"[SDK] 获取资产负债表数据失败：{e}")
             return pd.DataFrame()
+        finally:
+            self._release_sync(token)
 
     def get_cash_flow_statement(self, stock_codes: list) -> pd.DataFrame:
-        """获取现金流量表数据"""
+        """获取现金流量表数据（自动排队）"""
         info = self.get_info()
+        token = self._acquire_sync("download")
         try:
             result = info.get_cash_flow(stock_codes, is_local=False)
             if isinstance(result, dict):
@@ -151,10 +227,13 @@ class SDKManager:
         except Exception as e:
             print(f"[SDK] 获取现金流量表数据失败：{e}")
             return pd.DataFrame()
+        finally:
+            self._release_sync(token)
 
     def get_industry_base_info(self) -> pd.DataFrame:
-        """获取行业分类/行业指数基本信息（申万行业分类）"""
+        """获取行业分类/行业指数基本信息（申万行业分类）（自动排队）"""
         info = self.get_info()
+        token = self._acquire_sync("download")
         try:
             result = info.get_industry_base_info(is_local=False)
             if isinstance(result, dict):
@@ -167,10 +246,13 @@ class SDKManager:
         except Exception as e:
             print(f"[SDK] 获取行业分类数据失败：{e}")
             return pd.DataFrame()
+        finally:
+            self._release_sync(token)
 
     def get_code_info(self, security_type: str = 'EXTRA_STOCK_A') -> pd.DataFrame:
-        """获取每日最新证券信息（包含股票名称、昨收价、涨跌停价等）"""
+        """获取每日最新证券信息（自动排队）"""
         self._ensure_login()
+        token = self._acquire_sync("query")
         try:
             base_data = self.get_base_data()
             result = base_data.get_code_info(security_type=security_type)
@@ -180,10 +262,13 @@ class SDKManager:
         except Exception as e:
             print(f"[SDK] 获取证券信息失败：{e}")
             return pd.DataFrame()
+        finally:
+            self._release_sync(token)
 
     def get_code_list(self, security_type: str = 'EXTRA_STOCK_A') -> list:
-        """获取每日最新代码表"""
+        """获取每日最新代码表（自动排队）"""
         self._ensure_login()
+        token = self._acquire_sync("query")
         try:
             base_data = self.get_base_data()
             result = base_data.get_code_list(security_type=security_type)
@@ -193,10 +278,44 @@ class SDKManager:
         except Exception as e:
             print(f"[SDK] 获取代码列表失败：{e}")
             return []
+        finally:
+            self._release_sync(token)
+
+    def query_kline(self, code_list: list, begin_date: int, end_date: int,
+                    period: int, task_type: str = "query") -> dict:
+        """查询K线数据（自动排队）"""
+        self._ensure_login()
+        md = self.get_market_data()
+        token = self._acquire_sync(task_type)
+        try:
+            result = md.query_kline(code_list=code_list, begin_date=begin_date,
+                                    end_date=end_date, period=period)
+            return result if isinstance(result, dict) else {}
+        except Exception as e:
+            print(f"[SDK] query_kline 失败：{e}")
+            return {}
+        finally:
+            self._release_sync(token)
+
+    def query_snapshot(self, code_list: list, begin_date: int, end_date: int) -> dict:
+        """查询快照数据（自动排队）"""
+        self._ensure_login()
+        md = self.get_market_data()
+        token = self._acquire_sync("query")
+        try:
+            result = md.query_snapshot(code_list=code_list, begin_date=begin_date,
+                                       end_date=end_date)
+            return result if isinstance(result, dict) else {}
+        except Exception as e:
+            print(f"[SDK] query_snapshot 失败：{e}")
+            return {}
+        finally:
+            self._release_sync(token)
 
     def get_industry_daily(self, code_list: list) -> Dict[str, pd.DataFrame]:
-        """获取行业指数日行情数据"""
+        """获取行业指数日行情数据（自动排队）"""
         self._ensure_login()
+        token = self._acquire_sync("download")
         try:
             info = self.get_info()
             result = info.get_industry_daily(code_list=code_list, is_local=False)
@@ -206,6 +325,8 @@ class SDKManager:
         except Exception as e:
             print(f"[SDK] 获取行业指数日行情失败：{e}")
             return {}
+        finally:
+            self._release_sync(token)
 
 
 # SDK 登录信息 - 从环境变量读取，不再硬编码

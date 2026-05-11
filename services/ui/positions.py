@@ -8,6 +8,7 @@ import datetime
 from fastapi import APIRouter, HTTPException, Path, Query, Body
 from typing import Optional
 from services.common.database import get_db_manager
+from services.common.timezone import get_china_time
 
 router = APIRouter()
 
@@ -23,7 +24,6 @@ def _get_latest_price(stock_code: str) -> Optional[float]:
     try:
         from services.common.sdk_manager import get_sdk_manager
         sdk_mgr = get_sdk_manager()
-        md = sdk_mgr.get_market_data()
 
         code = stock_code
         if '.' not in code:
@@ -34,11 +34,12 @@ def _get_latest_price(stock_code: str) -> Optional[float]:
         end_date = int((end_dt + datetime.timedelta(days=1)).strftime('%Y%m%d'))
         begin_date = int(begin_dt.strftime('%Y%m%d'))
 
-        kline_data = md.query_kline(
+        kline_data = sdk_mgr.query_kline(
             code_list=[code],
             begin_date=begin_date,
             end_date=end_date,
-            period=10008  # Period.day
+            period=10008,  # Period.day
+            task_type="query"
         )
 
         if kline_data and code in kline_data:

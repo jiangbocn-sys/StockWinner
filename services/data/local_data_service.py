@@ -54,8 +54,7 @@ def get_trading_day_end_date(current_time: Optional[datetime] = None,
             sdk_manager._ensure_login()
 
             # 使用缓存的 BaseData 实例，避免 TGW 连接数超限
-            bd = sdk_manager.get_base_data()
-            calendar = bd.get_calendar()  # 返回 [19901219, 19901220, ...] 格式的列表
+            calendar = sdk_manager.get_calendar()  # 返回 [19901219, 19901220, ...] 格式的列表
 
             if calendar:
                 # 找到当前日期之前（包含今天）的最近一个交易日

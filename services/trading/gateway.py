@@ -174,6 +174,13 @@ class TradingGateway(TradingGatewayInterface):
         sdk_mgr = get_sdk_manager()
         return sdk_mgr.get_market_data()
 
+    def _query_kline_via_sdk(self, code_list: list, begin_date: int, end_date: int, period: int) -> dict:
+        """通过 SDKManager 查询K线数据（自动排队）"""
+        from services.common.sdk_manager import get_sdk_manager
+        sdk_mgr = get_sdk_manager()
+        return sdk_mgr.query_kline(code_list=code_list, begin_date=begin_date,
+                                   end_date=end_date, period=period, task_type="query")
+
     async def connect(self) -> bool:
         """连接交易服务器 - 使用 SDKManager 登录"""
         if not self.sdk_available:
@@ -212,8 +219,7 @@ class TradingGateway(TradingGatewayInterface):
         import datetime
         import sqlite3
         from pathlib import Path
-
-        md = self._get_market_data()
+        from services.common.sdk_manager import get_sdk_manager
 
         original_code = stock_code
         if '.' not in stock_code:
@@ -253,7 +259,7 @@ class TradingGateway(TradingGatewayInterface):
         end_date = int((end_dt + datetime.timedelta(days=1)).strftime('%Y%m%d'))
         begin_date = int(begin_dt.strftime('%Y%m%d'))
 
-        kline_data = md.query_kline(
+        kline_data = self._query_kline_via_sdk(
             code_list=[stock_code],
             begin_date=begin_date,
             end_date=end_date,

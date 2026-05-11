@@ -529,6 +529,7 @@ def download_weekly_kline_sync(
 ):
     """同步版本的周K线下载函数"""
     import asyncio
+    import concurrent.futures
 
     async def _download():
         return await download_weekly_kline_data(
@@ -541,12 +542,43 @@ def download_weekly_kline_sync(
             market_filter=market_filter
         )
 
+    # 检测是否有运行中的事件循环（如在 FastAPI lifespan 或 APScheduler 中调用）
     try:
+        asyncio.get_running_loop()
+        has_running_loop = True
+    except RuntimeError:
+        has_running_loop = False
+
+    if has_running_loop:
+        # 在独立线程中执行，避免事件循环冲突
+        result_container = [None]
+        error_container = [None]
+
+        def _run_in_thread():
+            try:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                result_container[0] = loop.run_until_complete(_download())
+            except Exception as e:
+                error_container[0] = e
+            finally:
+                loop.close()
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(_run_in_thread)
+            future.result()
+
+        if error_container[0]:
+            raise error_container[0]
+        return result_container[0]
+    else:
+        # 直接执行
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        return loop.run_until_complete(_download())
-    finally:
-        loop.close()
+        try:
+            return loop.run_until_complete(_download())
+        finally:
+            loop.close()
 
 
 if __name__ == "__main__":

@@ -1432,9 +1432,8 @@ class SchedulerService:
                     if is_trading_hours() and stock_codes:
                         sdk_mgr = get_sdk_manager()
                         if sdk_mgr._ensure_login():
-                            md = sdk_mgr.get_market_data()
                             today_int = int(get_china_time().strftime('%Y%m%d'))
-                            result = md.query_snapshot(
+                            result = sdk_mgr.query_snapshot(
                                 code_list=stock_codes,
                                 begin_date=today_int,
                                 end_date=today_int
