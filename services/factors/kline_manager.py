@@ -9,9 +9,9 @@
 5. 批量股票日期范围查询
 
 使用示例:
-    from services.factors.kline_manager import KlineManager
+    from services.factors.kline_manager import KlineManager, get_kline_manager
 
-    km = KlineManager()
+    km = get_kline_manager()
 
     # 查询
     df = km.get_kline_data("600000.SH", start_date="2026-01-01")
@@ -32,7 +32,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Tuple
 
-from services.common.database import KLINE_DB_PATH
+from services.common.database import KLINE_DB_PATH, get_sync_connection
 from services.common.timezone import get_china_time
 
 
@@ -42,32 +42,61 @@ class KlineManager:
     def __init__(self, db_path: Optional[Path] = None):
         self.db_path = db_path or KLINE_DB_PATH
 
+    def _conn(self, timeout: int = 30) -> sqlite3.Connection:
+        """获取预配置的 kline.db 连接（WAL mode, busy_timeout=10000）"""
+        return get_sync_connection("kline", path=self.db_path)
+
     # ================================================================
     # 数据库查询
     # ================================================================
 
+    def get_global_latest_date(self) -> Optional[str]:
+        """获取 kline_data 表中全局最新的交易日期"""
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute('SELECT MAX(trade_date) FROM kline_data')
+        result = cursor.fetchone()
+        return result[0] if result and result[0] else None
+
+    def get_stock_count_on_date(self, trade_date: str) -> int:
+        """获取指定交易日期有数据的股票数量"""
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            'SELECT COUNT(DISTINCT stock_code) FROM kline_data WHERE trade_date = ?',
+            (trade_date,)
+        )
+        result = cursor.fetchone()
+        return result[0] if result else 0
+
+    def get_total_stock_count(self) -> int:
+        """获取 kline_data 表中总的股票数量"""
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute('SELECT COUNT(DISTINCT stock_code) FROM kline_data')
+        result = cursor.fetchone()
+        return result[0] if result else 0
+
     def get_latest_date(self, stock_code: str) -> Optional[str]:
         """获取某只股票的最新交易日期"""
-        conn = sqlite3.connect(str(self.db_path))
+        conn = self._conn()
         cursor = conn.cursor()
         cursor.execute(
             'SELECT MAX(trade_date) FROM kline_data WHERE stock_code = ?',
             (stock_code,)
         )
         result = cursor.fetchone()
-        conn.close()
         return result[0] if result and result[0] else None
 
     def get_kline_count(self, stock_code: str) -> int:
         """获取某只股票的 K 线记录数"""
-        conn = sqlite3.connect(str(self.db_path))
+        conn = self._conn()
         cursor = conn.cursor()
         cursor.execute(
             'SELECT COUNT(*) FROM kline_data WHERE stock_code = ?',
             (stock_code,)
         )
         result = cursor.fetchone()
-        conn.close()
         return result[0] if result else 0
 
     def get_kline_data(
@@ -81,7 +110,7 @@ class KlineManager:
             DataFrame with columns: stock_code, stock_name, trade_date,
             open, high, low, close, volume, amount
         """
-        conn = sqlite3.connect(str(self.db_path))
+        conn = self._conn()
         query = 'SELECT * FROM kline_data WHERE stock_code = ?'
         params: list = [stock_code]
 
@@ -98,17 +127,29 @@ class KlineManager:
             params.append(limit)
 
         df = pd.read_sql_query(query, conn, params=params)
-        conn.close()
         return df
 
     def get_all_stocks(self) -> List[str]:
         """获取数据库中所有股票代码"""
-        conn = sqlite3.connect(str(self.db_path))
+        conn = self._conn()
         cursor = conn.cursor()
         cursor.execute('SELECT DISTINCT stock_code FROM kline_data')
         stocks = [row[0] for row in cursor.fetchall()]
-        conn.close()
         return stocks
+
+    def get_all_trade_dates(self, start_date: Optional[str] = None,
+                             end_date: Optional[str] = None) -> List[str]:
+        """获取所有交易日期列表"""
+        conn = self._conn()
+        query = 'SELECT DISTINCT trade_date FROM kline_data'
+        params: list = []
+        if start_date and end_date:
+            query += ' WHERE trade_date >= ? AND trade_date <= ?'
+            params.extend([start_date, end_date])
+        query += ' ORDER BY trade_date ASC'
+        cursor = conn.cursor()
+        cursor.execute(query, params)
+        return [row[0] for row in cursor.fetchall()]
 
     def get_stocks_date_ranges_batch(
         self, stock_codes: List[str], start_date: str, end_date: str
@@ -122,7 +163,7 @@ class KlineManager:
         if not stock_codes:
             return {}
 
-        conn = sqlite3.connect(str(self.db_path))
+        conn = self._conn()
         cursor = conn.cursor()
         placeholders = ','.join(['?' for _ in stock_codes])
         cursor.execute(f'''
@@ -140,7 +181,6 @@ class KlineManager:
                 'earliest_date': row[2],
                 'count': row[3]
             }
-        conn.close()
         return results
 
     def get_stocks_existing_dates_batch(
@@ -155,7 +195,7 @@ class KlineManager:
         if not stock_codes:
             return {}
 
-        conn = sqlite3.connect(str(self.db_path))
+        conn = self._conn()
         cursor = conn.cursor()
         placeholders = ','.join(['?' for _ in stock_codes])
         cursor.execute(f'''
@@ -169,19 +209,17 @@ class KlineManager:
         results: Dict[str, List[str]] = {}
         for row in cursor.fetchall():
             results.setdefault(row[0], []).append(row[1])
-        conn.close()
         return results
 
     def get_stock_date_range(self, stock_code: str) -> Tuple[Optional[str], Optional[str]]:
         """获取某只股票的日期范围（最新日期，最早日期）"""
-        conn = sqlite3.connect(str(self.db_path))
+        conn = self._conn()
         cursor = conn.cursor()
         cursor.execute('''
             SELECT MAX(trade_date), MIN(trade_date)
             FROM kline_data WHERE stock_code = ?
         ''', (stock_code,))
         result = cursor.fetchone()
-        conn.close()
         if result and result[0]:
             return (result[0], result[1])
         return (None, None)
@@ -199,10 +237,9 @@ class KlineManager:
         if not stock_codes:
             return {}
 
-        conn = sqlite3.connect(str(self.db_path))
+        conn = self._conn()
         placeholders = ','.join(['?' for _ in stock_codes])
 
-        # 子查询：每只股票最新 N 条
         query = f'''
             SELECT * FROM kline_data k1
             WHERE stock_code IN ({placeholders})
@@ -217,7 +254,6 @@ class KlineManager:
         '''
         params = stock_codes + [start_date, end_date, end_date, limit_per_stock]
         df = pd.read_sql_query(query, conn, params=params)
-        conn.close()
 
         if df.empty:
             return {}
@@ -237,7 +273,7 @@ class KlineManager:
         Returns:
             {stock_code: latest_week_end_date}
         """
-        conn = sqlite3.connect(str(self.db_path))
+        conn = self._conn()
         cursor = conn.cursor()
         cursor.execute("""
             SELECT stock_code, MAX(week_end_date)
@@ -245,14 +281,13 @@ class KlineManager:
             GROUP BY stock_code
         """)
         result = {row[0]: row[1] for row in cursor.fetchall()}
-        conn.close()
         return result
 
     def get_weekly_data(
         self, stock_code: str, limit: Optional[int] = None
     ) -> pd.DataFrame:
         """获取某只股票的周K线数据"""
-        conn = sqlite3.connect(str(self.db_path))
+        conn = self._conn()
         query = 'SELECT * FROM weekly_kline_data WHERE stock_code = ? ORDER BY week_end_date ASC'
         params: list = [stock_code]
         if limit:
@@ -260,25 +295,22 @@ class KlineManager:
             params.append(limit)
 
         df = pd.read_sql_query(query, conn, params=params)
-        conn.close()
         return df
 
     def get_weekly_stock_count(self) -> int:
         """获取周K线表中覆盖的股票数量"""
-        conn = sqlite3.connect(str(self.db_path))
+        conn = self._conn()
         cursor = conn.cursor()
         cursor.execute('SELECT COUNT(DISTINCT stock_code) FROM weekly_kline_data')
         result = cursor.fetchone()
-        conn.close()
         return result[0] if result else 0
 
     def get_weekly_latest_date(self) -> Optional[str]:
         """获取周K线表中最晚的 week_end_date"""
-        conn = sqlite3.connect(str(self.db_path))
+        conn = self._conn()
         cursor = conn.cursor()
         cursor.execute('SELECT MAX(week_end_date) FROM weekly_kline_data')
         result = cursor.fetchone()
-        conn.close()
         return result[0] if result and result[0] else None
 
     def delete_incomplete_week(self, cutoff_date: str) -> int:
@@ -287,7 +319,7 @@ class KlineManager:
         Returns:
             删除的记录数
         """
-        conn = sqlite3.connect(str(self.db_path))
+        conn = self._conn()
         cursor = conn.cursor()
         cursor.execute(
             "DELETE FROM weekly_kline_data WHERE week_end_date > ?",
@@ -295,7 +327,6 @@ class KlineManager:
         )
         deleted = cursor.rowcount
         conn.commit()
-        conn.close()
         return deleted
 
     # ================================================================
@@ -314,7 +345,7 @@ class KlineManager:
         if df is None or len(df) == 0:
             return 0
 
-        conn = sqlite3.connect(str(self.db_path), timeout=30)
+        conn = self._conn(timeout=30)
         cursor = conn.cursor()
         saved_count = 0
 
@@ -338,11 +369,10 @@ class KlineManager:
                     float(row.get('amount', 0))
                 ))
                 saved_count += 1
-        except Exception as e:
+            conn.commit()
+        except Exception:
             conn.rollback()
             raise
-        finally:
-            conn.close()
 
         return saved_count
 
@@ -361,7 +391,7 @@ class KlineManager:
         if not kline_batch:
             return 0
 
-        conn = sqlite3.connect(str(self.db_path), timeout=60)
+        conn = self._conn(timeout=60)
         cursor = conn.cursor()
         total_saved = 0
 
@@ -400,8 +430,6 @@ class KlineManager:
         except Exception:
             conn.rollback()
             raise
-        finally:
-            conn.close()
 
         return total_saved
 
@@ -434,9 +462,9 @@ class KlineManager:
             return 0
 
         if week_calendar is None:
-            week_calendar = self._build_stock_week_calendar(stock_code)
+            week_calendar = self.build_stock_week_calendar(stock_code)
 
-        conn = sqlite3.connect(str(self.db_path))
+        conn = self._conn()
         cursor = conn.cursor()
         saved = 0
         bar_index = 0
@@ -484,7 +512,6 @@ class KlineManager:
                 continue
 
         conn.commit()
-        conn.close()
         return saved
 
     # ================================================================
@@ -504,7 +531,7 @@ class KlineManager:
 
         关键：用个股自身交易日构建日历，停牌周不会计入。
         """
-        conn = sqlite3.connect(str(self.db_path))
+        conn = self._conn()
         cursor = conn.cursor()
 
         if start_date and end_date:
@@ -520,7 +547,6 @@ class KlineManager:
             """, (stock_code,))
 
         trade_days = [r[0] for r in cursor.fetchall()]
-        conn.close()
 
         if not trade_days:
             return []

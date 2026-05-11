@@ -16,11 +16,12 @@ import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional, Dict, Tuple
-import sqlite3
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from services.common.timezone import get_china_time, CHINA_TZ
+from services.factors.kline_manager import get_kline_manager
+from services.common.async_helper import run_async_safe
 
 # 配置日志
 logging.basicConfig(
@@ -223,7 +224,8 @@ class SchedulerService:
 
     def _check_monthly_factors(self) -> Dict:
         """检查月频因子是否需要更新"""
-        conn = sqlite3.connect(str(DB_PATH))
+        from services.common.database import get_sync_connection
+        conn = get_sync_connection("kline", path=DB_PATH)
         cursor = conn.cursor()
 
         # 获取最新的报告期
@@ -283,12 +285,10 @@ class SchedulerService:
 
     def _check_kline_data(self) -> Dict:
         """检查K线数据是否最新"""
-        conn = sqlite3.connect(str(DB_PATH))
-        cursor = conn.cursor()
+        km = get_kline_manager()
 
         # 获取数据库中最新的K线日期
-        cursor.execute("SELECT MAX(trade_date) FROM kline_data")
-        latest_date = cursor.fetchone()[0]
+        latest_date = km.get_global_latest_date()
 
         # 获取应有的最新交易日
         expected_date, status_msg = self._get_expected_trading_day()
@@ -304,15 +304,11 @@ class SchedulerService:
         else:
             # 最新日期已到，检查覆盖度：有多少股票有 expected_date 的数据
             if latest_date == expected_date:
-                cursor.execute("SELECT COUNT(DISTINCT stock_code) FROM kline_data WHERE trade_date = ?", (expected_date,))
-                covered = cursor.fetchone()[0]
-                cursor.execute("SELECT COUNT(DISTINCT stock_code) FROM kline_data")
-                total = cursor.fetchone()[0]
+                covered = km.get_stock_count_on_date(expected_date)
+                total = km.get_total_stock_count()
                 if total > 0 and covered < total * 0.95:
                     need_download = True
                     logger.info(f"日期 {expected_date} 覆盖度不足: {covered}/{total} ({covered/total*100:.1f}%)，需要补下载")
-
-        conn.close()
 
         return {
             'latest_date': latest_date,
