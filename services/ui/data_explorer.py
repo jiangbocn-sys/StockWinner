@@ -485,7 +485,7 @@ async def get_sdk_code_list(
         sdk_manager = get_sdk_manager()
 
         # Ensure SDK is logged in
-        sdk_manager._ensure_login()
+        sdk_manager.connect()
 
         # Get stock list from SDK
         stock_list = sdk_manager.get_code_list(security_type=security_type)

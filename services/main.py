@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
+import asyncio
 import os
 
 from services.common.timezone import get_china_time
@@ -50,9 +51,13 @@ async def lifespan(app: FastAPI):
     print(f"已加载 {len(active_accounts)} 个激活账户：{', '.join([a['account_id'] for a in active_accounts])}")
 
     # 启动调度服务（每天凌晨1点检查K线，每月5日检查月频因子）
-    from services.common.scheduler_service import start_scheduler, get_scheduler
+    from services.common.scheduler_service import start_scheduler, get_scheduler, _set_fastapi_loop
     start_scheduler()
     print("调度服务已启动")
+
+    # 设置 FastAPI 事件循环引用（供 APScheduler 线程提交协程）
+    loop = asyncio.get_running_loop()
+    _set_fastapi_loop(loop)
 
     # 启动时检查周K线覆盖情况（仅检查，不阻塞下载）
     try:
@@ -65,10 +70,19 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"启动时周K线检查失败: {e}")
 
-    # 启动时自动检测：如果是交易日交易时段，自动启动交易监控
+    # 启动时自动启动交易监控（如果当前在交易日交易时段）
     try:
-        scheduler = get_scheduler()
-        scheduler.auto_start_monitoring_if_trading()
+        from services.monitoring.service import get_trading_monitor
+        from services.trading.trading_hours import can_trade, is_today_trading_day
+
+        if is_today_trading_day() and can_trade():
+            for acct in active_accounts:
+                acct_id = acct['account_id']
+                monitor = get_trading_monitor()
+                await monitor.start_monitoring(acct_id, interval=30)
+                print(f"交易监控已启动: 账户 {acct_id}")
+        else:
+            print(f"不在交易时段或非交易日，跳过自动启动监控")
     except Exception as e:
         print(f"启动时自动监控检测失败: {e}")
 
@@ -471,6 +485,21 @@ async def lifespan(app: FastAPI):
 
     # 关闭时清理
     print("StockWinner 关闭中...")
+
+    # 停止交易监控
+    try:
+        from services.monitoring.service import get_trading_monitor
+        from services.common.scheduler_service import _set_fastapi_loop
+        monitor = get_trading_monitor()
+        if monitor._running:
+            await monitor.stop_monitoring()
+            print("交易监控已停止")
+    except Exception as e:
+        print(f"停止监控失败: {e}")
+
+    # 清除事件循环引用
+    _set_fastapi_loop(None)
+
     from services.common.scheduler_service import stop_scheduler
     stop_scheduler()
     await db_manager.close()

@@ -32,7 +32,7 @@ def check_sdk_connection() -> str:
     try:
         from services.common.sdk_manager import get_sdk_manager
         sdk_mgr = get_sdk_manager()
-        if sdk_mgr._ensure_login():
+        if sdk_mgr.connect():
             return "connected"
         else:
             return "login_failed"

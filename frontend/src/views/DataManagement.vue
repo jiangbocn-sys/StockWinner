@@ -227,7 +227,7 @@
             </el-collapse>
 
             <!-- 任务列表 -->
-            <div v-loading="tasksLoading">
+            <div>
               <el-table :data="filteredStrategyTasks" stripe style="width: 100%">
                 <el-table-column label="类型" width="80">
                   <template #default="{ row }">
@@ -287,7 +287,7 @@
                   </template>
                 </el-table-column>
               </el-table>
-              <el-empty v-if="!tasksLoading && filteredStrategyTasks.length === 0" description="暂无任务" />
+              <el-empty v-if="filteredStrategyTasks.length === 0" description="暂无任务" />
             </div>
           </el-card>
         </el-col>
@@ -385,7 +385,6 @@ const postMarketProgressStatus = computed(() => {
 
 // 策略任务
 const strategyTasks = ref([])
-const tasksLoading = ref(false)
 const creatingTask = ref(false)
 const scanningTasks = ref(false)
 const translatingCron = ref(false)
@@ -603,16 +602,14 @@ async function toggleScheduler() {
 
 // ========== 策略任务管理 ==========
 
+// 后台轮询加载策略任务（静默刷新）
 const loadStrategyTasks = async () => {
-  tasksLoading.value = true
   try {
     const res = await fetch(`/api/v1/ui/${currentAccountId.value}/strategy-tasks`)
     const data = await res.json()
     strategyTasks.value = data.tasks || []
   } catch (e) {
     console.error('加载任务失败:', e)
-  } finally {
-    tasksLoading.value = false
   }
 }
 

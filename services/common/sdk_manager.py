@@ -42,8 +42,23 @@ class SDKManager:
             cls._instance = SDKManager()
         return cls._instance
 
+    def connect(self) -> bool:
+        """登录 SDK（连接状态的唯一入口）"""
+        return self._ensure_login()
+
+    def disconnect(self):
+        """登出 SDK，重置所有缓存"""
+        SDKManager._login_cache = False
+        SDKManager._base_data_instance = None
+        SDKManager._market_data_instance = None
+        SDKManager._info_instance = None
+
+    def is_connected(self) -> bool:
+        """检查 SDK 是否已连接"""
+        return SDKManager._login_cache
+
     def _ensure_login(self) -> bool:
-        """确保已登录 SDK"""
+        """确保已登录 SDK（内部方法，外部请调用 connect()）"""
         if not SDKManager._login_cache:
             try:
                 from AmazingData import login

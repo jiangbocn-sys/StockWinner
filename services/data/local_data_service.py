@@ -54,7 +54,7 @@ def get_trading_day_end_date(current_time: Optional[datetime] = None,
             from services.common.sdk_manager import get_sdk_manager
             sdk_manager = get_sdk_manager()
             # 确保 SDK 已登录
-            sdk_manager._ensure_login()
+            sdk_manager.connect()
 
             # 使用缓存的 BaseData 实例，避免 TGW 连接数超限
             calendar = sdk_manager.get_calendar()  # 返回 [19901219, 19901220, ...] 格式的列表

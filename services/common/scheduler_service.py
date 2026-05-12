@@ -31,11 +31,25 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         logging.FileHandler(Path(__file__).parent.parent.parent / 'logs' / 'scheduler.log'),
-        logging.StreamHandler()
-    ]
+        logging.StreamHandler(),
+    ],
 )
-logger = logging.getLogger('Scheduler')
+logger = logging.getLogger(__name__)
 
+
+# FastAPI 事件循环引用（由 lifespan 设置，供 APScheduler 线程提交协程）
+_fastapi_loop: Optional[asyncio.AbstractEventLoop] = None
+
+
+def _get_fastapi_loop() -> Optional[asyncio.AbstractEventLoop]:
+    """获取 FastAPI 事件循环引用"""
+    return _fastapi_loop
+
+
+def _set_fastapi_loop(loop: Optional[asyncio.AbstractEventLoop]):
+    """设置 FastAPI 事件循环引用"""
+    global _fastapi_loop
+    _fastapi_loop = loop
 DB_PATH = Path(__file__).parent.parent.parent / "data" / "kline.db"
 POSITIONS_DB_PATH = Path(__file__).parent.parent.parent / "data" / "stockwinner.db"
 
@@ -1145,79 +1159,42 @@ class SchedulerService:
         from services.trading.trading_hours import is_today_trading_day as _is_trading_day
         return _is_trading_day()
 
-    def auto_start_monitoring_if_trading(self):
-        """服务启动时检查：如果当前在交易日交易时段，调度延时任务自动启动监控"""
-        now = get_china_time()
-        hour, minute = now.hour, now.minute
-        # 交易时段 09:15 ~ 15:10（覆盖盘前到收盘后）
-        in_session = (hour == 9 and minute >= 15) or (10 <= hour <= 14) or (hour == 15 and minute <= 10)
-
-        if not in_session:
-            logger.info(f"不在交易时段({hour}:{minute:02d})，跳过自动启动监控")
-            return
-
-        if not self.is_today_trading_day():
-            logger.info("今天不是交易日，跳过自动启动监控")
-            return
-
-        # 调度为 10 秒后执行的一次性任务，避免与主事件循环冲突
-        logger.info(f"检测到交易时段，10 秒后自动启动监控...")
-        self._scheduler.add_job(
-            self._do_auto_start_on_startup,
-            'interval',
-            seconds=10,
-            id='startup_monitor',
-            max_instances=1,
-            replace_existing=True,
-        )
-
-    def _do_auto_start_on_startup(self):
-        """延时执行的启动监控任务"""
-        try:
-            # 移除一次性任务
-            try:
-                self._scheduler.remove_job('startup_monitor')
-            except Exception:
-                pass
-
-            # 自动启动交易监控
-            conn = get_sync_connection(path=POSITIONS_DB_PATH)
-            conn.row_factory = sqlite3.Row
-            accounts = conn.execute("SELECT account_id FROM accounts WHERE is_active = 1").fetchall()
-
-            for acct in accounts:
-                acct_id = acct["account_id"]
-                run_async_safe(self._do_start_monitor, acct_id)
-        except Exception as e:
-            logger.error(f"自动启动监控失败: {e}")
-
     def _auto_start_monitor_job(self, account_id: str):
-        """自动启动交易监控（先判断是否为交易日）"""
-        if not self.is_today_trading_day():
-            logger.info(f"今天不是交易日，跳过启动监控: {account_id}")
-            return
-        """自动启动交易监控"""
-        logger.info(f"自动启动交易监控: {account_id}")
-        run_async_safe(self._do_start_monitor, account_id)
-
-    async def _do_start_monitor(self, account_id: str):
-        """执行启动监控"""
+        """自动启动交易监控 — 通过 FastAPI 事件循环执行"""
         from services.monitoring.service import get_trading_monitor
+
         monitor = get_trading_monitor()
-        result = await monitor.start_monitoring(account_id, interval=30)
-        logger.info(f"交易监控启动结果: {result}")
+        if monitor._running:
+            logger.info(f"监控已在运行，跳过启动: {account_id}")
+            return
+
+        loop = _get_fastapi_loop()
+        if loop and loop.is_running():
+            asyncio.run_coroutine_threadsafe(
+                monitor.start_monitoring(account_id, interval=30),
+                loop
+            )
+            logger.info(f"已提交监控启动请求: {account_id}")
+        else:
+            logger.warning(f"FastAPI 事件循环不可用，无法启动监控: {account_id}")
 
     def _auto_stop_monitor_job(self, account_id: str):
-        """自动停止交易监控"""
-        logger.info(f"自动停止交易监控: {account_id}")
-        run_async_safe(self._do_stop_monitor, account_id)
-
-    async def _do_stop_monitor(self, account_id: str):
-        """执行停止监控"""
+        """自动停止交易监控 — 通过 FastAPI 事件循环执行"""
         from services.monitoring.service import get_trading_monitor
+
         monitor = get_trading_monitor()
-        result = await monitor.stop_monitoring()
-        logger.info(f"交易监控停止结果: {result}")
+        if not monitor._running:
+            return
+
+        loop = _get_fastapi_loop()
+        if loop and loop.is_running():
+            asyncio.run_coroutine_threadsafe(
+                monitor.stop_monitoring(),
+                loop
+            )
+            logger.info(f"已提交监控停止请求: {account_id}")
+        else:
+            logger.warning(f"FastAPI 事件循环不可用，无法停止监控: {account_id}")
 
     def _auto_unfreeze_positions_job(self):
         """T+1 持仓解冻"""
@@ -1344,7 +1321,7 @@ class SchedulerService:
 
                     if is_trading_hours() and stock_codes:
                         sdk_mgr = get_sdk_manager()
-                        if sdk_mgr._ensure_login():
+                        if sdk_mgr.connect():
                             today_int = int(get_china_time().strftime('%Y%m%d'))
                             result = sdk_mgr.query_snapshot(
                                 code_list=stock_codes,

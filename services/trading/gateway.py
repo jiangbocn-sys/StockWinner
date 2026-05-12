@@ -148,8 +148,6 @@ class TradingGateway(TradingGatewayInterface):
     def __init__(self, app_id: str = "", password: str = ""):
         self.app_id = app_id
         self.password = password
-        self.connected = False
-        self._token = None
         self.server_ip = "140.206.44.234"
         self.server_port = 8600
 
@@ -162,17 +160,13 @@ class TradingGateway(TradingGatewayInterface):
             logger.warning(f"AmazingData SDK 不可用：{e}")
             self.sdk_available = False
 
-    def _get_base_data(self):
-        """获取 BaseData 实例（使用 SDKManager 缓存，避免重复连接）"""
+    @property
+    def connected(self) -> bool:
+        """从 SDKManager 读取连接状态"""
+        if not self.sdk_available:
+            return False
         from services.common.sdk_manager import get_sdk_manager
-        sdk_mgr = get_sdk_manager()
-        return sdk_mgr.get_base_data()
-
-    def _get_market_data(self):
-        """获取 MarketData 实例（使用 SDKManager 缓存，避免重复连接）"""
-        from services.common.sdk_manager import get_sdk_manager
-        sdk_mgr = get_sdk_manager()
-        return sdk_mgr.get_market_data()
+        return get_sdk_manager().is_connected()
 
     def _query_kline_via_sdk(self, code_list: list, begin_date: int, end_date: int, period: int) -> dict:
         """通过 SDKManager 查询K线数据（自动排队）"""
@@ -182,25 +176,22 @@ class TradingGateway(TradingGatewayInterface):
                                    end_date=end_date, period=period, task_type="query")
 
     async def connect(self) -> bool:
-        """连接交易服务器 - 使用 SDKManager 登录"""
+        """连接交易服务器 — 委托给 SDKManager"""
         if not self.sdk_available:
             logger.error("AmazingData SDK 未安装，无法连接")
             return False
-
         try:
             from services.common.sdk_manager import get_sdk_manager
             sdk_mgr = get_sdk_manager()
-            sdk_mgr._ensure_login()
-            self.connected = True
-            logger.info("交易网关连接成功（通过 SDKManager）")
-            return True
+            return sdk_mgr.connect()
         except Exception as e:
             logger.error(f"交易网关连接失败：{e}")
             return False
 
     async def disconnect(self):
-        """断开连接 - SDK 实例由 SDKManager 管理，此处只更新状态"""
-        self.connected = False
+        """断开连接 — 委托给 SDKManager"""
+        from services.common.sdk_manager import get_sdk_manager
+        get_sdk_manager().disconnect()
 
     async def get_market_data(self, stock_code: str) -> Optional[MarketData]:
         """获取真实行情数据 - 使用 AmazingData SDK"""
@@ -896,24 +887,15 @@ class TradingGateway(TradingGatewayInterface):
         limit: int = 100,
         task_type: str = "query"
     ) -> List[Dict[str, Any]]:
-        """获取 K 线历史数据"""
+        """获取 K 线历史数据 — 通过 SDKManager 查询（自带排队 + 超时）"""
         if not self.connected:
             raise Exception("网关未连接")
-
-        from services.common.sdk_connection_manager import get_connection_manager, TaskType
-
-        conn_mgr = get_connection_manager()
-        task_type_enum = TaskType.QUERY if task_type == "query" else (
-            TaskType.DOWNLOAD if task_type == "download" else TaskType.SCREENING
-        )
-
-        token = await conn_mgr.acquire(task_type=task_type_enum)
 
         try:
             result = await asyncio.wait_for(
                 asyncio.to_thread(
                     self._query_kline_data_sync,
-                    stock_code, period, start_date, end_date, limit
+                    stock_code, period, start_date, end_date, limit, task_type
                 ),
                 timeout=10.0
             )
@@ -921,8 +903,6 @@ class TradingGateway(TradingGatewayInterface):
         except asyncio.TimeoutError:
             logger.warning(f"查询 {stock_code} K线超时（>10s）")
             raise Exception("获取 K 线数据超时")
-        finally:
-            token.release()
 
     async def get_batch_kline_data(
         self,
@@ -933,21 +913,13 @@ class TradingGateway(TradingGatewayInterface):
         limit: int = 100,
         task_type: str = "query"
     ) -> Dict[str, Any]:
-        """批量获取 K 线历史数据"""
+        """批量获取 K 线历史数据 — 通过 SDKManager 查询（自带排队 + 超时）"""
         if not self.connected:
             raise Exception("网关未连接")
-
-        from services.common.sdk_connection_manager import get_connection_manager, TaskType
-
-        conn_mgr = get_connection_manager()
-        task_type_enum = TaskType.QUERY if task_type == "query" else (
-            TaskType.DOWNLOAD if task_type == "download" else TaskType.SCREENING
-        )
 
         # 根据股票数量和任务类型动态计算超时
         count = len(stock_codes) if stock_codes else 1
         if task_type == "download":
-            # TGW 测试：5000 只 ≈ 33s，60s 足够
             batch_timeout = min(count * 30.0, 60.0)
             batch_timeout = max(batch_timeout, 15.0)
         elif count <= 5:
@@ -959,20 +931,16 @@ class TradingGateway(TradingGatewayInterface):
         else:
             batch_timeout = 120.0
 
-        token = await conn_mgr.acquire(task_type=task_type_enum)
-
         try:
             thread_call = asyncio.to_thread(
                 self._query_batch_kline_data_sync,
-                stock_codes, period, start_date, end_date, limit
+                stock_codes, period, start_date, end_date, limit, task_type
             )
             result = await asyncio.wait_for(thread_call, timeout=batch_timeout)
             return result
         except asyncio.TimeoutError:
             logger.warning(f"批量查询 K 线超时（{count} 只股票，>{batch_timeout:.0f}s）")
             raise Exception(f"获取 K 线数据超时（{count} 只股票，超时 {batch_timeout:.0f}s）")
-        finally:
-            token.release()
 
     def _query_batch_kline_data_sync(
         self,
@@ -980,9 +948,10 @@ class TradingGateway(TradingGatewayInterface):
         period: str = "day",
         start_date: Optional[str] = None,
         end_date: Optional[str] = None,
-        limit: int = 100
+        limit: int = 100,
+        task_type: str = "query"
     ) -> Dict[str, Any]:
-        """同步批量查询 K 线数据（在线程池中执行）"""
+        """同步批量查询 K 线数据（通过 SDKManager，自带排队 + 超时）"""
         import datetime as dt
         import pandas as pd
 
@@ -1000,8 +969,6 @@ class TradingGateway(TradingGatewayInterface):
                 start_dt = end_dt - dt.timedelta(days=limit)
             else:
                 start_dt = end_dt - dt.timedelta(days=limit * 30)
-
-        md = self._get_market_data()
 
         period_map = {
             "1m": self.constant.Period.min1.value,
@@ -1021,7 +988,7 @@ class TradingGateway(TradingGatewayInterface):
         begin_date_int = int(start_dt.strftime('%Y%m%d'))
         end_date_int = int((end_dt + timedelta(days=1)).strftime('%Y%m%d'))
 
-        kline_data = md.query_kline(
+        kline_data = self._query_kline_via_sdk(
             code_list=stock_codes,
             begin_date=begin_date_int,
             end_date=end_date_int,
@@ -1047,9 +1014,10 @@ class TradingGateway(TradingGatewayInterface):
         period: str = "day",
         start_date: Optional[str] = None,
         end_date: Optional[str] = None,
-        limit: int = 100
+        limit: int = 100,
+        task_type: str = "query"
     ) -> List[Dict[str, Any]]:
-        """同步查询 K 线数据（在线程池中执行）"""
+        """同步查询 K 线数据（通过 SDKManager，自带排队 + 超时）"""
         import datetime as dt
 
         if end_date:
@@ -1070,8 +1038,6 @@ class TradingGateway(TradingGatewayInterface):
                 start_dt = end_dt - dt.timedelta(days=limit * 30)
             else:
                 start_dt = end_dt - dt.timedelta(days=limit)
-
-        md = self._get_market_data()
 
         if '.' not in stock_code:
             if stock_code.startswith('6'):
@@ -1094,10 +1060,10 @@ class TradingGateway(TradingGatewayInterface):
         }
         actual_period = period_map.get(period, self.constant.Period.day.value)
 
-        kline_data = md.query_kline(
+        kline_data = self._query_kline_via_sdk(
             code_list=[stock_code],
             begin_date=int(start_dt.strftime("%Y%m%d")),
-            end_date=int(end_dt.strftime("%Y%m%d")),
+            end_date=int((end_dt + timedelta(days=1)).strftime("%Y%m%d")),
             period=actual_period
         )
 
