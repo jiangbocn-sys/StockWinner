@@ -146,8 +146,14 @@ class SchedulerService:
             if kline_check['need_download']:
                 logger.info(f"K线数据落后，最新数据: {kline_check['latest_date']}, 应有数据: {expected_date}")
 
-                # Step 2: 启动K线增量下载
-                download_result = self._run_kline_download()
+                # Step 2: 在新线程中启动K线增量下载（避免与APScheduler的事件循环冲突）
+                download_result: Dict = {}
+                def _do_download():
+                    download_result.update(self._run_kline_download())
+                thread = threading.Thread(target=_do_download)
+                thread.start()
+                thread.join()
+
                 self._task_status['last_download_time'] = get_china_time().isoformat()
                 self._task_status['kline_status'] = download_result
 
@@ -159,19 +165,35 @@ class SchedulerService:
                 logger.info(f"K线数据已是最新: {kline_check['latest_date']}")
                 self._task_status['kline_status'] = {'status': 'up_to_date', 'latest_date': kline_check['latest_date']}
 
-            # Step 3: 检查因子覆盖率并补充缺失因子（无论K线是否下载）
+            # Step 3: 行业指数下载（独立任务，在因子计算之前）
+            logger.info("下载申万行业指数数据...")
+            industry_result: Dict = {}
+            def _do_industry():
+                industry_result.update(self._run_industry_indices_download())
+            thread = threading.Thread(target=_do_industry)
+            thread.start()
+            thread.join()
+            self._task_status['industry_indices_status'] = industry_result
+
+            # Step 4: 检查因子覆盖率并补充缺失因子（无论K线是否下载）
             logger.info("检查因子覆盖率...")
             factor_check = self._check_factor_coverage(expected_date)
 
             if factor_check['need_calc']:
                 logger.info(f"因子覆盖率不足: {factor_check['coverage_pct']:.1f}%, 需补充 {factor_check['missing_count']} 只股票")
 
-                # 启动因子补充计算（强制全量计算以填充中间缺失）
-                factor_result = self._run_daily_factor_calc(
-                    None,  # 让函数自动确定起始日期
-                    expected_date,
-                    force_full=True  # 覆盖率不足时强制全量计算
-                )
+                # 在新线程中启动因子补充计算
+                factor_result: Dict = {}
+                def _do_factor_calc():
+                    factor_result.update(self._run_daily_factor_calc(
+                        None,  # 让函数自动确定起始日期
+                        expected_date,
+                        force_full=True  # 覆盖率不足时强制全量计算
+                    ))
+                thread = threading.Thread(target=_do_factor_calc)
+                thread.start()
+                thread.join()
+
                 self._task_status['last_factor_calc_time'] = get_china_time().isoformat()
                 self._task_status['factor_status'] = factor_result
 
@@ -182,17 +204,6 @@ class SchedulerService:
             else:
                 logger.info(f"因子覆盖率正常: {factor_check['coverage_pct']:.1f}%")
                 self._task_status['factor_status'] = {'status': 'up_to_date', 'coverage': factor_check['coverage_pct']}
-
-            # Step 4: 行业指数已随K线下载自动更新（download_incremental_kline_data_sync 默认包含）
-            self._task_status['industry_indices_status'] = {'status': 'included_in_kline_download'}
-
-            # Step 5: 日K线下载完成后，检查周K线是否需要补下载
-            logger.info("日K线下载完成，检查周K线覆盖度...")
-            need_weekly, weekly_msg = self._check_weekly_kline_coverage()
-            if need_weekly:
-                logger.info(f"周K线覆盖度不足: {weekly_msg}，开始补下载")
-                weekly_result = self._run_weekly_kline_download()
-                self._task_status['weekly_kline_status'] = weekly_result
 
             logger.info("=" * 60)
             logger.info("每日K线数据检查任务完成")
@@ -404,11 +415,10 @@ class SchedulerService:
         return get_trading_day_end_date(use_sdk_calendar=True)
 
     def _run_kline_download(self) -> Dict:
-        """执行K线增量下载"""
+        """执行K线增量下载（从数据库最新日期到应有交易日）"""
         logger.info("开始K线增量下载...")
 
         from services.common.task_manager import get_task_manager, TaskType
-        from services.common.async_helper import run_sync_in_thread
         task_manager = get_task_manager()
 
         # 检查是否有正在运行的下载任务
@@ -420,15 +430,51 @@ class SchedulerService:
         task_manager.start_task(TaskType.DATA_DOWNLOAD)
         task_manager.update_progress(TaskType.DATA_DOWNLOAD, 5, "正在初始化...")
 
+        # 获取数据库最新K线日期，检查完整性
+        from services.factors.kline_manager import get_kline_manager
+        km = get_kline_manager()
+        latest_date = km.get_global_latest_date()
+        start_date = None  # None 表示首次下载近6个月
+        end_date_offset = 1  # 结束日期 = 今天 + 1天
+
+        if latest_date:
+            # 检查最新日期的数据量是否完整
+            latest_count = km.get_stock_count_on_date(latest_date)
+
+            # 获取前一天数据量
+            prev_dt = datetime.strptime(latest_date, '%Y-%m-%d') - timedelta(days=1)
+            prev_date = prev_dt.strftime('%Y-%m-%d')
+            prev_count = km.get_stock_count_on_date(prev_date)
+
+            logger.info(f"最新日期 {latest_date}: {latest_count} 只, 前一日 {prev_date}: {prev_count} 只")
+
+            if latest_count < prev_count:
+                # 最新日期数据不完整，删除后重新下载
+                deleted = km.delete_by_date(latest_date)
+                logger.info(f"最新日期数据不完整，已删除 {deleted} 条记录，从 {latest_date} 开始重新下载")
+                start_date = latest_date
+            else:
+                # 最新日期数据完整，从下一天开始增量下载
+                next_dt = datetime.strptime(latest_date, '%Y-%m-%d') + timedelta(days=1)
+                start_date = next_dt.strftime('%Y-%m-%d')
+                logger.info(f"最新日期数据完整（{latest_count} >= {prev_count}），从 {start_date} 开始增量下载")
+
+        # 结束日期 = 今天 + 1天
+        end_date = (datetime.now(CHINA_TZ) + timedelta(days=1)).strftime('%Y-%m-%d')
+
+        if start_date is None:
+            logger.info("数据库无K线数据，首次下载近6个月数据")
+
         from services.data.local_data_service import download_incremental_kline_data_sync
         from dotenv import load_dotenv
         load_dotenv()
 
         try:
-            # 使用 run_sync_in_thread 统一处理事件循环冲突
-            success = run_sync_in_thread(
-                download_incremental_kline_data_sync,
-                calculate_factors=False  # 因子计算由 _run_daily_factor_calc 单独处理
+            success = download_incremental_kline_data_sync(
+                start_date=start_date,
+                end_date=end_date,
+                calculate_factors=False,  # 因子计算由 _run_daily_factor_calc 单独处理
+                download_industry=False   # 行业指数由独立任务 _run_industry_indices_download 处理
             )
         except Exception as e:
             logger.error(f"K线下载失败: {e}", exc_info=True)
@@ -468,13 +514,39 @@ class SchedulerService:
             # 计算日期范围
             calc_start = start_date or (get_china_time() - timedelta(days=120)).strftime('%Y-%m-%d')
 
+            # 进度回调：每批次由 factor_service 内部通过 tracker 调用
+            class FactorProgressTracker:
+                def __init__(self, task_mgr, task_type):
+                    self.task_mgr = task_mgr
+                    self.task_type = task_type
+                    self.last_pct = 0
+
+                def update_sync(self, processed=0, current_stock="", message=""):
+                    # 从消息中提取批次进度
+                    import re
+                    match = re.search(r'批次\s+(\d+)/(\d+)', message) if message else None
+                    if match:
+                        batch, total = int(match.group(1)), int(match.group(2))
+                        pct = int(batch / total * 90) + 5  # 5%~95%
+                        if pct != self.last_pct:
+                            self.last_pct = pct
+                            self.task_mgr.update_progress(self.task_type, pct, message)
+                    elif processed > 0:
+                        self.task_mgr.update_progress(self.task_type, processed, message)
+
+                def complete_sync(self):
+                    pass
+
+            tracker = FactorProgressTracker(task_manager, TaskType.DAILY_FACTOR_CALC)
+
             # 当覆盖率不足时，使用only_new_dates=False强制全量计算
             # 这样可以填充中间缺失的日期和没有因子记录的股票
             inserted = calculate_and_save_factors_for_dates(
                 start_date=calc_start,
                 end_date=end_date,
                 only_new_dates=not force_full,
-                show_progress=True
+                show_progress=True,
+                tracker=tracker
             )
 
             result = {
@@ -534,7 +606,6 @@ class SchedulerService:
         logger.info("开始K线全量下载...")
 
         from services.common.task_manager import get_task_manager, TaskType
-        from services.common.async_helper import run_sync_in_thread
         task_manager = get_task_manager()
 
         if task_manager.is_running(TaskType.DATA_DOWNLOAD):
@@ -549,7 +620,7 @@ class SchedulerService:
         load_dotenv()
 
         try:
-            success = run_sync_in_thread(download_all_kline_data_sync)
+            success = download_all_kline_data_sync()
         except Exception as e:
             logger.error(f"K线全量下载失败: {e}", exc_info=True)
             task_manager.fail_task(TaskType.DATA_DOWNLOAD, str(e))
@@ -569,7 +640,6 @@ class SchedulerService:
         logger.info("开始周K线下载...")
 
         from services.common.task_manager import get_task_manager, TaskType
-        from services.common.async_helper import run_sync_in_thread
         task_manager = get_task_manager()
 
         if task_manager.is_running(TaskType.WEEKLY_KLINE_DOWNLOAD):
@@ -584,8 +654,7 @@ class SchedulerService:
         load_dotenv()
 
         try:
-            success = run_sync_in_thread(
-                download_weekly_kline_sync,
+            success = download_weekly_kline_sync(
                 years=10,
                 batch_size=50
             )
@@ -616,7 +685,13 @@ class SchedulerService:
 
             if need_download:
                 logger.info(f"周K线覆盖度不足: {msg}，开始增量下载")
-                result = self._run_weekly_kline_download()
+                # 在新线程中启动周K线下载（避免与APScheduler的事件循环冲突）
+                result: Dict = {}
+                def _do_weekly():
+                    result.update(self._run_weekly_kline_download())
+                thread = threading.Thread(target=_do_weekly)
+                thread.start()
+                thread.join()
                 self._task_status['last_weekly_kline_download'] = get_china_time().isoformat()
                 self._task_status['weekly_kline_status'] = result
 
@@ -678,32 +753,38 @@ class SchedulerService:
         return False, f"已覆盖 {weekly_stocks}/{total_stocks}，数据截至 {latest_week}"
 
     def _run_industry_indices_download(self) -> Dict:
-        """执行申万行业指数下载"""
+        """执行申万行业指数下载（带5分钟超时保护）"""
         logger.info("开始申万行业指数下载...")
 
         from dotenv import load_dotenv
         load_dotenv()
 
-        try:
-            from services.data.local_data_service import download_industry_indices
-            from services.common.async_helper import run_sync_in_thread
+        result: Dict = {}
+        def _do_download():
+            try:
+                from services.data.local_data_service import download_industry_indices
+                result.update(download_industry_indices())
+            except Exception as e:
+                result.update({'success': False, 'message': str(e)})
 
-            # 使用 run_sync_in_thread 统一处理事件循环冲突
-            result = run_sync_in_thread(download_industry_indices)
-            return result
+        thread = threading.Thread(target=_do_download)
+        thread.start()
+        thread.join(timeout=300)  # 5分钟超时
 
-        except Exception as e:
-            logger.error(f"申万行业指数下载失败: {e}", exc_info=True)
-            return {'success': False, 'message': str(e)}
+        if thread.is_alive():
+            logger.error("申万行业指数下载超时（5分钟）")
+            return {'success': False, 'message': '下载超时（5分钟）'}
+
+        if result.get('success'):
+            logger.info(f"申万行业指数下载完成: {result.get('saved', 0)} 条")
+        else:
+            logger.warning(f"申万行业指数下载失败: {result.get('message', '未知错误')}")
+
+        return result
 
     def _post_market_analysis_job(self) -> Dict:
-        """盘后分析任务：对每只持仓股调用 DSA 分析并发送飞书通知"""
-        logger.info("=" * 60)
-        logger.info("开始盘后分析任务")
-        logger.info("=" * 60)
-
-        import httpx
-        import time
+        """盘后分析任务（DSA 分析已移除，用户通过页面手动触发）"""
+        logger.info("盘后分析任务已禁用 DSA 分析，跳过")
         from services.common.task_manager import get_task_manager, TaskType
 
         task_manager = get_task_manager()
@@ -712,248 +793,10 @@ class SchedulerService:
         if task_manager.is_running(task_type):
             return {'success': False, 'message': '分析任务正在运行中'}
 
-        task_manager.start_task(task_type)
+        task_manager.update_progress(task_type, 100, "DSA 分析已从盘后任务移除")
+        task_manager.complete_task(task_type, {'success': True, 'message': '已跳过'})
         self._task_status['last_post_market_analysis'] = get_china_time().isoformat()
-
-        try:
-            conn = get_sync_connection(path=POSITIONS_DB_PATH)
-            cursor = conn.cursor()
-
-            cursor.execute(
-                "SELECT DISTINCT account_id, stock_code, stock_name FROM stock_positions WHERE quantity > 0"
-            )
-            positions = cursor.fetchall()
-
-            if not positions:
-                logger.info("当前无持仓，跳过盘后分析")
-                task_manager.update_progress(task_type, 100, "无持仓，跳过分析")
-                task_manager.complete_task(task_type, {'success': True, 'message': '无持仓', 'analyzed': 0})
-                return {'success': True, 'message': '无持仓，跳过分析', 'analyzed': 0}
-
-            account_positions: Dict[str, list] = {}
-            for acct_id, stock_code, stock_name in positions:
-                account_positions.setdefault(acct_id, []).append({
-                    'stock_code': stock_code,
-                    'stock_name': stock_name or stock_code,
-                })
-
-            all_stocks = [s for stocks in account_positions.values() for s in stocks]
-            total_count = len(all_stocks)
-
-            dsa_base_url = "http://localhost:8000"
-            total_analyzed = 0
-            total_failed = 0
-            max_wait = 300
-            interval = 5
-
-            for idx, account_id in enumerate(account_positions.keys()):
-                stocks = account_positions[account_id]
-                logger.info(f"分析账户 {account_id}: {len(stocks)} 只持仓股")
-
-                for stock_idx, stock in enumerate(stocks):
-                    stock_code = stock['stock_code']
-                    stock_name = stock['stock_name']
-
-                    # 计算当前是第几只股票（全局序号）
-                    current = 0
-                    for aid, s_list in account_positions.items():
-                        if aid == account_id:
-                            current += stock_idx + 1
-                            break
-                        current += len(s_list)
-
-                    progress_pct = int((current / total_count) * 100)
-                    task_manager.update_progress(
-                        task_type, progress_pct,
-                        f"正在分析: {stock_name}({stock_code}) [{current}/{total_count}]"
-                    )
-
-                    try:
-                        # 检查当日是否已有分析报告
-                        today = get_china_time().strftime('%Y-%m-%d')
-                        report_data = None
-
-                        with httpx.Client(timeout=30) as hist_client:
-                            hist_resp = hist_client.get(
-                                f"{dsa_base_url}/api/v1/history",
-                                params={"limit": 100}
-                            )
-                            if hist_resp.status_code == 200:
-                                hist_data = hist_resp.json()
-                                for item in hist_data.get("items", []):
-                                    if (item.get("stock_code") == stock_code and
-                                            item.get("created_at", "").startswith(today)):
-                                        # 已有今日报告，直接使用
-                                        record_id = item["id"]
-                                        report_resp = hist_client.get(
-                                            f"{dsa_base_url}/api/v1/history/{record_id}"
-                                        )
-                                        if report_resp.status_code == 200:
-                                            report_data = report_resp.json()
-                                            logger.info(f"使用今日已有报告: {stock_code} {stock_name}")
-                                        break
-
-                        if report_data is None:
-                            # 无今日报告，提交新的分析任务
-                            with httpx.Client(timeout=30) as client:
-                                resp = client.post(
-                                    f"{dsa_base_url}/api/v1/analysis/analyze",
-                                    json={
-                                        "stock_code": stock_code,
-                                        "report_type": "detailed",
-                                        "async_mode": True,
-                                    }
-                                )
-                                if resp.status_code not in (200, 202):
-                                    logger.warning(f"DSA 提交失败 ({stock_code}): {resp.status_code}")
-                                    total_failed += 1
-                                    continue
-
-                                task_data = resp.json()
-                                task_id_dsa = task_data.get("task_id")
-                                if not task_id_dsa:
-                                    logger.warning(f"DSA 未返回 task_id ({stock_code})")
-                                    total_failed += 1
-                                    continue
-
-                            # 轮询等待分析完成（最多 5 分钟）
-                            waited = 0
-
-                            with httpx.Client(timeout=30) as client:
-                                while waited < max_wait:
-                                    time.sleep(interval)
-                                    waited += interval
-
-                                    status_resp = client.get(
-                                        f"{dsa_base_url}/api/v1/analysis/status/{task_id_dsa}"
-                                    )
-                                    if status_resp.status_code != 200:
-                                        continue
-
-                                    status_data = status_resp.json()
-                                    status = status_data.get("status")
-
-                                    if status == "completed":
-                                        with httpx.Client(timeout=30) as hist_client:
-                                            hist_resp = hist_client.get(
-                                                f"{dsa_base_url}/api/v1/history",
-                                                params={"query_id": task_id_dsa, "limit": 1}
-                                            )
-                                            if hist_resp.status_code == 200:
-                                                hist_data = hist_resp.json()
-                                                items = hist_data.get("items", [])
-                                                if items:
-                                                    record_id = items[0]["id"]
-                                                    report_resp = hist_client.get(
-                                                        f"{dsa_base_url}/api/v1/history/{record_id}"
-                                                    )
-                                                    if report_resp.status_code == 200:
-                                                        report_data = report_resp.json()
-                                        break
-                                    elif status == "failed":
-                                        logger.warning(
-                                            f"DSA 分析失败 ({stock_code}): {status_data.get('error', 'unknown')}"
-                                        )
-                                        total_failed += 1
-                                        break
-
-                            if report_data is None and waited >= max_wait:
-                                logger.warning(f"DSA 分析超时 ({stock_code}), 等待 {max_wait}s")
-                                total_failed += 1
-                                continue
-
-                        if report_data is None:
-                            continue
-
-                        summary = report_data.get("summary", {})
-                        strategy = report_data.get("strategy", {})
-
-                        analysis_summary = summary.get("analysis_summary", "暂无分析")
-                        operation_advice = summary.get("operation_advice", "暂无建议")
-                        sentiment_label = summary.get("sentiment_label", "-")
-                        ideal_buy = strategy.get("ideal_buy", "-")
-                        stop_loss = strategy.get("stop_loss", "-")
-                        take_profit = strategy.get("take_profit", "-")
-
-                        # 发送通知（同步 httpx，避免在已有 event loop 的线程中创建新循环）
-
-                        configs = []
-                        try:
-                            conn = get_sync_connection(path=POSITIONS_DB_PATH)
-                            conn.row_factory = sqlite3.Row
-                            cursor = conn.cursor()
-                            cursor.execute(
-                                "SELECT * FROM notification_config WHERE account_id = ? AND enabled = 1",
-                                (account_id,),
-                            )
-                            configs = [dict(r) for r in cursor.fetchall()]
-                        except Exception as qe:
-                            logger.warning(f"查询通知配置失败: {qe}")
-
-                        if configs:
-                            config = configs[0]
-                            if config.get("notify_on_task", 1):
-                                content = (
-                                    f"**股票代码：** {stock_code}\n"
-                                    f"**股票名称：** {stock_name}\n"
-                                    f"**市场情绪：** {sentiment_label}\n"
-                                    f"**分析摘要：** {analysis_summary}\n"
-                                    f"**操作建议：** {operation_advice}\n"
-                                    f"**理想买入：** {ideal_buy}\n"
-                                    f"**止损价：** {stop_loss}\n"
-                                    f"**止盈价：** {take_profit}"
-                                )
-
-                                feishu_payload = {
-                                    "msg_type": "interactive",
-                                    "card": {
-                                        "config": {"wide_screen_mode": True},
-                                        "header": {
-                                            "title": {"tag": "plain_text", "content": "盘后分析"},
-                                            "template": "purple",
-                                        },
-                                        "elements": [
-                                            {"tag": "div", "text": {"tag": "lark_md", "content": content}},
-                                            {"tag": "hr"},
-                                            {"tag": "note", "elements": [
-                                                {"tag": "plain_text", "content": f"账户: {account_id} | StockWinner"}
-                                            ]},
-                                        ],
-                                    },
-                                }
-                                try:
-                                    with httpx.Client(timeout=10) as feishu_client:
-                                        feishu_resp = feishu_client.post(
-                                            config["webhook_url"],
-                                            json=feishu_payload,
-                                            headers={"Content-Type": "application/json"},
-                                        )
-                                        logger.info(f"飞书通知发送结果: {feishu_resp.text[:200]}")
-                                except Exception as fe:
-                                    logger.warning(f"发送飞书通知失败: {fe}")
-
-                        total_analyzed += 1
-                        logger.info(f"分析完成: {stock_code} {stock_name}")
-
-                    except Exception as e:
-                        logger.error(f"分析异常 ({stock_code}): {e}")
-                        total_failed += 1
-
-            logger.info(f"盘后分析完成: 成功 {total_analyzed}, 失败 {total_failed}")
-            result = {
-                'success': True,
-                'analyzed': total_analyzed,
-                'failed': total_failed,
-                'message': f'分析完成: {total_analyzed} 只成功, {total_failed} 只失败',
-            }
-            task_manager.update_progress(task_type, 100, result['message'])
-            task_manager.complete_task(task_type, result)
-            return result
-
-        except Exception as e:
-            logger.error(f"盘后分析任务失败: {e}", exc_info=True)
-            task_manager.fail_task(task_type, str(e))
-            return {'success': False, 'message': str(e)}
+        return {'success': True, 'message': '已跳过'}
 
     def run_manual_post_market_analysis(self) -> Dict:
         """手动触发盘后分析"""
@@ -1253,6 +1096,17 @@ class SchedulerService:
             return
 
         task_type = task.get("task_type", "strategy")
+
+        # 交易日检查：require_trading_day=1 且今天不是交易日时跳过
+        if task.get("require_trading_day"):
+            from services.trading.trading_hours import is_today_trading_day
+            if not is_today_trading_day():
+                logger.info(f"任务 {task_id} 要求交易日，今天非交易日，跳过执行")
+                await db.execute(
+                    "UPDATE strategy_tasks SET last_run_at = ?, last_status = 'skipped', last_output = ? WHERE id = ?",
+                    (get_china_time().isoformat(), json.dumps({"message": "今天非交易日"}, ensure_ascii=False), task_id)
+                )
+                return
 
         try:
             # 更新任务状态为 running

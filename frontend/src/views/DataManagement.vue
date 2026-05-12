@@ -216,6 +216,10 @@
                   <el-form-item label="启用">
                     <el-switch v-model="newTaskForm.enabled" :active-value="1" :inactive-value="0" />
                   </el-form-item>
+                  <el-form-item label="仅交易日">
+                    <el-switch v-model="newTaskForm.requireTradingDay" :active-value="1" :inactive-value="0" />
+                    <span class="hint" style="margin-left: 8px; color: #909399">开启后仅在交易日执行（自动判断调休等节假日）</span>
+                  </el-form-item>
                   <el-form-item>
                     <el-button type="primary" @click="createTask" :loading="creatingTask">
                       {{ editingTaskId ? '更新任务' : '创建任务' }}
@@ -257,6 +261,13 @@
                     <el-tag :type="row.enabled ? 'success' : 'info'" size="small">{{ row.enabled ? '启用' : '停用' }}</el-tag>
                   </template>
                 </el-table-column>
+                <el-table-column label="交易日" width="70">
+                  <template #default="{ row }">
+                    <el-tooltip :content="row.require_trading_day ? '仅交易日执行' : '按 cron 执行'" placement="top" :show-after="0">
+                      <el-tag :type="row.require_trading_day ? 'warning' : 'info'" size="small">{{ row.require_trading_day ? '是' : '-' }}</el-tag>
+                    </el-tooltip>
+                  </template>
+                </el-table-column>
                 <el-table-column label="上次执行" width="170">
                   <template #default="{ row }">
                     <span v-if="row.last_run_at">{{ row.last_run_at?.split('.')[0] }}</span>
@@ -282,7 +293,7 @@
                     <el-button :type="row.enabled ? 'warning' : 'success'" size="small" @click="toggleTask(row)">
                       {{ row.enabled ? '停用' : '启用' }}
                     </el-button>
-                    <el-button type="success" size="small" @click="runTask(row)" :disabled="runningTask === row.id">手动执行</el-button>
+                    <el-button type="success" size="small" @click="runTask(row)" :disabled="row.last_status === 'running'">手动执行</el-button>
                     <el-button type="danger" size="small" @click="deleteTask(row)">删除</el-button>
                   </template>
                 </el-table-column>
@@ -389,7 +400,6 @@ const creatingTask = ref(false)
 const scanningTasks = ref(false)
 const translatingCron = ref(false)
 const editingTaskId = ref(null)
-const runningTask = ref(null)
 const taskRegistry = ref([])
 const taskStrategies = ref([])
 const candidateGroups = ref([])
@@ -405,7 +415,8 @@ const newTaskForm = reactive({
   groupId: null,
   cron: '',
   cronText: '',
-  enabled: 1
+  enabled: 1,
+  requireTradingDay: 0
 })
 
 const filteredStrategyTasks = computed(() => {
@@ -716,6 +727,7 @@ const createTask = async () => {
       task_type: newTaskForm.taskType,
       cron_expression: newTaskForm.cron,
       enabled: newTaskForm.enabled,
+      require_trading_day: newTaskForm.requireTradingDay,
     }
     if (newTaskForm.taskType === 'builtin') {
       body.module = newTaskForm.module
@@ -763,6 +775,7 @@ const cancelEditTask = () => {
   newTaskForm.cron = ''
   newTaskForm.cronText = ''
   newTaskForm.enabled = 1
+  newTaskForm.requireTradingDay = 0
   cronDescription.value = ''
 }
 
@@ -805,7 +818,6 @@ const parseTaskError = (task) => {
 }
 
 const runTask = async (task) => {
-  runningTask.value = task.id
   try {
     const res = await fetch(`/api/v1/ui/${currentAccountId.value}/strategy-tasks/${task.id}/run`, { method: 'POST' })
     const data = await res.json()
@@ -817,8 +829,6 @@ const runTask = async (task) => {
     }
   } catch (e) {
     ElMessage.error('执行失败')
-  } finally {
-    runningTask.value = null
   }
 }
 
@@ -844,6 +854,7 @@ const editTask = (task) => {
   newTaskForm.cron = task.cron_expression || ''
   newTaskForm.cronText = ''
   newTaskForm.enabled = task.enabled
+  newTaskForm.requireTradingDay = task.require_trading_day || 0
   cronDescription.value = ''
   showCreateTaskForm.value = true
   activeTaskForm.value = 'form'

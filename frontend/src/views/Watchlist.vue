@@ -140,6 +140,9 @@
                     <el-icon><Delete /></el-icon>
                     移除{{ selectedStocks.length > 0 ? ` (${selectedStocks.length})` : '' }}
                   </el-button>
+                  <el-button type="info" size="small" :disabled="selectedStocks.length !== 1" @click="handleDsaAnalysisSelected" :loading="dsaAnalyzing">
+                    DSA 分析{{ selectedStocks.length === 1 ? ` (${selectedStocks[0].stock_code})` : '' }}
+                  </el-button>
                   <el-button type="warning" size="small" :disabled="selectedStocks.length === 0" @click="showBatchStatusDialog = true">
                     改状态{{ selectedStocks.length > 0 ? ` (${selectedStocks.length})` : '' }}
                   </el-button>
@@ -179,7 +182,9 @@
                   <el-tag :type="getStatusType(row.status)" size="small">{{ getStatusText(row.status) }}</el-tag>
                 </template>
               </el-table-column>
-              <el-table-column prop="updated_at" label="更新时间" width="160" sortable />
+              <el-table-column prop="updated_at" label="更新时间" width="170" sortable>
+                <template #default="{ row }">{{ formatTime(row.updated_at) }}</template>
+              </el-table-column>
             </el-table>
 
             <el-empty v-if="!stocksLoading && currentStocks.length === 0" description="暂无候选股票，请添加或运行选股" />
@@ -457,6 +462,13 @@
             <el-table-column label="状态" width="80">
               <template #default="{ row }">
                 <el-tag :type="row.enabled ? 'success' : 'info'" size="small">{{ row.enabled ? '启用' : '停用' }}</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="交易日" width="70">
+              <template #default="{ row }">
+                <el-tooltip :content="row.require_trading_day ? '仅交易日执行' : '按 cron 执行'" placement="top" :show-after="0">
+                  <el-tag :type="row.require_trading_day ? 'warning' : 'info'" size="small">{{ row.require_trading_day ? '是' : '-' }}</el-tag>
+                </el-tooltip>
               </template>
             </el-table-column>
             <el-table-column label="上次执行" width="170">
@@ -1434,6 +1446,38 @@ const loadAll = async () => {
 
 const getStatusType = (status) => ({ pending: 'info', watching: 'warning', bought: 'success', sold: 'success', ignored: 'info' }[status] || 'info')
 const getStatusText = (status) => ({ pending: '待交易', watching: '观察中', bought: '已买入', sold: '已卖出', ignored: '已忽略' }[status] || status)
+
+const formatTime = (t) => {
+  if (!t) return '-'
+  return t.split('.')[0].replace('T', ' ')
+}
+
+// DSA 分析
+const dsaAnalyzing = ref(false)
+
+const handleDsaAnalysisSelected = async () => {
+  if (selectedStocks.value.length !== 1) {
+    ElMessage.warning('请勾选一只股票')
+    return
+  }
+  const row = selectedStocks.value[0]
+  dsaAnalyzing.value = true
+  try {
+    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/stocks/${row.stock_code}/dsa-analyze`, { method: 'POST' })
+    const data = await res.json()
+    if (res.ok && data.success) {
+      ElMessage.success(`${row.stock_code} DSA 分析完成`)
+    } else if (data.code === 409) {
+      ElMessage.info(data.message)
+    } else {
+      ElMessage.error(data.detail || '分析失败')
+    }
+  } catch (e) {
+    ElMessage.error('请求失败，请检查网络连接')
+  } finally {
+    dsaAnalyzing.value = false
+  }
+}
 
 import { onUnmounted } from 'vue'
 onUnmounted(() => {

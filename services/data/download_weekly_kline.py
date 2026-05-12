@@ -15,7 +15,6 @@ from pathlib import Path
 from typing import List, Optional, Dict, Any, Tuple
 
 from services.factors.kline_manager import get_kline_manager, KlineManager
-from services.common.async_helper import run_sync_in_thread
 
 # 数据库路径
 DB_PATH = Path("/home/bobo/StockWinner/data/kline.db")
@@ -34,7 +33,7 @@ async def download_weekly_kline_data(
     end_date: Optional[str] = None,
     broker_account: str = "",
     broker_password: str = "",
-    batch_size: int = 50,
+    batch_size: int = 0,
     market_filter: Optional[List[str]] = ['SH', 'SZ']
 ):
     """
@@ -43,6 +42,7 @@ async def download_weekly_kline_data(
     重要：
     - 只下载到最近一个完整交易周，不创建本周未完成的数据
     - 下载前自动清理超过 cutoff 的不完整周数据
+    - 动态计算批次大小：初始下载按数据量自动调整（100~500只/批），增量下载按 200 只/批
     """
     from services.trading.gateway import get_gateway_for_account
     from services.common.database import get_sync_connection
@@ -140,8 +140,16 @@ async def download_weekly_kline_data(
         end_date_int = int((end_dt + timedelta(days=7)).strftime('%Y%m%d'))
         start_date_int = int(initial_start.strftime('%Y%m%d'))
 
+        # 动态计算批次大小：初始下载数据量大（10年×52周），减少每批股票数
+        # 目标：每批返回不超过 ~25,000 条（避免 SDK 超时）
+        weeks_per_stock = years * 52  # ~520
+        max_records_per_batch = 25000
+        dynamic_batch_size = max(20, min(500, max_records_per_batch // weeks_per_stock))
+        actual_batch_size = batch_size if batch_size > 0 else dynamic_batch_size
+
         print(f"[WeeklyKline] 初始下载: {len(needs_initial)} 只股票, {initial_start.strftime('%Y-%m-%d')} ~ {cutoff_date}")
-        await _download_batch(gateway, needs_initial, start_date_int, end_date_int, years, batch_size)
+        print(f"[WeeklyKline]   每批 {actual_batch_size} 只（动态计算：{dynamic_batch_size}），每只约 {weeks_per_stock} 条周K线")
+        await _download_batch(gateway, needs_initial, start_date_int, end_date_int, years, actual_batch_size)
 
     # 再处理增量更新
     if needs_update:
@@ -157,7 +165,10 @@ async def download_weekly_kline_data(
 
         print(f"[WeeklyKline] 增量更新: {len(needs_update)} 只股票, 从 {earliest_start_str or 'N/A'} 开始")
 
-        await _download_incremental(gateway, needs_update, latest_map, end_date_int, batch_size)
+        # 增量下载：每只股票数据量小（通常只有几周到几个月），可以批量处理更多股票
+        incremental_batch_size = batch_size if batch_size > 0 else 200
+        print(f"[WeeklyKline]   每批 {incremental_batch_size} 只")
+        await _download_incremental(gateway, needs_update, latest_map, end_date_int, incremental_batch_size)
 
     print(f"[WeeklyKline] ====== 下载完成 ======")
     return True
@@ -226,7 +237,7 @@ async def _download_incremental(
     latest_map: Dict[str, str], end_date_int: int,
     batch_size: int
 ):
-    """增量下载（每只股票从自己的最新日期开始）"""
+    """批量增量下载（每批多只股票，从各自的最新日期开始）"""
     from services.factors.kline_manager import KlineManager
     km = get_kline_manager()
     total_stocks = len(stocks)
@@ -253,31 +264,29 @@ async def _download_incremental(
         except Exception:
             pass
 
-        for s in batch:
-            code = s['stock_code']
-            stock_name = s['stock_name']
-            latest = latest_map.get(code)
+        # 批量获取该批所有股票的周K线
+        batch_codes = [s['stock_code'] for s in batch]
+        try:
+            kline_data = await gateway.get_batch_kline_data(
+                stock_codes=batch_codes,
+                period="week",
+                start_date=str(end_date_int - 36500),  # 最多回取10年
+                end_date=str(end_date_int),
+                limit=520  # 最多10年
+            )
 
-            if not latest:
-                continue
+            for s in batch:
+                code = s['stock_code']
+                stock_name = s['stock_name']
+                latest = latest_map.get(code)
 
-            # 计算该股票的起始日期
-            start_dt = datetime.strptime(latest, '%Y-%m-%d') + timedelta(days=7)
+                if not latest:
+                    continue
 
-            # 如果起始日期已经超过结束日期，跳过
-            if start_dt > datetime.strptime(end_dt_str, '%Y-%m-%d'):
-                continue
-
-            start_date_int = int(start_dt.strftime('%Y%m%d'))
-
-            try:
-                kline_data = await gateway.get_batch_kline_data(
-                    stock_codes=[code],
-                    period="week",
-                    start_date=str(start_date_int),
-                    end_date=str(end_date_int),
-                    limit=520  # 最多10年
-                )
+                # 如果起始日期已经超过结束日期，跳过
+                start_dt = datetime.strptime(latest, '%Y-%m-%d') + timedelta(days=7)
+                if start_dt > datetime.strptime(end_dt_str, '%Y-%m-%d'):
+                    continue
 
                 data = kline_data.get(code)
                 if data is not None and len(data) > 0:
@@ -286,9 +295,9 @@ async def _download_incremental(
                     )
                     total_saved += saved
 
-            except Exception as e:
-                print(f"[WeeklyKline] {code} 增量下载失败: {e}")
-                continue
+        except Exception as e:
+            print(f"[WeeklyKline] 批次 {i//batch_size + 1} 增量下载失败: {e}")
+            continue
 
     print(f"[WeeklyKline] 增量更新完成，保存 {total_saved} 条记录")
 
@@ -302,11 +311,18 @@ def download_weekly_kline_sync(
     batch_size: int = 50,
     market_filter: Optional[List[str]] = ['SH', 'SZ']
 ):
-    """同步版本的周K线下载函数（使用 async_helper 处理事件循环冲突）"""
-    return run_sync_in_thread(download_weekly_kline_data,
-        years=years, start_date=start_date, end_date=end_date,
-        broker_account=broker_account, broker_password=broker_password,
-        batch_size=batch_size, market_filter=market_filter)
+    """同步版本的周K线下载函数（显式创建新事件循环）"""
+    import asyncio
+    loop = asyncio.new_event_loop()
+    try:
+        asyncio.set_event_loop(loop)
+        return loop.run_until_complete(download_weekly_kline_data(
+            years=years, start_date=start_date, end_date=end_date,
+            broker_account=broker_account, broker_password=broker_password,
+            batch_size=batch_size, market_filter=market_filter
+        ))
+    finally:
+        loop.close()
 
 
 if __name__ == "__main__":

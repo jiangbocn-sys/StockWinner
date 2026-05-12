@@ -920,8 +920,9 @@ class TradingGateway(TradingGatewayInterface):
         # 根据股票数量和任务类型动态计算超时
         count = len(stock_codes) if stock_codes else 1
         if task_type == "download":
-            batch_timeout = min(count * 30.0, 60.0)
-            batch_timeout = max(batch_timeout, 15.0)
+            # 500只约需30秒，上限180秒
+            batch_timeout = min(count * 0.36, 180.0)
+            batch_timeout = max(batch_timeout, 30.0)
         elif count <= 5:
             batch_timeout = 10.0
         elif count <= 20:

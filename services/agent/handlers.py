@@ -196,6 +196,25 @@ async def get_agent_spec():
                     {"method": "GET", "path": "/api/v1/agent/query/kline?stock_code=600000.SH&period=day&limit=100", "desc": "K 线数据（day/week/month）"},
                     {"method": "GET", "path": "/api/v1/agent/query/factors?stock_code=600000.SH&date=2026-05-10", "desc": "日频因子"},
                     {"method": "GET", "path": "/api/v1/agent/query/notifications?account_id=xxx&limit=50", "desc": "通知历史"},
+                    {"method": "GET", "path": "/api/v1/agent/query/stock-code?stock_code=600000", "desc": "代码 → 名称（不带后缀自动匹配市场）"},
+                    {"method": "GET", "path": "/api/v1/agent/query/stock-code?stock_code=600000.SH", "desc": "代码 → 名称（指定市场）"},
+                    {"method": "GET", "path": "/api/v1/agent/query/stock-code?stock_name=浦发", "desc": "名称 → 代码模糊查询（返回最多 50 条）"},
+                    {"method": "GET", "path": "/api/v1/agent/query/data/index/list", "desc": "指数代码列表"},
+                    {"method": "GET", "path": "/api/v1/agent/query/data/index/kline?index_code=000300.SH", "desc": "指数K线"},
+                    {"method": "GET", "path": "/api/v1/agent/query/data/industry/list", "desc": "申万行业分类"},
+                    {"method": "GET", "path": "/api/v1/agent/query/data/industry/kline?index_code=801010.SI", "desc": "行业指数行情"},
+                    {"method": "GET", "path": "/api/v1/agent/query/data/industry/constituent?index_code=801010.SI", "desc": "行业成分股"},
+                    {"method": "GET", "path": "/api/v1/agent/query/data/index/constituent?index_code=000300.SH", "desc": "指数成分股"},
+                    {"method": "GET", "path": "/api/v1/agent/query/data/financial/income?stock_code=600000.SH", "desc": "利润表"},
+                    {"method": "GET", "path": "/api/v1/agent/query/data/financial/balance?stock_code=600000.SH", "desc": "资产负债表"},
+                    {"method": "GET", "path": "/api/v1/agent/query/data/financial/cashflow?stock_code=600000.SH", "desc": "现金流量表"},
+                    {"method": "GET", "path": "/api/v1/agent/query/data/financial/profit-notice?stock_code=600000.SH", "desc": "业绩预告"},
+                    {"method": "GET", "path": "/api/v1/agent/query/data/financial/profit-express?stock_code=600000.SH", "desc": "业绩快报"},
+                    {"method": "GET", "path": "/api/v1/agent/query/data/dragon-tiger?stock_code=600000.SH&start_date=20250101&end_date=20250512", "desc": "龙虎榜（日期必填 YYYYMMDD）"},
+                    {"method": "GET", "path": "/api/v1/agent/query/data/margin/summary?start_date=20250101&end_date=20250512", "desc": "融资融券汇总（日期必填 YYYYMMDD）"},
+                    {"method": "GET", "path": "/api/v1/agent/query/data/margin/detail?stock_code=600000.SH&start_date=20250101&end_date=20250512", "desc": "融资融券明细（日期必填 YYYYMMDD）"},
+                    {"method": "GET", "path": "/api/v1/agent/query/data/block-trading?stock_code=600000.SH&start_date=20250101&end_date=20250512", "desc": "大宗交易（日期必填 YYYYMMDD）"},
+                    {"method": "GET", "path": "/api/v1/agent/query/data/treasury-yield", "desc": "国债收益率曲线"},
                 ],
             },
             "submit_endpoints": {
@@ -793,6 +812,556 @@ async def query_notifications(
     )
 
     return {"account_id": account_id, "notifications": notifications}
+
+
+@router.get("/query/stock-code")
+async def query_stock_code(
+    request: Request,
+    stock_code: Optional[str] = Query(None, description="股票代码（如 600000.SH），返回名称"),
+    stock_name: Optional[str] = Query(None, description="股票名称模糊查询，返回匹配的代码+名称列表"),
+    agent: dict = Depends(verify_agent_key),
+):
+    """股票代码 ↔ 名称互转查询
+
+    用法（二选一）：
+    - ?stock_code=600000.SH  → 返回该代码对应的名称
+    - ?stock_name=浦发  → 模糊匹配名称，返回所有含该关键词的股票
+    """
+    if not stock_code and not stock_name:
+        raise HTTPException(status_code=400, detail="需指定 stock_code 或 stock_name 参数")
+
+    await log_action(
+        agent_id=agent["agent_id"], action="query.stock_code", risk_level="low",
+        ip_address=request.client.host if request.client else None,
+    )
+
+    db = get_db_manager()
+
+    results = []
+
+    # 代码 → 名称
+    if stock_code:
+        code = stock_code
+        if '.' not in code:
+            # 自动匹配市场后缀：先按规则推测，再 fallback 双市场查找
+            code_sh = f"{code}.SH"
+            code_sz = f"{code}.SZ"
+            # 优先按 A 股规则快速推测
+            inferred = code_sh if code.startswith('6') else code_sz
+
+            def _lookup(c):
+                try:
+                    import sqlite3 as _sqlite3
+                    from pathlib import Path as _Path
+                    kline_path = _Path(__file__).parent.parent.parent / "data" / "kline.db"
+                    if kline_path.exists():
+                        kconn = _sqlite3.connect(str(kline_path))
+                        kconn.row_factory = _sqlite3.Row
+                        row = kconn.execute(
+                            "SELECT DISTINCT stock_code, stock_name FROM kline_data WHERE stock_code = ? LIMIT 1",
+                            (c,)
+                        ).fetchone()
+                        if not row:
+                            row = kconn.execute(
+                                "SELECT DISTINCT stock_code, stock_name FROM stock_base_info WHERE stock_code = ? LIMIT 1",
+                                (c,)
+                            ).fetchone()
+                        kconn.close()
+                        if row:
+                            return {"stock_code": row["stock_code"], "stock_name": row["stock_name"]}
+                except Exception:
+                    pass
+                # SDK 兜底
+                try:
+                    from services.common.sdk_manager import get_sdk_manager
+                    sdk_mgr = get_sdk_manager()
+                    code_info = sdk_mgr.get_code_info()
+                    match = code_info[code_info["code"] == c]
+                    if len(match) > 0:
+                        return {"stock_code": c, "stock_name": match.iloc[0].get("name", "")}
+                except Exception:
+                    pass
+                return None
+
+            # 先查推测的市场
+            result = _lookup(inferred)
+            if result:
+                results.append(result)
+            else:
+                # 另一个市场
+                other = code_sz if inferred == code_sh else code_sh
+                result = _lookup(other)
+                if result:
+                    results.append(result)
+        else:
+            # 已有完整代码后缀，直接查询
+            try:
+                import sqlite3 as _sqlite3
+                from pathlib import Path as _Path
+                kline_path = _Path(__file__).parent.parent.parent / "data" / "kline.db"
+                if kline_path.exists():
+                    kconn = _sqlite3.connect(str(kline_path))
+                    kconn.row_factory = _sqlite3.Row
+                    row = kconn.execute(
+                        "SELECT DISTINCT stock_code, stock_name FROM kline_data WHERE stock_code = ? LIMIT 1",
+                        (code,)
+                    ).fetchone()
+                    if not row:
+                        row = kconn.execute(
+                            "SELECT DISTINCT stock_code, stock_name FROM stock_base_info WHERE stock_code = ? LIMIT 1",
+                            (code,)
+                        ).fetchone()
+                    kconn.close()
+                    if row:
+                        results.append({"stock_code": row["stock_code"], "stock_name": row["stock_name"]})
+            except Exception:
+                pass
+            if not results:
+                try:
+                    from services.common.sdk_manager import get_sdk_manager
+                    sdk_mgr = get_sdk_manager()
+                    code_info = sdk_mgr.get_code_info()
+                    match = code_info[code_info["code"] == code]
+                    if len(match) > 0:
+                        results.append({"stock_code": code, "stock_name": match.iloc[0].get("name", "")})
+                except Exception:
+                    pass
+
+        if not results:
+            return {"stock_code": code, "error": "未找到该股票"}
+        return {"stock_code": results[0]["stock_code"], "stock_name": results[0]["stock_name"]}
+
+    # 名称 → 代码（模糊匹配）
+    if stock_name:
+        try:
+            import sqlite3 as _sqlite3
+            from pathlib import Path as _Path
+            kline_path = _Path(__file__).parent.parent.parent / "data" / "kline.db"
+            if kline_path.exists():
+                kconn = _sqlite3.connect(str(kline_path))
+                kconn.row_factory = _sqlite3.Row
+                rows = kconn.execute(
+                    "SELECT DISTINCT stock_code, stock_name FROM kline_data WHERE stock_name LIKE ? ORDER BY stock_code LIMIT 50",
+                    (f"%{stock_name}%",)
+                ).fetchall()
+                results = [{"stock_code": r["stock_code"], "stock_name": r["stock_name"]} for r in rows]
+                kconn.close()
+        except Exception:
+            pass
+
+        if not results:
+            try:
+                from services.common.sdk_manager import get_sdk_manager
+                sdk_mgr = get_sdk_manager()
+                code_info = sdk_mgr.get_code_info()
+                mask = code_info["name"].str.contains(stock_name, na=False)
+                match = code_info[mask]
+                results = [
+                    {"stock_code": row["code"], "stock_name": row["name"]}
+                    for _, row in match.head(50).iterrows()
+                ]
+            except Exception:
+                pass
+
+        if not results:
+            return {"stock_name": stock_name, "error": "未找到匹配的股票"}
+        return {"stock_name": stock_name, "count": len(results), "results": results}
+
+
+# ============================================================
+# 外部数据查询端点（SDK 直连）
+# ============================================================
+
+
+@router.get("/query/data/index/list")
+async def query_data_index_list(
+    request: Request,
+    agent: dict = Depends(verify_agent_key),
+):
+    """指数代码列表"""
+    await log_action(
+        agent_id=agent["agent_id"], action="query.data.index_list", risk_level="low",
+        ip_address=request.client.host if request.client else None,
+    )
+    try:
+        from services.trading.gateway import get_gateway
+        gateway = await get_gateway()
+        indices = await gateway.get_index_list()
+        return {"success": True, "data": indices, "count": len(indices)}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@router.get("/query/data/index/kline")
+async def query_data_index_kline(
+    request: Request,
+    index_code: str = Query(..., description="指数代码，如 000300.SH"),
+    period: str = Query("day", description="周期：day/week/month"),
+    limit: int = Query(100, description="返回数量"),
+    agent: dict = Depends(verify_agent_key),
+):
+    """指数K线数据"""
+    await log_action(
+        agent_id=agent["agent_id"], action="query.data.index_kline", risk_level="low",
+        ip_address=request.client.host if request.client else None,
+    )
+    try:
+        from services.trading.gateway import get_gateway
+        gateway = await get_gateway()
+        kline_data = await gateway.get_kline_data(
+            stock_code=index_code, period=period, limit=limit
+        )
+        return {"success": True, "data": {"index_code": index_code, "period": period, "kline": kline_data}}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@router.get("/query/data/industry/list")
+async def query_data_industry_list(
+    request: Request,
+    level: int = Query(1, description="行业级别：1=一级, 2=二级, 3=三级"),
+    agent: dict = Depends(verify_agent_key),
+):
+    """申万行业分类列表"""
+    await log_action(
+        agent_id=agent["agent_id"], action="query.data.industry_list", risk_level="low",
+        ip_address=request.client.host if request.client else None,
+    )
+    try:
+        from services.common.sdk_manager import get_sdk_manager
+        sdk_mgr = get_sdk_manager()
+        df = sdk_mgr.get_industry_base_info()
+        if df.empty:
+            return {"success": True, "data": [], "count": 0}
+        filtered = df[df["LEVEL_TYPE"] == level]
+        records = filtered.to_dict(orient="records")
+        return {"success": True, "data": records, "count": len(records)}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@router.get("/query/data/industry/kline")
+async def query_data_industry_kline(
+    request: Request,
+    index_code: str = Query(..., description="行业指数代码，如 801010.SI"),
+    agent: dict = Depends(verify_agent_key),
+):
+    """行业指数日行情数据"""
+    await log_action(
+        agent_id=agent["agent_id"], action="query.data.industry_kline", risk_level="low",
+        ip_address=request.client.host if request.client else None,
+    )
+    try:
+        from services.common.sdk_manager import get_sdk_manager
+        sdk_mgr = get_sdk_manager()
+        result = sdk_mgr.get_industry_daily(code_list=[index_code])
+        if not result or index_code not in result:
+            return {"success": True, "data": {"index_code": index_code, "kline": []}}
+        df = result[index_code]
+        df = df.reset_index()
+        df.columns = df.columns.str.lower()
+        if "trade_date" in df.columns:
+            df["trade_date"] = df["trade_date"].apply(
+                lambda x: x.strftime("%Y-%m-%d") if hasattr(x, "strftime") else str(x)[:10]
+            )
+        records = df.to_dict(orient="records")
+        return {"success": True, "data": {"index_code": index_code, "kline": records, "count": len(records)}}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@router.get("/query/data/industry/constituent")
+async def query_data_industry_constituent(
+    request: Request,
+    index_code: str = Query(..., description="行业指数代码，如 801010.SI"),
+    agent: dict = Depends(verify_agent_key),
+):
+    """行业成分股列表"""
+    await log_action(
+        agent_id=agent["agent_id"], action="query.data.industry_constituent", risk_level="low",
+        ip_address=request.client.host if request.client else None,
+    )
+    try:
+        from services.common.sdk_manager import get_sdk_manager
+        sdk_mgr = get_sdk_manager()
+        df = sdk_mgr.get_industry_constituent(index_codes=[index_code])
+        if df.empty:
+            return {"success": True, "data": {"index_code": index_code, "constituents": []}}
+        df.columns = df.columns.str.lower()
+        records = df.to_dict(orient="records")
+        return {"success": True, "data": {"index_code": index_code, "constituents": records, "count": len(records)}}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@router.get("/query/data/index/constituent")
+async def query_data_index_constituent(
+    request: Request,
+    index_code: str = Query(..., description="指数代码，如 000300.SH"),
+    agent: dict = Depends(verify_agent_key),
+):
+    """指数成分股列表"""
+    await log_action(
+        agent_id=agent["agent_id"], action="query.data.index_constituent", risk_level="low",
+        ip_address=request.client.host if request.client else None,
+    )
+    try:
+        from services.common.sdk_manager import get_sdk_manager
+        sdk_mgr = get_sdk_manager()
+        df = sdk_mgr.get_index_constituent(index_codes=[index_code])
+        if df.empty:
+            return {"success": True, "data": {"index_code": index_code, "constituents": []}}
+        df.columns = df.columns.str.lower()
+        records = df.to_dict(orient="records")
+        return {"success": True, "data": {"index_code": index_code, "constituents": records, "count": len(records)}}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@router.get("/query/data/financial/income")
+async def query_data_financial_income(
+    request: Request,
+    stock_code: str = Query(..., description="股票代码，如 600000.SH"),
+    agent: dict = Depends(verify_agent_key),
+):
+    """利润表"""
+    await log_action(
+        agent_id=agent["agent_id"], action="query.data.financial_income", risk_level="low",
+        ip_address=request.client.host if request.client else None,
+    )
+    try:
+        from services.common.sdk_manager import get_sdk_manager
+        sdk_mgr = get_sdk_manager()
+        df = sdk_mgr.get_income_statement(stock_codes=[stock_code])
+        if df.empty:
+            return {"success": True, "data": {"stock_code": stock_code, "records": []}}
+        df.columns = df.columns.str.lower()
+        records = df[df["market_code"] == stock_code].to_dict(orient="records")
+        return {"success": True, "data": {"stock_code": stock_code, "records": records, "count": len(records)}}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@router.get("/query/data/financial/balance")
+async def query_data_financial_balance(
+    request: Request,
+    stock_code: str = Query(..., description="股票代码，如 600000.SH"),
+    agent: dict = Depends(verify_agent_key),
+):
+    """资产负债表"""
+    await log_action(
+        agent_id=agent["agent_id"], action="query.data.financial_balance", risk_level="low",
+        ip_address=request.client.host if request.client else None,
+    )
+    try:
+        from services.common.sdk_manager import get_sdk_manager
+        sdk_mgr = get_sdk_manager()
+        df = sdk_mgr.get_balance_sheet(stock_codes=[stock_code])
+        if df.empty:
+            return {"success": True, "data": {"stock_code": stock_code, "records": []}}
+        df.columns = df.columns.str.lower()
+        records = df[df["market_code"] == stock_code].to_dict(orient="records")
+        return {"success": True, "data": {"stock_code": stock_code, "records": records, "count": len(records)}}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@router.get("/query/data/financial/cashflow")
+async def query_data_financial_cashflow(
+    request: Request,
+    stock_code: str = Query(..., description="股票代码，如 600000.SH"),
+    agent: dict = Depends(verify_agent_key),
+):
+    """现金流量表"""
+    await log_action(
+        agent_id=agent["agent_id"], action="query.data.financial_cashflow", risk_level="low",
+        ip_address=request.client.host if request.client else None,
+    )
+    try:
+        from services.common.sdk_manager import get_sdk_manager
+        sdk_mgr = get_sdk_manager()
+        df = sdk_mgr.get_cash_flow_statement(stock_codes=[stock_code])
+        if df.empty:
+            return {"success": True, "data": {"stock_code": stock_code, "records": []}}
+        df.columns = df.columns.str.lower()
+        records = df[df["market_code"] == stock_code].to_dict(orient="records")
+        return {"success": True, "data": {"stock_code": stock_code, "records": records, "count": len(records)}}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@router.get("/query/data/financial/profit-notice")
+async def query_data_financial_profit_notice(
+    request: Request,
+    stock_code: str = Query(..., description="股票代码，如 600000.SH"),
+    agent: dict = Depends(verify_agent_key),
+):
+    """业绩预告"""
+    await log_action(
+        agent_id=agent["agent_id"], action="query.data.financial_profit_notice", risk_level="low",
+        ip_address=request.client.host if request.client else None,
+    )
+    try:
+        from services.common.sdk_manager import get_sdk_manager
+        sdk_mgr = get_sdk_manager()
+        df = sdk_mgr.get_profit_notice(stock_codes=[stock_code])
+        if df.empty:
+            return {"success": True, "data": {"stock_code": stock_code, "records": []}}
+        df.columns = df.columns.str.lower()
+        records = df[df["market_code"] == stock_code].to_dict(orient="records")
+        return {"success": True, "data": {"stock_code": stock_code, "records": records, "count": len(records)}}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@router.get("/query/data/financial/profit-express")
+async def query_data_financial_profit_express(
+    request: Request,
+    stock_code: str = Query(..., description="股票代码，如 600000.SH"),
+    agent: dict = Depends(verify_agent_key),
+):
+    """业绩快报"""
+    await log_action(
+        agent_id=agent["agent_id"], action="query.data.financial_profit_express", risk_level="low",
+        ip_address=request.client.host if request.client else None,
+    )
+    try:
+        from services.common.sdk_manager import get_sdk_manager
+        sdk_mgr = get_sdk_manager()
+        df = sdk_mgr.get_profit_express(stock_codes=[stock_code])
+        if df.empty:
+            return {"success": True, "data": {"stock_code": stock_code, "records": []}}
+        df.columns = df.columns.str.lower()
+        records = df[df["market_code"] == stock_code].to_dict(orient="records")
+        return {"success": True, "data": {"stock_code": stock_code, "records": records, "count": len(records)}}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@router.get("/query/data/dragon-tiger")
+async def query_data_dragon_tiger(
+    request: Request,
+    stock_code: str = Query(..., description="股票代码，如 600000.SH"),
+    start_date: int = Query(..., description="开始日期 YYYYMMDD"),
+    end_date: int = Query(..., description="结束日期 YYYYMMDD"),
+    agent: dict = Depends(verify_agent_key),
+):
+    """龙虎榜数据（日期必填）"""
+    await log_action(
+        agent_id=agent["agent_id"], action="query.data.dragon_tiger", risk_level="low",
+        ip_address=request.client.host if request.client else None,
+    )
+    try:
+        from services.common.sdk_manager import get_sdk_manager
+        sdk_mgr = get_sdk_manager()
+        df = sdk_mgr.get_long_hu_bang(stock_codes=[stock_code], begin_date=start_date, end_date=end_date)
+        if df.empty:
+            return {"success": True, "data": {"stock_code": stock_code, "records": []}}
+        df.columns = df.columns.str.lower()
+        records = df.to_dict(orient="records")
+        return {"success": True, "data": {"stock_code": stock_code, "records": records, "count": len(records)}}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@router.get("/query/data/margin/summary")
+async def query_data_margin_summary(
+    request: Request,
+    start_date: int = Query(..., description="开始日期 YYYYMMDD"),
+    end_date: int = Query(..., description="结束日期 YYYYMMDD"),
+    agent: dict = Depends(verify_agent_key),
+):
+    """融资融券汇总数据（日期必填）"""
+    await log_action(
+        agent_id=agent["agent_id"], action="query.data.margin_summary", risk_level="low",
+        ip_address=request.client.host if request.client else None,
+    )
+    try:
+        from services.common.sdk_manager import get_sdk_manager
+        sdk_mgr = get_sdk_manager()
+        df = sdk_mgr.get_margin_summary(begin_date=start_date, end_date=end_date)
+        if df.empty:
+            return {"success": True, "data": {"records": []}}
+        df.columns = df.columns.str.lower()
+        records = df.to_dict(orient="records")
+        return {"success": True, "data": {"records": records, "count": len(records)}}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@router.get("/query/data/margin/detail")
+async def query_data_margin_detail(
+    request: Request,
+    stock_code: str = Query(..., description="股票代码，如 600000.SH"),
+    start_date: int = Query(..., description="开始日期 YYYYMMDD"),
+    end_date: int = Query(..., description="结束日期 YYYYMMDD"),
+    agent: dict = Depends(verify_agent_key),
+):
+    """融资融券明细数据（日期必填）"""
+    await log_action(
+        agent_id=agent["agent_id"], action="query.data.margin_detail", risk_level="low",
+        ip_address=request.client.host if request.client else None,
+    )
+    try:
+        from services.common.sdk_manager import get_sdk_manager
+        sdk_mgr = get_sdk_manager()
+        df = sdk_mgr.get_margin_detail(stock_codes=[stock_code], begin_date=start_date, end_date=end_date)
+        if df.empty:
+            return {"success": True, "data": {"stock_code": stock_code, "records": []}}
+        df.columns = df.columns.str.lower()
+        records = df.to_dict(orient="records")
+        return {"success": True, "data": {"stock_code": stock_code, "records": records, "count": len(records)}}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@router.get("/query/data/block-trading")
+async def query_data_block_trading(
+    request: Request,
+    stock_code: str = Query(..., description="股票代码，如 600000.SH"),
+    start_date: int = Query(..., description="开始日期 YYYYMMDD"),
+    end_date: int = Query(..., description="结束日期 YYYYMMDD"),
+    agent: dict = Depends(verify_agent_key),
+):
+    """大宗交易数据（日期必填）"""
+    await log_action(
+        agent_id=agent["agent_id"], action="query.data.block_trading", risk_level="low",
+        ip_address=request.client.host if request.client else None,
+    )
+    try:
+        from services.common.sdk_manager import get_sdk_manager
+        sdk_mgr = get_sdk_manager()
+        df = sdk_mgr.get_block_trading(stock_codes=[stock_code], begin_date=start_date, end_date=end_date)
+        if df.empty:
+            return {"success": True, "data": {"stock_code": stock_code, "records": []}}
+        df.columns = df.columns.str.lower()
+        records = df.to_dict(orient="records")
+        return {"success": True, "data": {"stock_code": stock_code, "records": records, "count": len(records)}}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@router.get("/query/data/treasury-yield")
+async def query_data_treasury_yield(
+    request: Request,
+    agent: dict = Depends(verify_agent_key),
+):
+    """国债收益率曲线"""
+    await log_action(
+        agent_id=agent["agent_id"], action="query.data.treasury_yield", risk_level="low",
+        ip_address=request.client.host if request.client else None,
+    )
+    try:
+        from services.common.sdk_manager import get_sdk_manager
+        sdk_mgr = get_sdk_manager()
+        df = sdk_mgr.get_treasury_yield()
+        if df.empty:
+            return {"success": True, "data": {"records": []}}
+        df.columns = df.columns.str.lower()
+        records = df.to_dict(orient="records")
+        return {"success": True, "data": {"records": records, "count": len(records)}}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
 
 
 # ============== 策略提交端点 (strategist+) ==============

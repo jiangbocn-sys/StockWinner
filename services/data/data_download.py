@@ -133,8 +133,8 @@ def calculate_batch_size(stock_count: int, trading_days: int) -> int:
     # batch × days ≤ 5000 → batch ≤ 5000 / days
     optimal = _MAX_DATA_POINTS // trading_days
 
-    # 上限：不能超过 TGW 股票数上限 ~5500
-    optimal = min(optimal, 5000)
+    # 上限：SDK 单次批量请求最多 3000 只
+    optimal = min(optimal, 3000)
     # 下限：至少 50 只
     optimal = max(optimal, 50)
 
@@ -158,6 +158,9 @@ async def download_all_kline_data(
 ) -> bool:
     """
     异步下载全量 K 线数据
+
+    按市场类型（SH/SZ/BJ）分开下载，避免不同类型股票混入批次导致整批失败。
+    SI（行业指数）使用专用接口 get_industry_daily，不在本函数中下载。
 
     Args:
         batch_size: 每批次下载的股票数量（默认 20）
@@ -212,20 +215,29 @@ async def download_all_kline_data(
     tracker.set_status_sync(DownloadStatus.DOWNLOADING, "获取股票列表...")
     stock_list = await gateway.get_stock_list()
 
-    if market_filter:
-        stock_list = [s for s in stock_list if s.get('market') in market_filter]
+    # 按市场分组（排除 SI，SI 用专用接口）
+    markets: Dict[str, List[dict]] = {}
+    for s in stock_list:
+        m = s.get('market', '')
+        if market_filter and m not in market_filter:
+            continue
+        if m == 'SI':
+            continue  # 行业指数走专用接口
+        if m not in markets:
+            markets[m] = []
+        markets[m].append(s)
 
-    total_stocks = len(stock_list)
-    print(f"[LocalData] 获取到 {total_stocks} 只股票")
+    # 市场顺序：SH → SZ → BJ
+    market_order = [m for m in ['SH', 'SZ', 'BJ'] if m in markets]
+    total_stocks = sum(len(v) for v in markets.values())
+    print(f"[LocalData] 获取到 {total_stocks} 只股票（按市场: "
+          f"{', '.join(f'{m}={len(markets[m])}' for m in market_order)}）")
 
     # 计算交易天数和动态批次大小
     start_dt = datetime.strptime(start_date, '%Y-%m-%d')
     end_dt = datetime.strptime(end_date, '%Y-%m-%d')
     calendar_days = (end_dt - start_dt).days
     trading_days = max(1, int(calendar_days * 5 / 7))  # 约 5/7 是交易日
-    effective_batch = calculate_batch_size(total_stocks, trading_days)
-    actual_batch = min(batch_size, effective_batch) if batch_size != 500 else effective_batch
-    print(f"[LocalData] 交易天数 ~{trading_days}d, 动态批次大小 {effective_batch}, 实际批次 {actual_batch}")
 
     tracker._total_stocks = total_stocks
     tracker._total_tasks = total_stocks
@@ -235,58 +247,65 @@ async def download_all_kline_data(
     local_service = get_local_data_service()
     downloaded_count = 0
     failed_count = 0
+    global_progress = 0
 
-    for i in range(0, total_stocks, actual_batch):
-        batch = stock_list[i:i + actual_batch]
-        batch_codes = [f"{s.get('code')}.{s.get('market')}" for s in batch]
+    for market in market_order:
+        mkt_stocks = markets[market]
+        mkt_batch_size = min(batch_size, calculate_batch_size(len(mkt_stocks), trading_days))
+        print(f"[LocalData] 市场 {market}: {len(mkt_stocks)} 只, 批次大小 {mkt_batch_size}")
 
-        progress = min(i + actual_batch, total_stocks)
-        progress_pct = progress / total_stocks * 100
-        tracker.update_sync(
-            processed=progress,
-            current_stock=batch_codes[0] if batch_codes else "",
-            message=f"下载批次 {i//actual_batch + 1}/{(total_stocks-1)//actual_batch + 1}"
-        )
+        for i in range(0, len(mkt_stocks), mkt_batch_size):
+            batch = mkt_stocks[i:i + mkt_batch_size]
+            batch_codes = [f"{s.get('code')}.{s.get('market')}" for s in batch]
 
-        try:
-            from services.common.task_manager import get_task_manager, TaskType
-            task_manager = get_task_manager()
-            if task_manager.is_running(TaskType.DATA_DOWNLOAD):
-                task_manager.update_progress(TaskType.DATA_DOWNLOAD, round(progress_pct, 1),
-                    message=f"下载批次 {i//actual_batch + 1}/{(total_stocks-1)//actual_batch + 1} ({progress}/{total_stocks})")
-        except Exception:
-            pass
-
-        try:
-            start_date_int = start_date.replace('-', '') if start_date else None
-            end_date_int = end_date.replace('-', '') if end_date else None
-            kline_data = await gateway.get_batch_kline_data(
-                stock_codes=batch_codes,
-                start_date=start_date_int,
-                end_date=end_date_int,
-                task_type="download"
+            global_progress = min(global_progress + len(batch), total_stocks)
+            progress_pct = global_progress / total_stocks * 100
+            tracker.update_sync(
+                processed=global_progress,
+                current_stock=batch_codes[0] if batch_codes else "",
+                message=f"[{market}] 批次 {i//mkt_batch_size + 1}/{(len(mkt_stocks)-1)//mkt_batch_size + 1}"
             )
 
-            save_batch = []
-            for stock_info in batch:
-                full_code = f"{stock_info.get('code')}.{stock_info.get('market')}"
-                name = stock_info.get('name', full_code)
-                df = kline_data.get(full_code)
-                if df is not None and len(df) > 0:
-                    save_batch.append((full_code, name, df))
-                    downloaded_count += 1
+            try:
+                from services.common.task_manager import get_task_manager, TaskType
+                task_manager = get_task_manager()
+                if task_manager.is_running(TaskType.DATA_DOWNLOAD):
+                    task_manager.update_progress(TaskType.DATA_DOWNLOAD, round(progress_pct, 1),
+                        message=f"[{market}] 批次 {i//mkt_batch_size + 1}/{(len(mkt_stocks)-1)//mkt_batch_size + 1} ({global_progress}/{total_stocks})")
+            except Exception:
+                pass
+
+            try:
+                start_date_int = start_date.replace('-', '') if start_date else None
+                end_date_int = end_date.replace('-', '') if end_date else None
+                kline_data = await gateway.get_batch_kline_data(
+                    stock_codes=batch_codes,
+                    start_date=start_date_int,
+                    end_date=end_date_int,
+                    task_type="download"
+                )
+
+                save_batch = []
+                for stock_info in batch:
+                    full_code = f"{stock_info.get('code')}.{stock_info.get('market')}"
+                    name = stock_info.get('name', full_code)
+                    df = kline_data.get(full_code)
+                    if df is not None and len(df) > 0:
+                        save_batch.append((full_code, name, df))
+                        downloaded_count += 1
+                    else:
+                        # 停牌/无交易正常，不计入失败
+                        pass
+
+                if save_batch:
+                    saved = local_service.save_kline_data_batch(save_batch)
+                    print(f"[LocalData] [{market}] 批次 {i//mkt_batch_size + 1}: 保存 {saved} 条记录 ({len(save_batch)}/{len(batch)} 有数据)")
                 else:
-                    market = stock_info.get('market')
-                    if market != 'BJ':
-                        failed_count += 1
+                    print(f"[LocalData] [{market}] 批次 {i//mkt_batch_size + 1}: 无数据返回 ({len(batch)} 只)")
 
-            if save_batch:
-                saved = local_service.save_kline_data_batch(save_batch)
-                print(f"[LocalData] 批次 {i//batch_size + 1}: 保存 {saved} 条记录")
-
-        except Exception as e:
-            print(f"[LocalData] 批次下载失败：{e}")
-            failed_count += len(batch)
+            except Exception as e:
+                print(f"[LocalData] [{market}] 批次 {i//mkt_batch_size + 1} 下载失败：{e}")
+                failed_count += len(batch)
 
     # 计算因子（可选，后续 NightTaskQueue 会将此作为独立步骤）
     if calculate_factors and downloaded_count > 0:
@@ -345,8 +364,8 @@ def download_all_kline_data_sync(
             download_industry=download_industry
         )
 
+    loop = asyncio.new_event_loop()
     try:
-        loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         return loop.run_until_complete(_async_download())
     finally:
@@ -434,8 +453,8 @@ def download_incremental_kline_data_sync(
             download_industry=download_industry
         )
 
+    loop = asyncio.new_event_loop()
     try:
-        loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         return loop.run_until_complete(_async_download())
     finally:

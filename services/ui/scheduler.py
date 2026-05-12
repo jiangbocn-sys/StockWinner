@@ -4,7 +4,7 @@
 提供调度状态查询和手动触发功能
 """
 
-from fastapi import APIRouter, Query, Path, Body, HTTPException
+from fastapi import APIRouter, Query, Path, Body, HTTPException, BackgroundTasks
 from typing import Dict, List, Optional, Any
 from services.common.timezone import format_china_time
 
@@ -286,7 +286,29 @@ async def list_strategy_tasks(account_id: str = Path(..., description="账户 ID
             task["task_name"] = task.get("strategy_name") or "未知策略"
         # cron 可读描述
         task["cron_description"] = _describe_cron(task.get("cron_expression", ""))
+        # 注入下次执行时间（从 APScheduler 获取）
+        job_id = f'task_{task["id"]}'
+        try:
+            job = get_scheduler()._scheduler.get_job(job_id)
+            if job and job.next_run_time:
+                task["next_run_time"] = job.next_run_time.isoformat()
+        except Exception:
+            pass
         tasks.append(task)
+
+    # 按下次执行时间排序（最近执行的排前面），无下次运行时间的排最后
+    from services.common.timezone import CHINA_TZ
+    from datetime import datetime, timezone
+    far_future = datetime(9999, 12, 31, 23, 59, 59, tzinfo=timezone.utc)
+    def _sort_key(t):
+        nrt = t.get("next_run_time")
+        if nrt:
+            try:
+                return datetime.fromisoformat(nrt)
+            except Exception:
+                pass
+        return far_future
+    tasks.sort(key=_sort_key)
 
     return {"success": True, "tasks": tasks}
 
@@ -477,6 +499,7 @@ async def create_strategy_task(
     group_id: Optional[int] = Body(None, description="候选组 ID"),
     cron_expression: str = Body(..., description="Cron 表达式或自然语言描述"),
     enabled: int = Body(1, description="是否启用"),
+    require_trading_day: int = Body(0, description="是否仅交易日执行"),
 ):
     """创建调度任务"""
     from services.common.database import get_db_manager
@@ -564,6 +587,7 @@ async def create_strategy_task(
         "account_id": account_id,
         "cron_expression": cron_expression,
         "enabled": enabled,
+        "require_trading_day": require_trading_day,
     })
 
     from services.common.scheduler_service import get_scheduler
@@ -577,6 +601,7 @@ async def update_strategy_task(
     task_id: int = Path(..., description="任务 ID"),
     cron_expression: Optional[str] = Body(None, description="Cron 表达式"),
     enabled: Optional[int] = Body(None, description="是否启用"),
+    require_trading_day: Optional[int] = Body(None, description="是否仅交易日执行"),
 ):
     """更新策略任务"""
     from services.common.database import get_db_manager
@@ -595,6 +620,8 @@ async def update_strategy_task(
         update_data["cron_expression"] = cron_expression
     if enabled is not None:
         update_data["enabled"] = enabled
+    if require_trading_day is not None:
+        update_data["require_trading_day"] = require_trading_day
 
     if len(update_data) > 1:
         await db.update("strategy_tasks", update_data, "id = ?", (task_id,))
@@ -631,8 +658,9 @@ async def delete_strategy_task(
 async def run_strategy_task_manual(
     account_id: str = Path(..., description="账户 ID"),
     task_id: int = Path(..., description="任务 ID"),
+    background_tasks: BackgroundTasks = None,
 ):
-    """手动执行一次策略任务"""
+    """手动执行一次策略任务 — 后台执行，立即返回"""
     from services.common.scheduler_service import get_scheduler
     from services.common.database import get_db_manager
     db = get_db_manager()
@@ -646,4 +674,8 @@ async def run_strategy_task_manual(
         raise HTTPException(status_code=404, detail="任务不存在")
 
     scheduler = get_scheduler()
-    return scheduler.run_manual_strategy_task(task_id)
+    if background_tasks:
+        background_tasks.add_task(scheduler.run_manual_strategy_task, task_id)
+    else:
+        scheduler.run_manual_strategy_task(task_id)
+    return {'success': True, 'message': f'策略任务 {task_id} 已启动'}

@@ -313,6 +313,22 @@ class KlineManager:
         result = cursor.fetchone()
         return result[0] if result and result[0] else None
 
+    def delete_by_date(self, trade_date: str) -> int:
+        """删除指定交易日的全部数据。
+
+        Returns:
+            删除的记录数
+        """
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            "DELETE FROM kline_data WHERE trade_date = ?",
+            (trade_date,)
+        )
+        deleted = cursor.rowcount
+        conn.commit()
+        return deleted
+
     def delete_incomplete_week(self, cutoff_date: str) -> int:
         """删除 cutoff_date 之后的不完整周数据。
 

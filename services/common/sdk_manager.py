@@ -336,9 +336,9 @@ class SDKManager:
                 else:
                     timeout = 120.0
             else:  # download
-                # TGW 测试：5000 只 ≈ 33s，60s 足够
-                timeout = min(count * 30.0, 60.0)
-                timeout = max(timeout, 15.0)  # 最小 15s
+                # 500只≈44秒，3000只单天≈264秒
+                timeout = min(count * 0.2 + 30, 180.0)  # 上限3分钟
+                timeout = max(timeout, 30.0)  # 最小30s
 
             result = self._call_with_timeout(
                 md.query_kline,
@@ -397,6 +397,165 @@ class SDKManager:
         except Exception as e:
             print(f"[SDK] 获取行业指数日行情失败：{e}")
             return {}
+        finally:
+            self._release_sync(token)
+
+    def get_profit_notice(self, stock_codes: list) -> pd.DataFrame:
+        """获取业绩预告（自动排队）"""
+        info = self.get_info()
+        token = self._acquire_sync("download")
+        try:
+            result = info.get_profit_notice(code_list=stock_codes, is_local=False)
+            if isinstance(result, dict):
+                dfs = [df for df in result.values() if isinstance(df, pd.DataFrame)]
+                if dfs:
+                    return pd.concat(dfs, ignore_index=True)
+            elif isinstance(result, pd.DataFrame):
+                return result
+            return pd.DataFrame()
+        except Exception as e:
+            print(f"[SDK] 获取业绩预告失败：{e}")
+            return pd.DataFrame()
+        finally:
+            self._release_sync(token)
+
+    def get_profit_express(self, stock_codes: list) -> pd.DataFrame:
+        """获取业绩快报（自动排队）"""
+        info = self.get_info()
+        token = self._acquire_sync("download")
+        try:
+            result = info.get_profit_express(code_list=stock_codes, is_local=False)
+            if isinstance(result, dict):
+                dfs = [df for df in result.values() if isinstance(df, pd.DataFrame)]
+                if dfs:
+                    return pd.concat(dfs, ignore_index=True)
+            elif isinstance(result, pd.DataFrame):
+                return result
+            return pd.DataFrame()
+        except Exception as e:
+            print(f"[SDK] 获取业绩快报失败：{e}")
+            return pd.DataFrame()
+        finally:
+            self._release_sync(token)
+
+    def get_long_hu_bang(self, stock_codes: list, begin_date: int, end_date: int) -> pd.DataFrame:
+        """获取龙虎榜数据（自动排队）"""
+        info = self.get_info()
+        token = self._acquire_sync("download")
+        try:
+            result = info.get_long_hu_bang(code_list=stock_codes, begin_date=begin_date, end_date=end_date, is_local=False)
+            if isinstance(result, pd.DataFrame):
+                return result
+            return pd.DataFrame()
+        except Exception as e:
+            print(f"[SDK] 获取龙虎榜数据失败：{e}")
+            return pd.DataFrame()
+        finally:
+            self._release_sync(token)
+
+    def get_margin_summary(self, begin_date: int, end_date: int) -> pd.DataFrame:
+        """获取融资融券汇总（自动排队，无需 stock_codes）"""
+        info = self.get_info()
+        token = self._acquire_sync("download")
+        try:
+            result = info.get_margin_summary(begin_date=begin_date, end_date=end_date, is_local=False)
+            if isinstance(result, pd.DataFrame):
+                return result
+            return pd.DataFrame()
+        except Exception as e:
+            print(f"[SDK] 获取融资融券汇总失败：{e}")
+            return pd.DataFrame()
+        finally:
+            self._release_sync(token)
+
+    def get_margin_detail(self, stock_codes: list, begin_date: int, end_date: int) -> pd.DataFrame:
+        """获取融资融券明细（自动排队）"""
+        info = self.get_info()
+        token = self._acquire_sync("download")
+        try:
+            result = info.get_margin_detail(code_list=stock_codes, begin_date=begin_date, end_date=end_date, is_local=False)
+            if isinstance(result, dict):
+                dfs = [df for df in result.values() if isinstance(df, pd.DataFrame)]
+                if dfs:
+                    return pd.concat(dfs, ignore_index=True)
+            elif isinstance(result, pd.DataFrame):
+                return result
+            return pd.DataFrame()
+        except Exception as e:
+            print(f"[SDK] 获取融资融券明细失败：{e}")
+            return pd.DataFrame()
+        finally:
+            self._release_sync(token)
+
+    def get_block_trading(self, stock_codes: list, begin_date: int, end_date: int) -> pd.DataFrame:
+        """获取大宗交易数据（自动排队）"""
+        info = self.get_info()
+        token = self._acquire_sync("download")
+        try:
+            result = info.get_block_trading(code_list=stock_codes, begin_date=begin_date, end_date=end_date, is_local=False)
+            if isinstance(result, pd.DataFrame):
+                return result
+            return pd.DataFrame()
+        except Exception as e:
+            print(f"[SDK] 获取大宗交易数据失败：{e}")
+            return pd.DataFrame()
+        finally:
+            self._release_sync(token)
+
+    def get_treasury_yield(self) -> pd.DataFrame:
+        """获取国债收益率（自动排队）"""
+        info = self.get_info()
+        token = self._acquire_sync("download")
+        try:
+            result = info.get_treasury_yield(is_local=False)
+            if isinstance(result, dict):
+                dfs = [df for df in result.values() if isinstance(df, pd.DataFrame)]
+                if dfs:
+                    return pd.concat(dfs, ignore_index=True)
+            elif isinstance(result, pd.DataFrame):
+                return result
+            return pd.DataFrame()
+        except Exception as e:
+            print(f"[SDK] 获取国债收益率失败：{e}")
+            return pd.DataFrame()
+        finally:
+            self._release_sync(token)
+
+    def get_industry_constituent(self, index_codes: list) -> pd.DataFrame:
+        """获取行业成分股（自动排队）"""
+        info = self.get_info()
+        token = self._acquire_sync("download")
+        try:
+            result = info.get_industry_constituent(code_list=index_codes, is_local=False)
+            if isinstance(result, dict):
+                dfs = [df for df in result.values() if isinstance(df, pd.DataFrame)]
+                if dfs:
+                    return pd.concat(dfs, ignore_index=True)
+            elif isinstance(result, pd.DataFrame):
+                return result
+            return pd.DataFrame()
+        except Exception as e:
+            print(f"[SDK] 获取行业成分股失败：{e}")
+            return pd.DataFrame()
+        finally:
+            self._release_sync(token)
+
+    def get_index_constituent(self, index_codes: list) -> pd.DataFrame:
+        """获取指数成分股（自动排队）"""
+        info = self.get_info()
+        token = self._acquire_sync("download")
+        try:
+            result = info.get_index_constituent(code_list=index_codes, is_local=False)
+            if isinstance(result, dict):
+                dfs = [df for df in result.values() if isinstance(df, pd.DataFrame)]
+                if dfs:
+                    return pd.concat(dfs, ignore_index=True)
+            elif isinstance(result, pd.DataFrame):
+                return result
+            return pd.DataFrame()
+        except Exception as e:
+            print(f"[SDK] 获取指数成分股失败：{e}")
+            return pd.DataFrame()
         finally:
             self._release_sync(token)
 

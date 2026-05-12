@@ -61,6 +61,14 @@ LLM_PROVIDERS = {
         "auth_prefix": "Bearer ",
         "format": "openai"
     },
+    "bailian": {
+        "name": "阿里百炼（通义灵码）",
+        "base_url": "https://coding.dashscope.aliyuncs.com/v1/chat/completions",
+        "model": "qwen-plus",
+        "auth_header": "Authorization",
+        "auth_prefix": "Bearer ",
+        "format": "openai"
+    },
 }
 
 DB_PATH = Path(__file__).parent.parent.parent / "data" / "stockwinner.db"

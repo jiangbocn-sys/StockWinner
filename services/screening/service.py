@@ -765,10 +765,10 @@ class ScreeningService:
         """
         db = get_db_manager()
 
-        # 检查是否已存在
+        # 检查当前组内是否已存在（同一股票可出现在不同分组）
         existing = await db.fetchone(
-            "SELECT id FROM watchlist WHERE account_id = ? AND stock_code = ? AND status = 'pending'",
-            (account_id, candidate['stock_code'])
+            "SELECT id FROM watchlist WHERE account_id = ? AND stock_code = ? AND group_id = ?",
+            (account_id, candidate['stock_code'], group_id)
         )
 
         if existing:
@@ -822,7 +822,7 @@ class ScreeningService:
             "stop_loss_price": stop_loss,
             "take_profit_price": take_profit,
             "target_quantity": target_quantity,
-            "status": "pending",
+            "status": "watching",
             "created_at": format_china_time(),
             "updated_at": format_china_time()
         }

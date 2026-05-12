@@ -197,6 +197,13 @@ async def dsa_analyze_position(
             f"{DSA_BASE_URL}/api/v1/analysis/analyze",
             json={"stock_code": stock_code, "report_type": "detailed", "async_mode": True}
         )
+        if resp.status_code == 409:
+            return {
+                "success": False,
+                "code": 409,
+                "message": "该股票正在分析中，请稍后再查",
+                "stock_code": stock_code,
+            }
         if resp.status_code not in (200, 202):
             raise HTTPException(status_code=502, detail=f"DSA 服务响应异常: {resp.status_code}")
 
@@ -224,6 +231,93 @@ async def dsa_analyze_position(
 
             if status == "completed":
                 # DSA 的 status 接口 result 为 null，需从 history 获取报告
+                async with httpx.AsyncClient(timeout=30) as hist_client:
+                    hist_resp = await hist_client.get(
+                        f"{DSA_BASE_URL}/api/v1/history",
+                        params={"query_id": task_id, "limit": 1}
+                    )
+                    if hist_resp.status_code == 200:
+                        hist_data = hist_resp.json()
+                        items = hist_data.get("items", [])
+                        if items:
+                            record_id = items[0]["id"]
+                            report_resp = await hist_client.get(
+                                f"{DSA_BASE_URL}/api/v1/history/{record_id}"
+                            )
+                            if report_resp.status_code == 200:
+                                report = report_resp.json()
+                                return {
+                                    "success": True,
+                                    "stock_code": stock_code,
+                                    "stock_name": report.get("meta", {}).get("stock_name", ""),
+                                    "summary": report.get("summary", {}),
+                                    "strategy": report.get("strategy", {}),
+                                    "meta": report.get("meta", {}),
+                                }
+
+                raise HTTPException(status_code=502, detail="DSA 分析完成但无法获取报告")
+            elif status == "failed":
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"DSA 分析失败: {status_data.get('error', 'unknown')}"
+                )
+
+    raise HTTPException(status_code=504, detail="DSA 分析超时，请稍后重试")
+
+
+@router.post("/api/v1/ui/{account_id}/stocks/{stock_code}/dsa-analyze")
+async def dsa_analyze_any_stock(
+    account_id: str = Path(...),
+    stock_code: str = Path(...),
+):
+    """对任意股票调用 DSA 分析（不要求有持仓）"""
+    db = get_db_manager()
+    account = await db.fetchone(
+        "SELECT 1 FROM accounts WHERE account_id = ? AND is_active = 1",
+        (account_id,)
+    )
+    if not account:
+        raise HTTPException(status_code=404, detail=f"账户不存在：{account_id}")
+
+    # 提交 DSA 分析任务
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.post(
+            f"{DSA_BASE_URL}/api/v1/analysis/analyze",
+            json={"stock_code": stock_code, "report_type": "detailed", "async_mode": True}
+        )
+        if resp.status_code == 409:
+            return {
+                "success": False,
+                "code": 409,
+                "message": "该股票正在分析中，请稍后再查",
+                "stock_code": stock_code,
+            }
+        if resp.status_code not in (200, 202):
+            raise HTTPException(status_code=502, detail=f"DSA 服务响应异常: {resp.status_code}")
+
+        task_data = resp.json()
+        task_id = task_data.get("task_id")
+        if not task_id:
+            raise HTTPException(status_code=502, detail="DSA 未返回任务 ID")
+
+    # 轮询等待分析完成（最多 5 分钟）
+    max_wait = 300
+    waited = 0
+    interval = 5
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        while waited < max_wait:
+            await asyncio.sleep(interval)
+            waited += interval
+
+            status_resp = await client.get(f"{DSA_BASE_URL}/api/v1/analysis/status/{task_id}")
+            if status_resp.status_code != 200:
+                continue
+
+            status_data = status_resp.json()
+            status = status_data.get("status")
+
+            if status == "completed":
                 async with httpx.AsyncClient(timeout=30) as hist_client:
                     hist_resp = await hist_client.get(
                         f"{DSA_BASE_URL}/api/v1/history",

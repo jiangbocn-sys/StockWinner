@@ -203,6 +203,10 @@ const handleDsaAnalysis = async (row) => {
     const data = await res.json()
 
     if (!res.ok) {
+      if (data.code === 409) {
+        dsaError.value = data.message
+        return
+      }
       dsaError.value = data.detail || '分析失败'
       return
     }

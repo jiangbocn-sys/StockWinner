@@ -48,7 +48,9 @@
         </template>
 
         <el-table :data="signals" stripe style="width: 100%" v-loading="loading">
-          <el-table-column prop="created_at" label="生成时间" width="160" />
+          <el-table-column prop="created_at" label="生成时间" width="170">
+            <template #default="{ row }">{{ formatTime(row.created_at) }}</template>
+          </el-table-column>
           <el-table-column prop="stock_code" label="股票代码" width="120" />
           <el-table-column prop="stock_name" label="股票名称" width="120" />
           <el-table-column prop="signal_type" label="信号类型" width="120">
@@ -69,7 +71,9 @@
               </el-tag>
             </template>
           </el-table-column>
-          <el-table-column prop="executed_at" label="执行时间" width="160" />
+          <el-table-column prop="executed_at" label="执行时间" width="170">
+            <template #default="{ row }">{{ formatTime(row.executed_at) }}</template>
+          </el-table-column>
           <el-table-column label="操作" fixed="right" width="180">
             <template #default="{ row }">
               <el-button
@@ -242,6 +246,11 @@ const getStatusText = (status) => {
     'cancelled': '已取消'
   }
   return texts[status] || status
+}
+
+const formatTime = (t) => {
+  if (!t) return '-'
+  return t.split('.')[0].replace('T', ' ')
 }
 
 onMounted(async () => {

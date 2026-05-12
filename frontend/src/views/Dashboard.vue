@@ -103,6 +103,54 @@
               </el-card>
             </el-col>
           </el-row>
+
+          <!-- 数据库状态 -->
+          <el-row :gutter="20" class="stats-row">
+            <el-col :span="12">
+              <el-card class="db-card">
+                <template #header><span>日K线数据</span></template>
+                <el-descriptions :column="2" border>
+                  <el-descriptions-item label="最新日期">{{ dbStats.klineLatestDate || '-' }}</el-descriptions-item>
+                  <el-descriptions-item label="当日条数">{{ dbStats.klineLatestCount || 0 }}</el-descriptions-item>
+                  <el-descriptions-item label="总条数" :span="2">{{ dbStats.klineTotalCount || 0 }}</el-descriptions-item>
+                </el-descriptions>
+              </el-card>
+            </el-col>
+            <el-col :span="12">
+              <el-card class="db-card">
+                <template #header><span>日频因子数据</span></template>
+                <el-descriptions :column="2" border>
+                  <el-descriptions-item label="最新日期">{{ dbStats.factorLatestDate || '-' }}</el-descriptions-item>
+                  <el-descriptions-item label="当日因子数">{{ dbStats.factorLatestCount || 0 }}</el-descriptions-item>
+                  <el-descriptions-item label="因子总数" :span="2">{{ dbStats.factorTotalCount || 0 }}</el-descriptions-item>
+                </el-descriptions>
+              </el-card>
+            </el-col>
+          </el-row>
+          <el-row :gutter="20" class="stats-row">
+            <el-col :span="12">
+              <el-card class="db-card">
+                <template #header><span>周K线数据</span></template>
+                <el-descriptions :column="2" border>
+                  <el-descriptions-item label="最新日期">{{ dbStats.weeklyLatestDate || '-' }}</el-descriptions-item>
+                  <el-descriptions-item label="当日条数">{{ dbStats.weeklyLatestCount || 0 }}</el-descriptions-item>
+                  <el-descriptions-item label="总条数" :span="2">{{ dbStats.weeklyTotalCount || 0 }}</el-descriptions-item>
+                </el-descriptions>
+              </el-card>
+            </el-col>
+            <el-col :span="12">
+              <el-card class="db-card">
+                <template #header><span>股票基本信息</span></template>
+                <el-descriptions :column="2" border>
+                  <el-descriptions-item label="总数">{{ dbStats.baseInfoCount || 0 }} 只</el-descriptions-item>
+                  <el-descriptions-item label="沪市">{{ dbStats.baseInfoSh || 0 }} 只</el-descriptions-item>
+                  <el-descriptions-item label="深市">{{ dbStats.baseInfoSz || 0 }} 只</el-descriptions-item>
+                  <el-descriptions-item label="北交所">{{ dbStats.baseInfoBj || 0 }} 只</el-descriptions-item>
+                  <el-descriptions-item label="新三板">{{ dbStats.baseInfoNeeq || 0 }} 只</el-descriptions-item>
+                </el-descriptions>
+              </el-card>
+            </el-col>
+          </el-row>
         </el-main>
       </el-container>
     </el-main>
@@ -137,6 +185,24 @@ const positionCount = ref(0)
 const totalMarketValue = ref(0)
 const totalPnl = ref(0)
 const dailyPnl = ref(0)
+
+// 数据库状态
+const dbStats = ref({
+  klineLatestDate: '',
+  klineLatestCount: 0,
+  klineTotalCount: 0,
+  factorLatestDate: '',
+  factorLatestCount: 0,
+  factorTotalCount: 0,
+  weeklyLatestDate: '',
+  weeklyLatestCount: 0,
+  weeklyTotalCount: 0,
+  baseInfoCount: 0,
+  baseInfoSh: 0,
+  baseInfoSz: 0,
+  baseInfoBj: 0,
+  baseInfoNeeq: 0,
+})
 
 // 本地时钟自动更新运行时长
 let uptimeTimer = null
@@ -193,6 +259,25 @@ const loadDashboard = async () => {
     totalMarketValue.value = data.positions_summary?.total_market_value || 0
     totalPnl.value = data.positions_summary?.total_pnl || 0
     dailyPnl.value = data.positions_summary?.daily_pnl || 0
+
+    // 数据库状态
+    const ds = data.db_stats || {}
+    dbStats.value = {
+      klineLatestDate: ds.kline_latest_date || '',
+      klineLatestCount: ds.kline_latest_count || 0,
+      klineTotalCount: ds.kline_total_count || 0,
+      factorLatestDate: ds.factor_latest_date || '',
+      factorLatestCount: ds.factor_latest_count || 0,
+      factorTotalCount: ds.factor_total_count || 0,
+      weeklyLatestDate: ds.weekly_latest_date || '',
+      weeklyLatestCount: ds.weekly_latest_count || 0,
+      weeklyTotalCount: ds.weekly_total_count || 0,
+      baseInfoCount: ds.base_info_count || 0,
+      baseInfoSh: ds.base_info_sh || 0,
+      baseInfoSz: ds.base_info_sz || 0,
+      baseInfoBj: ds.base_info_bj || 0,
+      baseInfoNeeq: ds.base_info_neeq || 0,
+    }
   } catch (error) {
     console.error('加载仪表盘数据失败:', error)
   }
@@ -265,6 +350,10 @@ onUnmounted(() => {
 }
 
 .stats-row {
+  margin-bottom: 20px;
+}
+
+.db-card {
   margin-bottom: 20px;
 }
 

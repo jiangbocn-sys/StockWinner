@@ -17,7 +17,7 @@ import os
 from services.common.timezone import get_china_time
 from services.common.database import get_db_manager, reset_db_manager
 from services.common.account_manager import get_account_manager, reset_account_manager
-from services.ui import dashboard, accounts, positions, trades, strategies, screening, monitoring, market_data, data_explorer, position_rules, factors, scheduler, notifications, trading_strategies, strategy_performance
+from services.ui import dashboard, accounts, positions, trades, strategies, screening, monitoring, market_data, data_explorer, position_rules, factors, scheduler, notifications, trading_strategies, strategy_performance, data_service
 from services.strategy.api import router as strategy_v2_router
 from services.account_management.api import router as account_management_router
 from services.auth.api import router as auth_router
@@ -699,6 +699,7 @@ app.include_router(auth_router)
 app.include_router(llm_router)  # LLM 配置路由
 app.include_router(notifications.router)  # 通知 API 路由
 app.include_router(strategy_performance.router)  # 策略效能评估 API 路由
+app.include_router(data_service.router)  # 扩展数据服务 API（指数/行业/财报/龙虎榜/两融等）
 
 # Agent API 路由（独立路径，不影响 UI）
 register_agent_routers(app)

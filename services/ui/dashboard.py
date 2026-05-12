@@ -101,6 +101,65 @@ async def get_dashboard(account_id: str = Path(..., description="账户 ID")):
     # 资源使用情况
     resources = get_resource_usage()
 
+    # 数据库状态
+    import sqlite3
+    from pathlib import Path
+    kline_db_path = Path(__file__).parent.parent.parent / "data" / "kline.db"
+    db_stats = {"kline_latest_date": None, "kline_latest_count": 0, "kline_total_count": 0,
+                "factor_latest_date": None, "factor_latest_count": 0, "factor_total_count": 0,
+                "weekly_latest_date": None, "weekly_total_count": 0,
+                "base_info_count": 0}
+    try:
+        if kline_db_path.exists():
+            kconn = sqlite3.connect(str(kline_db_path))
+            kcursor = kconn.cursor()
+
+            # 日K线
+            kcursor.execute("SELECT MAX(trade_date) FROM kline_data WHERE stock_code NOT LIKE '801%.SI'")
+            r = kcursor.fetchone()
+            db_stats["kline_latest_date"] = r[0] if r else None
+            if db_stats["kline_latest_date"]:
+                kcursor.execute("SELECT COUNT(*) FROM kline_data WHERE trade_date = ? AND stock_code NOT LIKE '801%.SI'", (db_stats["kline_latest_date"],))
+                db_stats["kline_latest_count"] = kcursor.fetchone()[0]
+            kcursor.execute("SELECT COUNT(*) FROM kline_data WHERE stock_code NOT LIKE '801%.SI'")
+            db_stats["kline_total_count"] = kcursor.fetchone()[0]
+
+            # 日频因子
+            kcursor.execute("SELECT MAX(trade_date) FROM stock_daily_factors")
+            r = kcursor.fetchone()
+            db_stats["factor_latest_date"] = r[0] if r else None
+            if db_stats["factor_latest_date"]:
+                kcursor.execute("SELECT COUNT(*) FROM stock_daily_factors WHERE trade_date = ?", (db_stats["factor_latest_date"],))
+                db_stats["factor_latest_count"] = kcursor.fetchone()[0]
+            kcursor.execute("SELECT COUNT(*) FROM stock_daily_factors")
+            db_stats["factor_total_count"] = kcursor.fetchone()[0]
+
+            # 周K线
+            kcursor.execute("SELECT MAX(week_end_date) FROM weekly_kline_data")
+            r = kcursor.fetchone()
+            db_stats["weekly_latest_date"] = r[0] if r else None
+            if db_stats["weekly_latest_date"]:
+                kcursor.execute("SELECT COUNT(*) FROM weekly_kline_data WHERE week_end_date = ?", (db_stats["weekly_latest_date"],))
+                db_stats["weekly_latest_count"] = kcursor.fetchone()[0]
+            kcursor.execute("SELECT COUNT(*) FROM weekly_kline_data")
+            db_stats["weekly_total_count"] = kcursor.fetchone()[0]
+
+            # stock_base_info - 按市场分类统计
+            kcursor.execute("SELECT COUNT(*) FROM stock_base_info")
+            db_stats["base_info_count"] = kcursor.fetchone()[0]
+            kcursor.execute("SELECT COUNT(*) FROM stock_base_info WHERE stock_code LIKE '%.SH'")
+            db_stats["base_info_sh"] = kcursor.fetchone()[0]
+            kcursor.execute("SELECT COUNT(*) FROM stock_base_info WHERE stock_code LIKE '%.SZ'")
+            db_stats["base_info_sz"] = kcursor.fetchone()[0]
+            kcursor.execute("SELECT COUNT(*) FROM stock_base_info WHERE stock_code LIKE '%.BJ'")
+            db_stats["base_info_bj"] = kcursor.fetchone()[0]
+            kcursor.execute("SELECT COUNT(*) FROM stock_base_info WHERE stock_code LIKE '8%' OR stock_code LIKE '4%'")
+            db_stats["base_info_neeq"] = kcursor.fetchone()[0]
+
+            kconn.close()
+    except Exception:
+        pass
+
     return {
         "account_id": account_id,
         "account_name": account_name,
@@ -133,6 +192,7 @@ async def get_dashboard(account_id: str = Path(..., description="账户 ID")):
             "success_count": today_tasks["success_count"],
             "fail_count": today_tasks["fail_count"],
         },
+        "db_stats": db_stats,
     }
 
 
