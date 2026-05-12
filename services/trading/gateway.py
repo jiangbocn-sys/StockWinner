@@ -521,7 +521,15 @@ class TradingGateway(TradingGatewayInterface):
         return []
 
     async def buy(self, stock_code: str, price: float, quantity: int, account_id: str = None) -> OrderResult:
-        """买入（支持 mock/实盘切换）"""
+        """买入（支持 mock/实盘切换）
+
+        实盘交易流程（A 股）：
+        1. 交易时间检查（trading_hours.py）
+        2. 挂单时段判断（集合竞价 / 连续竞价）
+        3. 向券商 API 发出买入委托
+        4. 轮询查询委托成交情况
+        5. 全部成交/部分成交/撤单
+        """
         if not self.connected:
             return OrderResult(False, message="网关未连接")
 
@@ -544,19 +552,92 @@ class TradingGateway(TradingGatewayInterface):
             logger.info(f"[Mock] 买入 {stock_code} {quantity}股 @ {price:.2f}")
             return OrderResult(True, message=f"[Mock] 买入成功 {stock_code} {quantity}股 @ {price:.2f}")
         else:
-            # 实盘：调用 SDK 下单（待实现）
-            try:
-                # TODO: 接入银河证券 SDK 真实下单
-                # result = sdk.trade.buy(stock_code, price, quantity)
-                # return OrderResult(True, order_id=result.order_no, message=f"实盘买入 {stock_code}")
-                logger.warning(f"实盘交易接口尚未接入，当前为 mock 模式")
-                return OrderResult(False, message="SDK 实盘交易接口待实现")
-            except Exception as e:
-                logger.error(f"实盘买入失败：{e}")
-                return OrderResult(False, message=str(e))
+            # ================================================================
+            # 实盘买入 - 调用券商交易 API
+            # ================================================================
+            # from services.trading.trading_hours import can_place_order, get_trading_phase
+            #
+            # # 1. 交易时间检查
+            # if not can_place_order():
+            #     phase = get_trading_phase()
+            #     return OrderResult(False, message=f"非挂单时段，当前阶段: {phase.value}")
+            #
+            # # 2. 获取券商交易连接
+            # broker = await self._get_broker_connection(account_id)
+            # if not broker:
+            #     return OrderResult(False, message="券商交易连接不可用")
+            #
+            # # 3. 发出买入委托（限价单）
+            # # A 股买入规则：
+            # # - 价格可以是限价或市价
+            # # - 数量必须是 100 的整数倍（1 手 = 100 股）
+            # # - 涨停价 = 前收盘价 × 1.1（主板），创业板/科创板 × 1.2
+            # try:
+            #     order_no = await broker.place_buy_order(
+            #         stock_code=stock_code,
+            #         price=price,
+            #         quantity=quantity,
+            #         order_type="limit",  # limit=限价, market=市价
+            #     )
+            #     logger.info(f"[实盘] 买入委托已提交: {stock_code} {quantity}股 @ {price:.2f}, 委托号={order_no}")
+            #
+            #     # 4. 轮询查询成交情况
+            #     # 实盘委托是异步的，需要轮询确认成交
+            #     max_retries = 60  # 最多轮询 60 次
+            #     poll_interval = 2  # 每 2 秒查询一次
+            #     import asyncio
+            #     for i in range(max_retries):
+            #         await asyncio.sleep(poll_interval)
+            #         order_status = await broker.query_order(order_no)
+            #
+            #         if order_status["status"] == "filled":
+            #             # 全部成交
+            #             filled_price = order_status.get("avg_price", price)
+            #             filled_qty = order_status.get("filled_qty", quantity)
+            #             logger.info(f"[实盘] 买入全部成交: {stock_code} {filled_qty}股 @ {filled_price:.2f}")
+            #             return OrderResult(
+            #                 True,
+            #                 order_id=order_no,
+            #                 message=f"实盘买入 {stock_code} {filled_qty}股 @ {filled_price:.2f}",
+            #             )
+            #         elif order_status["status"] == "partial":
+            #             # 部分成交，继续等待
+            #             filled_qty = order_status.get("filled_qty", 0)
+            #             logger.info(f"[实盘] 买入部分成交: {stock_code} {filled_qty}/{quantity}股")
+            #         elif order_status["status"] in ("cancelled", "rejected"):
+            #             # 被拒绝或已撤销
+            #             reason = order_status.get("reason", "未知原因")
+            #             logger.warning(f"[实盘] 买入委托失败: {stock_code}, 原因: {reason}")
+            #             return OrderResult(False, message=f"实盘买入失败: {reason}")
+            #         # else: pending, 继续等待
+            #
+            #     # 5. 超时未全部成交，发出撤单指令
+            #     logger.warning(f"[实盘] 买入委托超时，尝试撤单: {stock_code} {order_no}")
+            #     cancel_result = await broker.cancel_order(order_no)
+            #     if cancel_result:
+            #         logger.info(f"[实盘] 撤单成功: {order_no}")
+            #     return OrderResult(
+            #         False,
+            #         order_id=order_no,
+            #         message=f"买入委托超时未成交，已撤单: {stock_code}",
+            #     )
+            #
+            # except Exception as e:
+            #     logger.error(f"[实盘] 买入异常: {stock_code}: {e}")
+            #     return OrderResult(False, message=f"实盘买入异常: {e}")
+            # ================================================================
+            logger.warning(f"实盘交易接口尚未接入，当前为 mock 模式")
+            return OrderResult(False, message="SDK 实盘交易接口待实现")
 
     async def sell(self, stock_code: str, price: float, quantity: int, account_id: str = None) -> OrderResult:
-        """卖出（支持 mock/实盘切换）"""
+        """卖出（支持 mock/实盘切换）
+
+        实盘交易流程（A 股）：
+        1. 交易时间检查
+        2. 挂单（限价/市价）
+        3. 轮询成交
+        4. 收盘前撤销全部未成交委托
+        """
         if not self.connected:
             return OrderResult(False, message="网关未连接")
 
@@ -579,16 +660,209 @@ class TradingGateway(TradingGatewayInterface):
             logger.info(f"[Mock] 卖出 {stock_code} {quantity}股 @ {price:.2f}")
             return OrderResult(True, message=f"[Mock] 卖出成功 {stock_code} {quantity}股 @ {price:.2f}")
         else:
-            # 实盘：调用 SDK 下单（待实现）
-            try:
-                # TODO: 接入银河证券 SDK 真实卖出
-                # result = sdk.trade.sell(stock_code, price, quantity)
-                # return OrderResult(True, order_id=result.order_no, message=f"实盘卖出 {stock_code}")
-                logger.warning(f"实盘交易接口尚未接入，当前为 mock 模式")
-                return OrderResult(False, message="SDK 实盘交易接口待实现")
-            except Exception as e:
-                logger.error(f"实盘卖出失败：{e}")
-                return OrderResult(False, message=str(e))
+            # ================================================================
+            # 实盘卖出 - 调用券商交易 API
+            # ================================================================
+            # from services.trading.trading_hours import (
+            #     can_place_order, can_cancel_order, get_trading_phase,
+            #     should_cancel_all_orders
+            # )
+            #
+            # # 1. 交易时间检查
+            # if not can_place_order():
+            #     phase = get_trading_phase()
+            #     return OrderResult(False, message=f"非挂单时段，当前阶段: {phase.value}")
+            #
+            # # 2. 获取券商交易连接
+            # broker = await self._get_broker_connection(account_id)
+            # if not broker:
+            #     return OrderResult(False, message="券商交易连接不可用")
+            #
+            # # 3. 发出卖出委托（限价单）
+            # # A 股卖出规则：
+            # # - 卖出数量必须是 100 的整数倍（零股一次性卖出除外）
+            # # - T+1 规则：当日买入的股票次日才能卖出
+            # # - 跌停价 = 前收盘价 × 0.9（主板），创业板/科创板 × 0.8
+            # try:
+            #     order_no = await broker.place_sell_order(
+            #         stock_code=stock_code,
+            #         price=price,
+            #         quantity=quantity,
+            #         order_type="limit",  # limit=限价, market=市价
+            #     )
+            #     logger.info(f"[实盘] 卖出委托已提交: {stock_code} {quantity}股 @ {price:.2f}, 委托号={order_no}")
+            #
+            #     # 4. 轮询查询成交情况
+            #     max_retries = 60
+            #     poll_interval = 2
+            #     import asyncio
+            #     for i in range(max_retries):
+            #         await asyncio.sleep(poll_interval)
+            #         order_status = await broker.query_order(order_no)
+            #
+            #         if order_status["status"] == "filled":
+            #             filled_price = order_status.get("avg_price", price)
+            #             filled_qty = order_status.get("filled_qty", quantity)
+            #             logger.info(f"[实盘] 卖出全部成交: {stock_code} {filled_qty}股 @ {filled_price:.2f}")
+            #             return OrderResult(
+            #                 True,
+            #                 order_id=order_no,
+            #                 message=f"实盘卖出 {stock_code} {filled_qty}股 @ {filled_price:.2f}",
+            #             )
+            #         elif order_status["status"] == "partial":
+            #             filled_qty = order_status.get("filled_qty", 0)
+            #             logger.info(f"[实盘] 卖出部分成交: {stock_code} {filled_qty}/{quantity}股")
+            #         elif order_status["status"] in ("cancelled", "rejected"):
+            #             reason = order_status.get("reason", "未知原因")
+            #             logger.warning(f"[实盘] 卖出委托失败: {stock_code}, 原因: {reason}")
+            #             return OrderResult(False, message=f"实盘卖出失败: {reason}")
+            #
+            #     # 5. 超时未成交，发出撤单指令
+            #     logger.warning(f"[实盘] 卖出委托超时，尝试撤单: {stock_code} {order_no}")
+            #     cancel_result = await broker.cancel_order(order_no)
+            #     if cancel_result:
+            #         logger.info(f"[实盘] 撤单成功: {order_no}")
+            #     return OrderResult(
+            #         False,
+            #         order_id=order_no,
+            #         message=f"卖出委托超时未成交，已撤单: {stock_code}",
+            #     )
+            #
+            # except Exception as e:
+            #     logger.error(f"[实盘] 卖出异常: {stock_code}: {e}")
+            #     return OrderResult(False, message=f"实盘卖出异常: {e}")
+            # ================================================================
+            logger.warning(f"实盘交易接口尚未接入，当前为 mock 模式")
+            return OrderResult(False, message="SDK 实盘交易接口待实现")
+
+    async def cancel_order(self, order_no: str, account_id: str = None) -> dict:
+        """撤销委托单（实盘）
+
+        Args:
+            order_no: 券商委托编号
+            account_id: 账户 ID
+
+        Returns:
+            {"success": bool, "message": str}
+
+        撤单规则：
+        - 09:15-09:20 可撤单
+        - 09:20-09:25 不可撤单（集合竞价锁定）
+        - 09:25-09:30 不可撤单（撮合等待）
+        - 09:30-11:30 可撤单（连续竞价上午）
+        - 11:30-13:00 不可撤单（午间休市）
+        - 13:00-15:00 可撤单（连续竞价下午）
+        """
+        # ================================================================
+        # 实盘撤单 - 调用券商交易 API
+        # ================================================================
+        # from services.trading.trading_hours import can_cancel_order
+        #
+        # if not can_cancel_order():
+        #     return {"success": False, "message": "当前时段不可撤单"}
+        #
+        # broker = await self._get_broker_connection(account_id)
+        # if not broker:
+        #     return {"success": False, "message": "券商交易连接不可用"}
+        #
+        # try:
+        #     result = await broker.cancel_order(order_no)
+        #     return {"success": result, "message": "撤单成功" if result else "撤单失败"}
+        # except Exception as e:
+        #     return {"success": False, "message": f"撤单异常: {e}"}
+        # ================================================================
+        return {"success": False, "message": "实盘交易接口待实现"}
+
+    async def query_order_status(self, order_no: str, account_id: str = None) -> dict:
+        """查询委托成交情况（实盘）
+
+        Args:
+            order_no: 券商委托编号
+            account_id: 账户 ID
+
+        Returns:
+            {
+                "order_no": str,
+                "status": "pending" | "partial" | "filled" | "cancelled" | "rejected",
+                "filled_qty": int,
+                "avg_price": float,
+                "message": str,
+            }
+        """
+        # ================================================================
+        # 实盘查询 - 调用券商交易 API
+        # ================================================================
+        # broker = await self._get_broker_connection(account_id)
+        # if not broker:
+        #     return {"status": "unknown", "message": "券商交易连接不可用"}
+        #
+        # try:
+        #     status = await broker.query_order(order_no)
+        #     return {
+        #         "order_no": order_no,
+        #         "status": status.get("status", "unknown"),
+        #         "filled_qty": status.get("filled_qty", 0),
+        #         "avg_price": status.get("avg_price", 0),
+        #         "message": status.get("message", ""),
+        #     }
+        # except Exception as e:
+        #     return {"status": "error", "message": f"查询异常: {e}"}
+        # ================================================================
+        return {"status": "unknown", "message": "实盘交易接口待实现"}
+
+    async def cancel_all_pending_orders(self, account_id: str = None) -> dict:
+        """收盘后撤销全部未成交委托（实盘）
+
+        每个交易日 15:00 收盘后自动调用，
+        撤销当日所有未成交（pending/submitted/partial）的委托。
+
+        Returns:
+            {
+                "total": int,
+                "cancelled": int,
+                "failed": int,
+                "messages": List[str],
+            }
+        """
+        # ================================================================
+        # 实盘全撤 - 调用券商交易 API
+        # ================================================================
+        # from services.trading.trading_hours import should_cancel_all_orders
+        #
+        # broker = await self._get_broker_connection(account_id)
+        # if not broker:
+        #     return {"total": 0, "cancelled": 0, "failed": 0, "messages": ["券商连接不可用"]}
+        #
+        # try:
+        #     # 获取当日全部未成交委托
+        #     pending_orders = await broker.get_pending_orders()
+        #     total = len(pending_orders)
+        #     cancelled = 0
+        #     failed = 0
+        #     messages = []
+        #
+        #     for order in pending_orders:
+        #         order_no = order.get("order_no")
+        #         try:
+        #             result = await broker.cancel_order(order_no)
+        #             if result:
+        #                 cancelled += 1
+        #                 messages.append(f"已撤销 {order_no}: {order.get('stock_code')}")
+        #             else:
+        #                 failed += 1
+        #                 messages.append(f"撤单失败 {order_no}")
+        #         except Exception as e:
+        #             failed += 1
+        #             messages.append(f"撤单异常 {order_no}: {e}")
+        #
+        #     logger.info(f"[实盘] 收盘全撤: 总委托 {total}, 成功 {cancelled}, 失败 {failed}")
+        #     return {"total": total, "cancelled": cancelled, "failed": failed, "messages": messages}
+        #
+        # except Exception as e:
+        #     logger.error(f"[实盘] 收盘全撤异常: {e}")
+        #     return {"total": 0, "cancelled": 0, "failed": 0, "messages": [f"异常: {e}"]}
+        # ================================================================
+        return {"total": 0, "cancelled": 0, "failed": 0, "messages": ["实盘交易接口待实现"]}
 
     async def get_positions(self) -> List[Dict[str, Any]]:
         """获取持仓"""
@@ -636,11 +910,17 @@ class TradingGateway(TradingGatewayInterface):
         token = await conn_mgr.acquire(task_type=task_type_enum)
 
         try:
-            result = await asyncio.to_thread(
-                self._query_kline_data_sync,
-                stock_code, period, start_date, end_date, limit
+            result = await asyncio.wait_for(
+                asyncio.to_thread(
+                    self._query_kline_data_sync,
+                    stock_code, period, start_date, end_date, limit
+                ),
+                timeout=10.0
             )
             return result
+        except asyncio.TimeoutError:
+            logger.warning(f"查询 {stock_code} K线超时（>10s）")
+            raise Exception("获取 K 线数据超时")
         finally:
             token.release()
 
@@ -664,14 +944,33 @@ class TradingGateway(TradingGatewayInterface):
             TaskType.DOWNLOAD if task_type == "download" else TaskType.SCREENING
         )
 
+        # 根据股票数量和任务类型动态计算超时
+        count = len(stock_codes) if stock_codes else 1
+        if task_type == "download":
+            # TGW 测试：5000 只 ≈ 33s，60s 足够
+            batch_timeout = min(count * 30.0, 60.0)
+            batch_timeout = max(batch_timeout, 15.0)
+        elif count <= 5:
+            batch_timeout = 10.0
+        elif count <= 20:
+            batch_timeout = 20.0
+        elif count <= 100:
+            batch_timeout = 60.0
+        else:
+            batch_timeout = 120.0
+
         token = await conn_mgr.acquire(task_type=task_type_enum)
 
         try:
-            result = await asyncio.to_thread(
+            thread_call = asyncio.to_thread(
                 self._query_batch_kline_data_sync,
                 stock_codes, period, start_date, end_date, limit
             )
+            result = await asyncio.wait_for(thread_call, timeout=batch_timeout)
             return result
+        except asyncio.TimeoutError:
+            logger.warning(f"批量查询 K 线超时（{count} 只股票，>{batch_timeout:.0f}s）")
+            raise Exception(f"获取 K 线数据超时（{count} 只股票，超时 {batch_timeout:.0f}s）")
         finally:
             token.release()
 

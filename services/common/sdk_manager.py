@@ -281,18 +281,66 @@ class SDKManager:
         finally:
             self._release_sync(token)
 
+    def _call_with_timeout(self, func, timeout: float, desc: str = "SDK call", **kwargs):
+        """带超时的 SDK 调用包装器，防止单次调用卡死导致锁不释放"""
+        import concurrent.futures
+
+        def _run():
+            return func(**kwargs)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(_run)
+            try:
+                return future.result(timeout=timeout)
+            except concurrent.futures.TimeoutError:
+                print(f"[SDK] {desc} 超时（>{timeout:.0f}s），强制终止")
+                raise
+
     def query_kline(self, code_list: list, begin_date: int, end_date: int,
                     period: int, task_type: str = "query") -> dict:
-        """查询K线数据（自动排队）"""
+        """查询K线数据（自动排队）
+
+        超时保护策略：所有类型都有超时，超后释放锁并重试
+        - query 单股行情（1-5 只）：10s
+        - query 批量行情（6-20 只）：20s
+        - query 大批量（21-100 只）：60s
+        - download 下载批次：每只股票 30s，最少 5 分钟
+        """
         self._ensure_login()
         md = self.get_market_data()
         token = self._acquire_sync(task_type)
         try:
-            result = md.query_kline(code_list=code_list, begin_date=begin_date,
-                                    end_date=end_date, period=period)
+            count = len(code_list) if isinstance(code_list, list) else 1
+            if task_type == "query":
+                if count <= 5:
+                    timeout = 10.0
+                elif count <= 20:
+                    timeout = 20.0
+                elif count <= 100:
+                    timeout = 60.0
+                else:
+                    timeout = 120.0
+            else:  # download
+                # TGW 测试：5000 只 ≈ 33s，60s 足够
+                timeout = min(count * 30.0, 60.0)
+                timeout = max(timeout, 15.0)  # 最小 15s
+
+            result = self._call_with_timeout(
+                md.query_kline,
+                timeout=timeout,
+                desc=f"query_kline {task_type} {count} stocks",
+                code_list=code_list,
+                begin_date=begin_date,
+                end_date=end_date,
+                period=period
+            )
             return result if isinstance(result, dict) else {}
         except Exception as e:
             print(f"[SDK] query_kline 失败：{e}")
+            # 超时：重置 MarketData 实例
+            if isinstance(e, (TimeoutError,)):
+                print(f"[SDK] query_kline 超时，重置 MarketData 实例")
+                SDKManager._market_data_instance = None
             return {}
         finally:
             self._release_sync(token)
@@ -303,11 +351,20 @@ class SDKManager:
         md = self.get_market_data()
         token = self._acquire_sync("query")
         try:
-            result = md.query_snapshot(code_list=code_list, begin_date=begin_date,
-                                       end_date=end_date)
+            result = self._call_with_timeout(
+                md.query_snapshot,
+                timeout=8.0,
+                desc=f"query_snapshot {code_list}",
+                code_list=code_list,
+                begin_date=begin_date,
+                end_date=end_date
+            )
             return result if isinstance(result, dict) else {}
         except Exception as e:
             print(f"[SDK] query_snapshot 失败：{e}")
+            if isinstance(e, (TimeoutError,)):
+                print(f"[SDK] query_snapshot 超时，重置 MarketData 实例")
+                SDKManager._market_data_instance = None
             return {}
         finally:
             self._release_sync(token)

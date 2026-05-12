@@ -542,13 +542,14 @@ class TradeExecutionService:
                 )
 
                 # 3. 记录交易
-                buy_record = await conn.fetchone(
+                buy_record = await self.db.fetchone(
                     "SELECT strategy_id, signal_id FROM trade_records WHERE account_id = ? AND stock_code = ? AND trade_type = 'buy' ORDER BY trade_time DESC LIMIT 1",
                     (self.account_id, stock_code)
                 )
                 inherited_strategy_id = buy_record["strategy_id"] if buy_record and buy_record.get("strategy_id") else None
                 inherited_signal_id = buy_record["signal_id"] if buy_record and buy_record.get("signal_id") else None
 
+                # 在事务内执行插入
                 trade_data = {
                     "account_id": self.account_id,
                     "user_id": user_id,

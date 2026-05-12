@@ -394,72 +394,42 @@ class SchedulerService:
         logger.info("开始K线增量下载...")
 
         from services.common.task_manager import get_task_manager, TaskType
+        from services.common.async_helper import run_sync_in_thread
         task_manager = get_task_manager()
 
+        # 检查是否有正在运行的下载任务
+        if task_manager.is_running(TaskType.DATA_DOWNLOAD):
+            logger.warning("已有下载任务在运行")
+            return {'success': False, 'message': '已有下载任务在运行'}
+
+        # 启动下载任务
+        task_manager.start_task(TaskType.DATA_DOWNLOAD)
+        task_manager.update_progress(TaskType.DATA_DOWNLOAD, 5, "正在初始化...")
+
+        from services.data.local_data_service import download_incremental_kline_data_sync
+        from dotenv import load_dotenv
+        load_dotenv()
+
         try:
-
-            # 检查是否有正在运行的下载任务
-            if task_manager.is_running(TaskType.DATA_DOWNLOAD):
-                logger.warning("已有下载任务在运行")
-                return {'success': False, 'message': '已有下载任务在运行'}
-
-            # 启动下载任务
-            task_manager.start_task(TaskType.DATA_DOWNLOAD)
-            task_manager.update_progress(TaskType.DATA_DOWNLOAD, 5, "正在初始化...")
-
-            from services.data.local_data_service import download_incremental_kline_data_sync
-            from dotenv import load_dotenv
-            load_dotenv()
-
-            # 检测是否已有运行中的 event loop（如从 _execute_strategy_task 调用时）
-            # 如果有，需要在独立线程中执行 sync 版本，sync 版本内部会创建新 loop
-            try:
-                asyncio.get_running_loop()
-                has_running_loop = True
-            except RuntimeError:
-                has_running_loop = False
-
-            if has_running_loop:
-                # 在新线程中执行，避免 run_until_complete 嵌套冲突
-                # task_manager 状态由外层管理（单例跨线程共享）
-                import concurrent.futures
-                result_container = [None]
-                error_container = [None]
-
-                def _run_download():
-                    try:
-                        result_container[0] = download_incremental_kline_data_sync()
-                    except Exception as e:
-                        error_container[0] = e
-
-                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                    future = executor.submit(_run_download)
-                    future.result()  # 等待下载完成
-
-                if error_container[0]:
-                    raise error_container[0]
-                success = result_container[0]
-            else:
-                # 直接执行（APScheduler 线程或独立进程）
-                success = download_incremental_kline_data_sync()
-
-            # 更新任务状态
-            result = {'success': success, 'message': '下载完成' if success else '部分下载失败'}
-            task_manager.update_progress(TaskType.DATA_DOWNLOAD, 100, "下载完成")
-            if result['success']:
-                task_manager.complete_task(TaskType.DATA_DOWNLOAD, result)
-            else:
-                task_manager.fail_task(TaskType.DATA_DOWNLOAD, result.get('message', '下载失败'))
-
-            return result
-
+            # 使用 run_sync_in_thread 统一处理事件循环冲突
+            success = run_sync_in_thread(
+                download_incremental_kline_data_sync,
+                calculate_factors=False  # 因子计算由 _run_daily_factor_calc 单独处理
+            )
         except Exception as e:
             logger.error(f"K线下载失败: {e}", exc_info=True)
-            try:
-                task_manager.fail_task(TaskType.DATA_DOWNLOAD, str(e))
-            except Exception:
-                pass
+            task_manager.fail_task(TaskType.DATA_DOWNLOAD, str(e))
             return {'success': False, 'message': str(e)}
+
+        # 更新任务状态（无论成功失败都会执行）
+        result = {'success': success, 'message': '下载完成' if success else '部分下载失败'}
+        task_manager.update_progress(TaskType.DATA_DOWNLOAD, 100, "下载完成")
+        if result['success']:
+            task_manager.complete_task(TaskType.DATA_DOWNLOAD, result)
+        else:
+            task_manager.fail_task(TaskType.DATA_DOWNLOAD, result.get('message', '下载失败'))
+
+        return result
 
     def _run_daily_factor_calc(self, start_date: Optional[str], end_date: str, force_full: bool = False) -> Dict:
         """执行日频因子计算"""
@@ -468,17 +438,16 @@ class SchedulerService:
         from services.common.task_manager import get_task_manager, TaskType
         task_manager = get_task_manager()
 
+        # 检查是否有正在运行的因子计算任务
+        if task_manager.is_running(TaskType.DAILY_FACTOR_CALC):
+            logger.warning("已有因子计算任务在运行")
+            return {'success': False, 'message': '已有因子计算任务在运行'}
+
+        # 启动因子计算任务
+        task_manager.start_task(TaskType.DAILY_FACTOR_CALC)
+        task_manager.update_progress(TaskType.DAILY_FACTOR_CALC, 5, "正在初始化...")
+
         try:
-
-            # 检查是否有正在运行的因子计算任务
-            if task_manager.is_running(TaskType.DAILY_FACTOR_CALC):
-                logger.warning("已有因子计算任务在运行")
-                return {'success': False, 'message': '已有因子计算任务在运行'}
-
-            # 启动因子计算任务
-            task_manager.start_task(TaskType.DAILY_FACTOR_CALC)
-            task_manager.update_progress(TaskType.DAILY_FACTOR_CALC, 5, "正在初始化...")
-
             # 执行因子计算
             from services.data.local_data_service import calculate_and_save_factors_for_dates
 
@@ -506,29 +475,25 @@ class SchedulerService:
 
         except Exception as e:
             logger.error(f"日频因子计算失败: {e}", exc_info=True)
-            try:
-                task_manager.fail_task(TaskType.DAILY_FACTOR_CALC, str(e))
-            except Exception:
-                pass
+            task_manager.fail_task(TaskType.DAILY_FACTOR_CALC, str(e))
             return {'success': False, 'message': str(e)}
 
     def _run_monthly_factor_update(self) -> Dict:
         """执行月频因子更新"""
         logger.info("开始月频因子更新...")
 
+        from services.common.task_manager import get_task_manager, TaskType
+        task_manager = get_task_manager()
+
+        # 检查是否有正在运行的月频因子任务
+        if task_manager.is_running(TaskType.MONTHLY_FACTOR_UPDATE):
+            logger.warning("已有月频因子更新任务在运行")
+            return {'success': False, 'message': '已有月频因子更新任务在运行'}
+
+        # 启动月频因子更新任务
+        task_manager.start_task(TaskType.MONTHLY_FACTOR_UPDATE)
+
         try:
-            from services.common.task_manager import get_task_manager, TaskType
-
-            task_manager = get_task_manager()
-
-            # 检查是否有正在运行的月频因子任务
-            if task_manager.is_running(TaskType.MONTHLY_FACTOR_UPDATE):
-                logger.warning("已有月频因子更新任务在运行")
-                return {'success': False, 'message': '已有月频因子更新任务在运行'}
-
-            # 启动月频因子更新任务
-            task_manager.start_task(TaskType.MONTHLY_FACTOR_UPDATE)
-
             # 执行月频因子更新
             from services.factors.monthly_factor_updater import run_monthly_factor_update
             from dotenv import load_dotenv
@@ -547,89 +512,81 @@ class SchedulerService:
 
         except Exception as e:
             logger.error(f"月频因子更新失败: {e}", exc_info=True)
-            try:
-                task_manager.fail_task(TaskType.MONTHLY_FACTOR_UPDATE, str(e))
-            except Exception:
-                pass
+            task_manager.fail_task(TaskType.MONTHLY_FACTOR_UPDATE, str(e))
             return {'success': False, 'message': str(e)}
 
     def _run_full_kline_download(self) -> Dict:
         """执行K线全量下载"""
         logger.info("开始K线全量下载...")
 
+        from services.common.task_manager import get_task_manager, TaskType
+        from services.common.async_helper import run_sync_in_thread
+        task_manager = get_task_manager()
+
+        if task_manager.is_running(TaskType.DATA_DOWNLOAD):
+            logger.warning("已有下载任务在运行")
+            return {'success': False, 'message': '已有下载任务在运行'}
+
+        task_manager.start_task(TaskType.DATA_DOWNLOAD)
+        task_manager.update_progress(TaskType.DATA_DOWNLOAD, 5, "正在初始化...")
+
+        from services.data.local_data_service import download_all_kline_data_sync
+        from dotenv import load_dotenv
+        load_dotenv()
+
         try:
-            from services.common.task_manager import get_task_manager, TaskType
-            task_manager = get_task_manager()
-
-            if task_manager.is_running(TaskType.DATA_DOWNLOAD):
-                logger.warning("已有下载任务在运行")
-                return {'success': False, 'message': '已有下载任务在运行'}
-
-            task_manager.start_task(TaskType.DATA_DOWNLOAD)
-            task_manager.update_progress(TaskType.DATA_DOWNLOAD, 5, "正在初始化...")
-
-            from services.data.local_data_service import download_all_kline_data_sync
-            from dotenv import load_dotenv
-            load_dotenv()
-
-            success = download_all_kline_data_sync()
-
-            result = {'success': success, 'message': '下载完成' if success else '部分下载失败'}
-            task_manager.update_progress(TaskType.DATA_DOWNLOAD, 100, "下载完成")
-            if result['success']:
-                task_manager.complete_task(TaskType.DATA_DOWNLOAD, result)
-            else:
-                task_manager.fail_task(TaskType.DATA_DOWNLOAD, result.get('message', '下载失败'))
-
-            return result
-
+            success = run_sync_in_thread(download_all_kline_data_sync)
         except Exception as e:
             logger.error(f"K线全量下载失败: {e}", exc_info=True)
-            try:
-                task_manager.fail_task(TaskType.DATA_DOWNLOAD, str(e))
-            except Exception:
-                pass
+            task_manager.fail_task(TaskType.DATA_DOWNLOAD, str(e))
             return {'success': False, 'message': str(e)}
+
+        result = {'success': success, 'message': '下载完成' if success else '部分下载失败'}
+        task_manager.update_progress(TaskType.DATA_DOWNLOAD, 100, "下载完成")
+        if result['success']:
+            task_manager.complete_task(TaskType.DATA_DOWNLOAD, result)
+        else:
+            task_manager.fail_task(TaskType.DATA_DOWNLOAD, result.get('message', '下载失败'))
+
+        return result
 
     def _run_weekly_kline_download(self) -> Dict:
         """执行周K线下载"""
         logger.info("开始周K线下载...")
 
+        from services.common.task_manager import get_task_manager, TaskType
+        from services.common.async_helper import run_sync_in_thread
+        task_manager = get_task_manager()
+
+        if task_manager.is_running(TaskType.WEEKLY_KLINE_DOWNLOAD):
+            logger.warning("已有周K线下载任务在运行")
+            return {'success': False, 'message': '已有周K线下载任务在运行'}
+
+        task_manager.start_task(TaskType.WEEKLY_KLINE_DOWNLOAD)
+        task_manager.update_progress(TaskType.WEEKLY_KLINE_DOWNLOAD, 5, "正在初始化...")
+
+        from services.data.download_weekly_kline import download_weekly_kline_sync
+        from dotenv import load_dotenv
+        load_dotenv()
+
         try:
-            from services.common.task_manager import get_task_manager, TaskType
-            task_manager = get_task_manager()
-
-            if task_manager.is_running(TaskType.WEEKLY_KLINE_DOWNLOAD):
-                logger.warning("已有周K线下载任务在运行")
-                return {'success': False, 'message': '已有周K线下载任务在运行'}
-
-            task_manager.start_task(TaskType.WEEKLY_KLINE_DOWNLOAD)
-            task_manager.update_progress(TaskType.WEEKLY_KLINE_DOWNLOAD, 5, "正在初始化...")
-
-            from services.data.download_weekly_kline import download_weekly_kline_sync
-            from dotenv import load_dotenv
-            load_dotenv()
-
-            success = download_weekly_kline_sync(
+            success = run_sync_in_thread(
+                download_weekly_kline_sync,
                 years=10,
                 batch_size=50
             )
-
-            result = {'success': success, 'message': '下载完成' if success else '部分下载失败'}
-            task_manager.update_progress(TaskType.WEEKLY_KLINE_DOWNLOAD, 100, "下载完成")
-            if result['success']:
-                task_manager.complete_task(TaskType.WEEKLY_KLINE_DOWNLOAD, result)
-            else:
-                task_manager.fail_task(TaskType.WEEKLY_KLINE_DOWNLOAD, result.get('message', '下载失败'))
-            return result
-
         except Exception as e:
             logger.error(f"周K线下载失败: {e}", exc_info=True)
-            try:
-                task_manager.fail_task(TaskType.WEEKLY_KLINE_DOWNLOAD, str(e))
-            except Exception:
-                pass
+            task_manager.fail_task(TaskType.WEEKLY_KLINE_DOWNLOAD, str(e))
             return {'success': False, 'message': str(e)}
+
+        result = {'success': success, 'message': '下载完成' if success else '部分下载失败'}
+        task_manager.update_progress(TaskType.WEEKLY_KLINE_DOWNLOAD, 100, "下载完成")
+        if result['success']:
+            task_manager.complete_task(TaskType.WEEKLY_KLINE_DOWNLOAD, result)
+        else:
+            task_manager.fail_task(TaskType.WEEKLY_KLINE_DOWNLOAD, result.get('message', '下载失败'))
+        return result
 
     def _weekly_kline_check_job(self):
         """每周周K线数据下载任务"""
@@ -710,12 +667,15 @@ class SchedulerService:
         """执行申万行业指数下载"""
         logger.info("开始申万行业指数下载...")
 
+        from dotenv import load_dotenv
+        load_dotenv()
+
         try:
             from services.data.local_data_service import download_industry_indices
-            from dotenv import load_dotenv
-            load_dotenv()
+            from services.common.async_helper import run_sync_in_thread
 
-            result = download_industry_indices()
+            # 使用 run_sync_in_thread 统一处理事件循环冲突
+            result = run_sync_in_thread(download_industry_indices)
             return result
 
         except Exception as e:
@@ -1181,16 +1141,9 @@ class SchedulerService:
             logger.error(f"注册监控任务失败: {e}", exc_info=True)
 
     def is_today_trading_day(self) -> bool:
-        """判断今天是否为交易日（使用 SDK 交易日历）"""
-        try:
-            from services.common.sdk_manager import get_sdk_manager
-            sdk_mgr = get_sdk_manager()
-            calendar = sdk_mgr.get_calendar()  # int 列表，如 [19901219, 20260507, ...]
-            today = int(get_china_time().strftime('%Y%m%d'))
-            return today in calendar
-        except Exception as e:
-            logger.warning(f"获取交易日历失败，降级为工作日判断: {e}")
-            return get_china_time().weekday() < 5
+        """判断今天是否为交易日（委托给 trading_hours.py 统一管理）"""
+        from services.trading.trading_hours import is_today_trading_day as _is_trading_day
+        return _is_trading_day()
 
     def auto_start_monitoring_if_trading(self):
         """服务启动时检查：如果当前在交易日交易时段，调度延时任务自动启动监控"""

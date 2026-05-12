@@ -134,10 +134,27 @@ async def get_signal(
 @router.post("/api/v1/ui/{account_id}/signals/{signal_id}/execute")
 async def execute_signal(
     account_id: str = Path(..., description="账户 ID"),
-    signal_id: int = Path(..., description="信号 ID")
+    signal_id: int = Path(..., description="信号 ID"),
+    force: bool = Query(False, description="强制在非交易时间执行（仅测试用）")
 ):
-    """执行交易信号"""
+    """执行交易信号
+
+    交易时间检查：
+    - 默认只在 A 股交易时段允许执行
+    - 传 force=true 可跳过检查（测试用）
+    """
     db = get_db_manager()
+
+    # 交易时间检查
+    if not force:
+        from services.trading.trading_hours import can_trade, get_trading_phase, get_phase_description
+        if not can_trade():
+            phase = get_trading_phase()
+            phase_desc = get_phase_description(phase)
+            return {
+                "success": False,
+                "message": f"非交易时段({phase_desc})，无法执行。如需测试请加 ?force=true",
+            }
 
     # 从数据库验证账户
     account = await db.fetchone("SELECT * FROM accounts WHERE account_id = ? AND is_active = 1", (account_id,))

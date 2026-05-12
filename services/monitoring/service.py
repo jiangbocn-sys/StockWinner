@@ -77,7 +77,11 @@ class TradingMonitor:
 
         while self._running:
             try:
-                await self._run_monitoring(account_id)
+                # 交易时间检查：只在 A 股交易时段执行
+                from services.trading.trading_hours import can_trade
+                if can_trade():
+                    await self._run_monitoring(account_id)
+
                 await asyncio.sleep(interval)
             except asyncio.CancelledError:
                 break

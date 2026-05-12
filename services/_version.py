@@ -5,7 +5,7 @@
 
 from services.common.timezone import get_china_time
 
-VERSION = "7.1.16"
+VERSION = "7.1.17"
 _server_start_time = None
 
 

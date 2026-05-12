@@ -11,6 +11,98 @@ from services.trading.gateway import get_gateway
 router = APIRouter()
 
 
+import asyncio
+
+@router.get("/api/v1/ui/{account_id}/market/test-query-kline")
+async def test_query_kline_batch(
+    account_id: str = Path(...),
+    count: int = Query(100, ge=1, le=10000, description="测试批量大小"),
+    direct: bool = Query(False, description="是否直接调用 SDK（绕过 SDKManager）"),
+):
+    """
+    临时测试端点：直接调用 SDKManager.query_kline 测试不同批量耗时
+    通过 gateway 内部调用，在后端进程上下文中执行
+    """
+    import time
+    import sqlite3
+    from pathlib import Path
+    from datetime import datetime, timedelta
+    from services.common.timezone import get_china_time
+    from services.common.sdk_manager import get_sdk_manager
+
+    # 获取股票代码
+    kline_db = Path(__file__).parent.parent.parent / "data" / "kline.db"
+    conn = sqlite3.connect(str(kline_db))
+    c = conn.cursor()
+    c.execute(
+        "SELECT DISTINCT stock_code FROM kline_data WHERE stock_code NOT LIKE '%.BJ' LIMIT ?",
+        (count,)
+    )
+    codes = [r[0] for r in c.fetchall()]
+    conn.close()
+
+    sdk = get_sdk_manager()
+    end_dt = get_china_time()
+    begin_dt = end_dt - timedelta(days=2)
+    end_date = int((end_dt + timedelta(days=1)).strftime('%Y%m%d'))
+    begin_date = int(begin_dt.strftime('%Y%m%d'))
+
+    def _run_query():
+        """在后台线程中执行 SDK 调用"""
+        start = time.time()
+        if direct:
+            md = sdk.get_market_data()
+            result = md.query_kline(
+                code_list=codes,
+                begin_date=begin_date,
+                end_date=end_date,
+                period=10008,
+                task_type="download"
+            )
+        else:
+            result = sdk.query_kline(
+                code_list=codes,
+                begin_date=begin_date,
+                end_date=end_date,
+                period=10008,
+                task_type="download"
+            )
+        return result, time.time() - start
+
+    try:
+        # 在后台线程执行，600s 超时保护
+        result, elapsed = await asyncio.wait_for(
+            asyncio.to_thread(_run_query),
+            timeout=600.0
+        )
+    except asyncio.TimeoutError:
+        return {
+            "success": False,
+            "message": f"SDK 调用超时（>600s）",
+            "requested": count,
+            "actual_stocks": len(codes),
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "message": f"{type(e).__name__}: {e}",
+            "requested": count,
+        }
+
+    data_count = sum(len(df) if df is not None else 0 for df in result.values()) if isinstance(result, dict) else 0
+    return {
+        "success": True,
+        "requested": count,
+        "actual_stocks": len(codes),
+        "success_stocks": len(result) if isinstance(result, dict) else 0,
+        "total_records": data_count,
+        "elapsed_seconds": round(elapsed, 2),
+        "begin_date": begin_date,
+        "end_date": end_date,
+        "direct_call": direct,
+    }
+
+
 @router.get("/api/v1/ui/{account_id}/market/quote/{stock_code}")
 async def get_stock_quote(
     account_id: str = Path(..., description="账户 ID"),

@@ -82,6 +82,14 @@ class OrderService:
             "updated_at": format_china_time(),
         }
 
+        # 获取 user_id（accounts.id 已修复为自增主键）
+        account = await self.db.fetchone(
+            "SELECT id FROM accounts WHERE account_id = ?",
+            (self.account_id,)
+        )
+        if account:
+            data["user_id"] = account["id"]
+
         # 移除 None 值
         data = {k: v for k, v in data.items() if v is not None}
 
