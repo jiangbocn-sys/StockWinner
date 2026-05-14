@@ -35,11 +35,70 @@ class MonthlyFactorUpdater:
     # 无财务数据的股票集合（缓存，避免重复尝试）
     _missing_data_stocks: Set[str] = set()
 
+    # 全部可写字段（41个，排除 id/stock_code/stock_name/report_date/source/created_at/updated_at）
+    ALL_WRITABLE_FIELDS = [
+        'net_profit', 'net_profit_ttm', 'net_profit_ttm_yoy',
+        'net_profit_single', 'net_profit_single_yoy', 'net_profit_single_qoq',
+        'operating_cash_flow', 'operating_cash_flow_ttm', 'operating_cash_flow_ttm_yoy',
+        'operating_cash_flow_single', 'operating_cash_flow_single_yoy', 'operating_cash_flow_single_qoq',
+        'total_revenue', 'operating_profit', 'operating_cashflow',
+        'total_assets', 'net_assets',
+        'pe_ttm', 'pb', 'ps_ttm', 'pcf', 'ev_ebitda',
+        'pe_inverse', 'pb_inverse',
+        'roe', 'roa', 'gross_margin', 'net_margin', 'operating_margin',
+        'revenue_growth_yoy', 'revenue_growth_qoq',
+        'net_profit_growth_yoy', 'net_profit_growth_qoq',
+        'operating_profit_growth_yoy',
+        'report_quarter', 'report_year',
+        'sw_level1', 'sw_level2', 'sw_level3',
+        'total_market_cap', 'circ_market_cap',
+    ]
+
+    # 空值检查字段（用于判断是否需要更新）
+    NULL_CHECK_FIELDS = [
+        'pe_ttm', 'pb', 'ps_ttm', 'pcf', 'ev_ebitda',
+        'net_profit_ttm', 'net_profit_ttm_yoy',
+        'net_profit_single', 'net_profit_single_yoy', 'net_profit_single_qoq',
+        'operating_cash_flow_ttm', 'operating_cash_flow_ttm_yoy',
+        'revenue_growth_yoy', 'revenue_growth_qoq',
+        'net_profit_growth_yoy', 'net_profit_growth_qoq',
+        'operating_profit_growth_yoy',
+        'report_quarter', 'report_year',
+        'sw_level1', 'sw_level2', 'sw_level3',
+    ]
+
     def __init__(self, db_path: Path = DB_PATH):
         self.db_path = db_path
         self.winner_db_path = WINNER_DB_PATH
         self.sdk = get_sdk_manager()
         self._load_missing_stocks_cache()
+
+    @staticmethod
+    def _safe_is_zero(value) -> bool:
+        """None/0/NaN/Inf 都视为零"""
+        if value is None:
+            return True
+        if isinstance(value, (int, float)):
+            if np.isnan(value) or np.isinf(value):
+                return True
+            return abs(value) < 1e-10
+        return True
+
+    @staticmethod
+    def is_quarter_end(report_date: str) -> bool:
+        """是否季末日期（03-31, 06-30, 09-30, 12-31）"""
+        return report_date[5:] in ('03-31', '06-30', '09-30', '12-31')
+
+    @staticmethod
+    def calculate_report_quarter(report_date: str) -> int:
+        """从 report_date 提取季度号：01-03月→1, 04-06月→2, 07-09月→3, 10-12月→4"""
+        month = int(report_date[5:7])
+        return (month - 1) // 3 + 1
+
+    @staticmethod
+    def calculate_report_year(report_date: str) -> int:
+        """从 report_date 提取年份"""
+        return int(report_date[:4])
 
     def _get_connection(self) -> sqlite3.Connection:
         """获取数据库连接"""
@@ -67,12 +126,15 @@ class MonthlyFactorUpdater:
             f.write(f"{stock_code}: {stock_name}, {report_period}, {reason}\n")
 
     def get_stocks_need_update(self, skip_bj: bool = True) -> List[str]:
-        """获取需要更新月频因子的股票列表（估值因子为空的记录）"""
+        """获取需要更新月频因子的股票列表（任意关键字段为空即需要更新）"""
         conn = self._get_connection()
         cursor = conn.cursor()
 
-        # 查找 pe_ttm 为空的记录对应的股票，排除已知无数据和北交所
-        sql = "SELECT DISTINCT stock_code FROM stock_monthly_factors WHERE pe_ttm IS NULL OR pe_ttm = 0"
+        # 检查所有关键字段是否有 NULL
+        null_conditions = ' OR '.join([f"{f} IS NULL" for f in self.NULL_CHECK_FIELDS])
+        sql = f"SELECT DISTINCT stock_code FROM stock_monthly_factors WHERE ({null_conditions})"
+        # 只处理季度记录
+        sql += " AND strftime('%m-%d', report_date) IN ('03-31', '06-30', '09-30', '12-31')"
         if skip_bj:
             sql += " AND stock_code NOT LIKE '%BJ'"
         cursor.execute(sql)
@@ -85,13 +147,13 @@ class MonthlyFactorUpdater:
         return stocks
 
     def get_all_stocks(self, skip_bj: bool = True) -> List[str]:
-        """获取所有股票列表（用于补充缺失的季度记录）"""
+        """获取所有股票列表（仅季度记录，用于补充缺失的季度记录）"""
         conn = self._get_connection()
         cursor = conn.cursor()
 
-        sql = "SELECT DISTINCT stock_code FROM stock_monthly_factors"
+        sql = "SELECT DISTINCT stock_code FROM stock_monthly_factors WHERE strftime('%m-%d', report_date) IN ('03-31', '06-30', '09-30', '12-31')"
         if skip_bj:
-            sql += " WHERE stock_code NOT LIKE '%BJ'"
+            sql += " AND stock_code NOT LIKE '%BJ'"
         cursor.execute(sql)
         stocks = [row[0] for row in cursor.fetchall()]
 
@@ -203,6 +265,30 @@ class MonthlyFactorUpdater:
 
         return income_df, balance_df, cashflow_df
 
+    def _load_sw_classification(self, stock_codes: List[str]) -> Dict[str, Dict[str, str]]:
+        """从 stock_base_info 表加载申万行业分类"""
+        try:
+            conn = sqlite3.connect(str(self.winner_db_path))
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            placeholders = ','.join(['?'] * len(stock_codes))
+            cursor.execute(f"""
+                SELECT stock_code, sw_level1, sw_level2, sw_level3
+                FROM stock_base_info
+                WHERE stock_code IN ({placeholders})
+            """, stock_codes)
+            result = {}
+            for row in cursor.fetchall():
+                result[row['stock_code']] = {
+                    'sw_level1': row['sw_level1'],
+                    'sw_level2': row['sw_level2'],
+                    'sw_level3': row['sw_level3'],
+                }
+            conn.close()
+            return result
+        except Exception:
+            return {}
+
     def calculate_factors(
         self,
         stock_code: str,
@@ -232,18 +318,18 @@ class MonthlyFactorUpdater:
         # 从利润表提取数据
         if not income_data.empty:
             row = income_data.iloc[0]
+            factors['net_profit'] = row.get('NET_PRO_INCL_MIN_INT_INC')
             factors['total_revenue'] = row.get('TOT_OPERA_REV')
             factors['operating_profit'] = row.get('OPERA_PROFIT')
-            factors['net_profit'] = row.get('NET_PRO_INCL_MIN_INT_INC')
             operating_cost = row.get('TOT_OPERA_COST')
 
-            if factors.get('total_revenue') and operating_cost and factors['total_revenue'] > 0:
+            if factors.get('total_revenue') and not self._safe_is_zero(operating_cost):
                 factors['gross_margin'] = (factors['total_revenue'] - operating_cost) / factors['total_revenue'] * 100
 
-            if factors.get('net_profit') and factors.get('total_revenue') and factors['total_revenue'] > 0:
+            if factors.get('net_profit') and factors.get('total_revenue') and not self._safe_is_zero(factors['total_revenue']):
                 factors['net_margin'] = factors['net_profit'] / factors['total_revenue'] * 100
 
-            if factors.get('operating_profit') and factors.get('total_revenue') and factors['total_revenue'] > 0:
+            if factors.get('operating_profit') and factors.get('total_revenue') and not self._safe_is_zero(factors['total_revenue']):
                 factors['operating_margin'] = factors['operating_profit'] / factors['total_revenue'] * 100
 
         # 从资产负债表提取数据
@@ -252,10 +338,10 @@ class MonthlyFactorUpdater:
             factors['total_assets'] = row.get('TOTAL_ASSETS')
             factors['net_assets'] = row.get('TOT_SHARE_EQUITY_EXCL_MIN_INT')
 
-            if factors.get('net_profit') and factors.get('net_assets') and factors['net_assets'] > 0:
+            if factors.get('net_profit') and factors.get('net_assets') and not self._safe_is_zero(factors['net_assets']):
                 factors['roe'] = factors['net_profit'] / factors['net_assets'] * 100
 
-            if factors.get('net_profit') and factors.get('total_assets') and factors['total_assets'] > 0:
+            if factors.get('net_profit') and factors.get('total_assets') and not self._safe_is_zero(factors['total_assets']):
                 factors['roa'] = factors['net_profit'] / factors['total_assets'] * 100
 
         # 从现金流量表提取数据
@@ -263,65 +349,220 @@ class MonthlyFactorUpdater:
             row = cashflow_data.iloc[0]
             factors['operating_cashflow'] = row.get('NET_CASH_FLOWS_OPERA_ACT')
 
-        # 市值数据独立存储（不依赖净利润正负）
+        # 市值数据
         if market_cap:
             total_cap = market_cap.get('total_market_cap')
             if total_cap and total_cap > 0:
                 factors['total_market_cap'] = total_cap
                 factors['circ_market_cap'] = market_cap.get('circ_market_cap')
 
-        # 计算估值因子（需要市值和对应财务数据）
-        if market_cap and factors.get('net_profit') and factors['net_profit'] > 0:
-            total_cap = market_cap.get('total_market_cap')
-            if total_cap and total_cap > 0:
-                factors['pe_ttm'] = (total_cap * 1e8) / factors['net_profit']
-                factors['pe_inverse'] = factors['net_profit'] / (total_cap * 1e8)
+                # PE（允许负值，亏损股 PE 为负）
+                if factors.get('net_profit') and not self._safe_is_zero(factors['net_profit']):
+                    factors['pe_ttm'] = (total_cap * 1e8) / factors['net_profit']
+                    factors['pe_inverse'] = factors['net_profit'] / (total_cap * 1e8)
 
-        if market_cap and factors.get('net_assets') and factors['net_assets'] > 0:
-            total_cap = market_cap.get('total_market_cap')
-            if total_cap and total_cap > 0:
-                factors['pb'] = (total_cap * 1e8) / factors['net_assets']
-                factors['pb_inverse'] = factors['net_assets'] / (total_cap * 1e8)
+                # PB（允许负值，负净资产 PB 为负）
+                if factors.get('net_assets') and not self._safe_is_zero(factors['net_assets']):
+                    factors['pb'] = (total_cap * 1e8) / factors['net_assets']
+                    factors['pb_inverse'] = factors['net_assets'] / (total_cap * 1e8)
 
-        if market_cap and factors.get('total_revenue') and factors['total_revenue'] > 0:
-            total_cap = market_cap.get('total_market_cap')
-            if total_cap and total_cap > 0:
-                factors['ps_ttm'] = (total_cap * 1e8) / factors['total_revenue']
+                # PS
+                if factors.get('total_revenue') and not self._safe_is_zero(factors['total_revenue']):
+                    factors['ps_ttm'] = (total_cap * 1e8) / factors['total_revenue']
 
-        if market_cap and factors.get('operating_cashflow') and factors['operating_cashflow'] > 0:
-            total_cap = market_cap.get('total_market_cap')
-            if total_cap and total_cap > 0:
-                factors['pcf'] = (total_cap * 1e8) / factors['operating_cashflow']
+                # PCF（允许负值）
+                if factors.get('operating_cashflow') and not self._safe_is_zero(factors['operating_cashflow']):
+                    factors['pcf'] = (total_cap * 1e8) / factors['operating_cashflow']
+
+        # EV/EBITDA
+        if market_cap:
+            self._calculate_ev_ebitda(factors, market_cap, income_data, balance_data, cashflow_data)
 
         return factors if factors else None
 
-    def calculate_growth_factors(self, stock_code: str, income_df: pd.DataFrame) -> Dict:
-        """计算成长因子（同比增长）"""
+    def _calculate_ev_ebitda(self, factors: Dict, market_cap: Dict, income_row, balance_row, cashflow_row):
+        """
+        计算 EV/EBITDA
+        EBITDA = operating_profit + DEPRE_FA_OGA_PBA（折旧摊销）
+        EV = mcap(亿)×1e8 + TOTAL_LIAB - CASH_EQUIV
+        """
+        total_cap = market_cap.get('total_market_cap')
+        if not total_cap or total_cap <= 0:
+            return
+
+        operating_profit = factors.get('operating_profit')
+        if operating_profit is None or self._safe_is_zero(operating_profit):
+            return
+
+        # 折旧摊销（现金流量表）
+        depre_amort = None
+        if not cashflow_row.empty:
+            depre_amort = cashflow_row.iloc[0].get('DEPRE_FA_OGA_PBA')
+        if depre_amort is None or self._safe_is_zero(depre_amort):
+            return
+
+        ebitda = operating_profit + depre_amort
+        if self._safe_is_zero(ebitda):
+            return
+
+        # 总负债和现金等价物（资产负债表）
+        total_liab = None
+        cash_equiv = None
+        if not balance_row.empty:
+            total_liab = balance_row.iloc[0].get('TOTAL_LIAB')
+            cash_equiv = balance_row.iloc[0].get('CASH_EQUIV')
+        if total_liab is None:
+            return
+
+        ev = total_cap * 1e8 + total_liab - (cash_equiv or 0)
+        factors['ev_ebitda'] = ev / ebitda
+
+    def calculate_all_growth_factors(self, stock_code: str, income_df: pd.DataFrame, cashflow_df: pd.DataFrame) -> Dict:
+        """
+        计算所有增长因子：TTM、单季、同比、环比
+
+        返回包含：
+        - net_profit_ttm, net_profit_ttm_yoy
+        - net_profit_single, net_profit_single_yoy, net_profit_single_qoq
+        - revenue_growth_yoy, revenue_growth_qoq
+        - net_profit_growth_yoy, net_profit_growth_qoq
+        - operating_profit_growth_yoy
+        - operating_cash_flow_ttm, operating_cash_flow_ttm_yoy
+        - operating_cash_flow_single, operating_cash_flow_single_yoy, operating_cash_flow_single_qoq
+        """
         factors = {}
 
-        income_data = income_df[income_df['MARKET_CODE'] == stock_code].copy()
-        income_data = income_data.sort_values('REPORTING_PERIOD', ascending=False)
+        # --- 利润表增长 ---
+        inc = income_df[income_df['MARKET_CODE'] == stock_code].copy()
+        if len(inc) >= 2:
+            inc = inc.sort_values('REPORTING_PERIOD', ascending=True)
 
-        if len(income_data) >= 2:
-            current = income_data.iloc[0]
-            current_period = str(current['REPORTING_PERIOD'])
+            current = inc.iloc[-1]
+            previous = inc.iloc[-2]
+            current_period_str = str(int(current['REPORTING_PERIOD']))
+            last_year_period = f"{int(current_period_str[:4]) - 1}{current_period_str[4:]}"
 
-            # 查找上年同期
-            last_year_period = f"{int(current_period[:4]) - 1}{current_period[4:]}"
-            last_year_data = income_data[income_data['REPORTING_PERIOD'].astype(str) == last_year_period]
+            # 净利润 TTM（最近4个季度之和）
+            last_4 = inc.tail(4)
+            if len(last_4) == 4:
+                np_col = 'NET_PRO_INCL_MIN_INT_INC'
+                ttm = last_4[np_col].sum()
+                if not self._safe_is_zero(ttm):
+                    factors['net_profit_ttm'] = ttm
 
-            if not last_year_data.empty:
-                last_year = last_year_data.iloc[0]
+                    # TTM 同比
+                    if len(inc) >= 8:
+                        prior_4 = inc.iloc[-8:-4]
+                        prior_ttm = prior_4[np_col].sum()
+                        if not self._safe_is_zero(prior_ttm):
+                            factors['net_profit_ttm_yoy'] = (ttm - prior_ttm) / abs(prior_ttm) * 100
 
-                current_revenue = current.get('TOT_OPERA_REV')
-                last_revenue = last_year.get('TOT_OPERA_REV')
-                if current_revenue and last_revenue and last_revenue > 0:
-                    factors['revenue_growth_yoy'] = (current_revenue - last_revenue) / last_revenue * 100
+            # 单季净利润 = 当期累计 - 上期累计
+            curr_np = current.get('NET_PRO_INCL_MIN_INT_INC')
+            prev_np = previous.get('NET_PRO_INCL_MIN_INT_INC')
+            if curr_np is not None and prev_np is not None:
+                single_np = curr_np - prev_np
+                factors['net_profit_single'] = single_np
 
-                current_profit = current.get('NET_PRO_INCL_MIN_INT_INC')
-                last_profit = last_year.get('NET_PRO_INCL_MIN_INT_INC')
-                if current_profit and last_profit and last_profit > 0:
-                    factors['net_profit_growth_yoy'] = (current_profit - last_profit) / last_profit * 100
+                # 单季环比（需要3期数据）
+                if len(inc) >= 3:
+                    prior = inc.iloc[-3]
+                    prior_np = prior.get('NET_PRO_INCL_MIN_INT_INC')
+                    if prior_np is not None:
+                        prior_single = prev_np - prior_np
+                        if not self._safe_is_zero(prior_single):
+                            factors['net_profit_single_qoq'] = (single_np - prior_single) / abs(prior_single) * 100
+
+                # 单季同比（需要上年同期）
+                ly = inc[inc['REPORTING_PERIOD'].astype(str) == last_year_period]
+                if not ly.empty and len(inc) >= 3:
+                    ly_idx = inc.index.get_loc(ly.index[0])
+                    if ly_idx > 0:
+                        ly_prev = inc.iloc[ly_idx - 1]
+                        ly_np = ly.iloc[0].get('NET_PRO_INCL_MIN_INT_INC')
+                        ly_prev_np = ly_prev.get('NET_PRO_INCL_MIN_INT_INC')
+                        ly_single = ly_np - ly_prev_np
+                        if not self._safe_is_zero(ly_single):
+                            factors['net_profit_single_yoy'] = (single_np - ly_single) / abs(ly_single) * 100
+
+            # 营收增长
+            curr_rev = current.get('TOT_OPERA_REV')
+            prev_rev = previous.get('TOT_OPERA_REV')
+            if curr_rev is not None and prev_rev is not None:
+                # 同比
+                if not self._safe_is_zero(prev_rev):
+                    factors['revenue_growth_yoy'] = (curr_rev - prev_rev) / abs(prev_rev) * 100
+
+                # 环比（单季）
+                if len(inc) >= 3:
+                    prior_rev = inc.iloc[-3].get('TOT_OPERA_REV')
+                    if prior_rev is not None:
+                        single_curr = curr_rev - prev_rev
+                        single_prev = prev_rev - prior_rev
+                        if not self._safe_is_zero(single_prev):
+                            factors['revenue_growth_qoq'] = (single_curr - single_prev) / abs(single_prev) * 100
+
+            # 净利润同比（累计值同比）
+            if curr_np is not None and prev_np is not None:
+                if not self._safe_is_zero(prev_np):
+                    factors['net_profit_growth_yoy'] = (curr_np - prev_np) / abs(prev_np) * 100
+
+            # 净利润环比（复用 single_qoq）
+            if 'net_profit_single_qoq' in factors:
+                factors['net_profit_growth_qoq'] = factors['net_profit_single_qoq']
+
+            # 营业利润同比
+            curr_op = current.get('OPERA_PROFIT')
+            ly_op = inc[inc['REPORTING_PERIOD'].astype(str) == last_year_period]
+            if curr_op is not None and not ly_op.empty:
+                last_op = ly_op.iloc[0].get('OPERA_PROFIT')
+                if last_op is not None and not self._safe_is_zero(last_op):
+                    factors['operating_profit_growth_yoy'] = (curr_op - last_op) / abs(last_op) * 100
+
+        # --- 现金流量表增长 ---
+        cf = cashflow_df[cashflow_df['MARKET_CODE'] == stock_code].copy()
+        if len(cf) >= 4:
+            cf = cf.sort_values('REPORTING_PERIOD', ascending=True)
+            ocf_col = 'NET_CASH_FLOWS_OPERA_ACT'
+
+            last_4_cf = cf.tail(4)
+            ocf_ttm = last_4_cf[ocf_col].sum()
+            if not self._safe_is_zero(ocf_ttm):
+                factors['operating_cash_flow_ttm'] = ocf_ttm
+
+                if len(cf) >= 8:
+                    prior_4_cf = cf.iloc[-8:-4]
+                    prior_ocf_ttm = prior_4_cf[ocf_col].sum()
+                    if not self._safe_is_zero(prior_ocf_ttm):
+                        factors['operating_cash_flow_ttm_yoy'] = (ocf_ttm - prior_ocf_ttm) / abs(prior_ocf_ttm) * 100
+
+            if len(cf) >= 2:
+                curr_ocf = cf.iloc[-1].get(ocf_col)
+                prev_ocf = cf.iloc[-2].get(ocf_col)
+                if curr_ocf is not None and prev_ocf is not None:
+                    single_ocf = curr_ocf - prev_ocf
+                    factors['operating_cash_flow_single'] = single_ocf
+
+                    if len(cf) >= 3:
+                        prior_ocf = cf.iloc[-3].get(ocf_col)
+                        if prior_ocf is not None:
+                            prior_single_ocf = prev_ocf - prior_ocf
+                            if not self._safe_is_zero(prior_single_ocf):
+                                factors['operating_cash_flow_single_qoq'] = (single_ocf - prior_single_ocf) / abs(prior_single_ocf) * 100
+
+                    # 单季同比
+                    curr_period_str = str(int(cf.iloc[-1]['REPORTING_PERIOD']))
+                    ly_period = f"{int(curr_period_str[:4]) - 1}{curr_period_str[4:]}"
+                    ly_cf = cf[cf['REPORTING_PERIOD'].astype(str) == ly_period]
+                    if not ly_cf.empty and len(cf) >= 3:
+                        ly_idx = cf.index.get_loc(ly_cf.index[0])
+                        if ly_idx > 0:
+                            ly_prev = cf.iloc[ly_idx - 1]
+                            ly_ocf = ly_cf.iloc[0].get(ocf_col)
+                            ly_prev_ocf = ly_prev.get(ocf_col)
+                            ly_single = ly_ocf - ly_prev_ocf
+                            if not self._safe_is_zero(ly_single):
+                                factors['operating_cash_flow_single_yoy'] = (single_ocf - ly_single) / abs(ly_single) * 100
 
         return factors
 
@@ -358,6 +599,9 @@ class MonthlyFactorUpdater:
 
         # 获取股票名称映射
         stock_names = self.get_stock_names()
+
+        # 预加载申万行业分类（该批次内所有股票）
+        sw_data = self._load_sw_classification(stock_codes)
 
         # 分批获取财务数据并更新
         updated_count = 0
@@ -425,9 +669,18 @@ class MonthlyFactorUpdater:
                         )
 
                         if factors:
-                            # 计算成长因子
-                            growth = self.calculate_growth_factors(stock_code, income)
+                            # 计算增长因子（TTM/单季/同比/环比）
+                            growth = self.calculate_all_growth_factors(stock_code, income, cashflow)
                             factors.update(growth)
+
+                            # 添加季度和年份
+                            factors['report_quarter'] = self.calculate_report_quarter(trade_date)
+                            factors['report_year'] = self.calculate_report_year(trade_date)
+
+                            # 添加申万行业分类
+                            if stock_code in sw_data:
+                                factors.update(sw_data[stock_code])
+
                             factors['stock_code'] = stock_code
                             factors['report_period'] = report_period
 
@@ -464,22 +717,40 @@ class MonthlyFactorUpdater:
             'skipped': len(self._missing_data_stocks)
         }
 
-    def _batch_update_db(self, factors_list: List[Dict], stock_names: Dict[str, str] = None):
-        """批量更新数据库（不存在则插入）"""
+    def _batch_update_db(self, factors_list: List[Dict], stock_names: Dict[str, str] = None, fill_nulls_only: bool = False):
+        """批量更新数据库（不存在则插入）
+
+        Args:
+            factors_list: 因子数据列表
+            stock_names: 股票名称映射
+            fill_nulls_only: True=只更新当前为NULL的字段；False=覆盖写入（默认）
+        """
         conn = self._get_connection()
         cursor = conn.cursor()
 
         factor_to_db_mapping = {
+            'net_profit': 'net_profit',
+            'net_profit_ttm': 'net_profit_ttm',
+            'net_profit_ttm_yoy': 'net_profit_ttm_yoy',
+            'net_profit_single': 'net_profit_single',
+            'net_profit_single_yoy': 'net_profit_single_yoy',
+            'net_profit_single_qoq': 'net_profit_single_qoq',
+            'operating_cash_flow': 'operating_cash_flow',
+            'operating_cash_flow_ttm': 'operating_cash_flow_ttm',
+            'operating_cash_flow_ttm_yoy': 'operating_cash_flow_ttm_yoy',
+            'operating_cash_flow_single': 'operating_cash_flow_single',
+            'operating_cash_flow_single_yoy': 'operating_cash_flow_single_yoy',
+            'operating_cash_flow_single_qoq': 'operating_cash_flow_single_qoq',
             'total_revenue': 'total_revenue',
             'operating_profit': 'operating_profit',
-            'net_profit': 'net_profit',
+            'operating_cashflow': 'operating_cashflow',
             'total_assets': 'total_assets',
             'net_assets': 'net_assets',
-            'operating_cashflow': 'operating_cashflow',
             'pe_ttm': 'pe_ttm',
             'pb': 'pb',
             'ps_ttm': 'ps_ttm',
             'pcf': 'pcf',
+            'ev_ebitda': 'ev_ebitda',
             'pe_inverse': 'pe_inverse',
             'pb_inverse': 'pb_inverse',
             'roe': 'roe',
@@ -488,10 +759,21 @@ class MonthlyFactorUpdater:
             'net_margin': 'net_margin',
             'operating_margin': 'operating_margin',
             'revenue_growth_yoy': 'revenue_growth_yoy',
+            'revenue_growth_qoq': 'revenue_growth_qoq',
             'net_profit_growth_yoy': 'net_profit_growth_yoy',
+            'net_profit_growth_qoq': 'net_profit_growth_qoq',
+            'operating_profit_growth_yoy': 'operating_profit_growth_yoy',
+            'report_quarter': 'report_quarter',
+            'report_year': 'report_year',
+            'sw_level1': 'sw_level1',
+            'sw_level2': 'sw_level2',
+            'sw_level3': 'sw_level3',
             'total_market_cap': 'total_market_cap',
             'circ_market_cap': 'circ_market_cap',
         }
+
+        # 数值字段（需要 NaN/Inf 检查）
+        NUMERIC_FIELDS = set(self.ALL_WRITABLE_FIELDS) - {'sw_level1', 'sw_level2', 'sw_level3'}
 
         inserted_count = 0
         updated_count = 0
@@ -512,30 +794,63 @@ class MonthlyFactorUpdater:
             factor_values = {}
             for factor_name, db_field in factor_to_db_mapping.items():
                 value = factors.get(factor_name)
-                if value is not None and isinstance(value, (int, float)):
-                    if not (np.isnan(value) or np.isinf(value)):
+                if value is None:
+                    continue
+                if factor_name in NUMERIC_FIELDS:
+                    if isinstance(value, (int, float)) and not (np.isnan(value) or np.isinf(value)):
                         factor_values[db_field] = value
+                else:
+                    factor_values[db_field] = value
 
             if not factor_values:
                 continue
 
             if existing:
-                # 更新现有记录
-                update_fields = [f"{field} = ?" for field in factor_values.keys()]
-                update_values = list(factor_values.values())
-                update_values.extend([
-                    get_china_time().strftime('%Y-%m-%d %H:%M:%S'),
-                    stock_code, report_date
-                ])
-                sql = f"""
-                    UPDATE stock_monthly_factors
-                    SET {', '.join(update_fields)}, updated_at = ?, source = 'sdk_update'
-                    WHERE stock_code = ? AND report_date = ?
-                """
-                cursor.execute(sql, update_values)
+                if fill_nulls_only:
+                    # 只更新当前为 NULL 的字段
+                    fields_to_check = list(factor_values.keys())
+                    cursor.execute(f"""
+                        SELECT {', '.join(fields_to_check)}
+                        FROM stock_monthly_factors WHERE id = ?
+                    """, (existing[0],))
+                    existing_values = cursor.fetchone()
+                    if existing_values is None:
+                        continue
+
+                    # 只包含现有记录中为 NULL 的字段
+                    non_null_updates = {}
+                    for i, field in enumerate(fields_to_check):
+                        if existing_values[i] is None:
+                            non_null_updates[field] = factor_values[field]
+
+                    if not non_null_updates:
+                        continue
+
+                    update_fields = [f"{field} = ?" for field in non_null_updates.keys()]
+                    update_values = list(non_null_updates.values())
+                    update_values.extend([
+                        get_china_time().strftime('%Y-%m-%d %H:%M:%S'),
+                        existing[0]
+                    ])
+                    sql = f"UPDATE stock_monthly_factors SET {', '.join(update_fields)}, updated_at = ?, source = 'sdk_update' WHERE id = ?"
+                    cursor.execute(sql, update_values)
+                else:
+                    # 覆盖写入
+                    update_fields = [f"{field} = ?" for field in factor_values.keys()]
+                    update_values = list(factor_values.values())
+                    update_values.extend([
+                        get_china_time().strftime('%Y-%m-%d %H:%M:%S'),
+                        stock_code, report_date
+                    ])
+                    sql = f"""
+                        UPDATE stock_monthly_factors
+                        SET {', '.join(update_fields)}, updated_at = ?, source = 'sdk_update'
+                        WHERE stock_code = ? AND report_date = ?
+                    """
+                    cursor.execute(sql, update_values)
                 updated_count += 1
             else:
-                # 插入新记录（季度报告日期缺失时）
+                # 插入新记录
                 stock_name = stock_names.get(stock_code, '') if stock_names else ''
                 fields = ['stock_code', 'stock_name', 'report_date', 'source', 'created_at', 'updated_at']
                 values = [stock_code, stock_name, report_date, 'sdk_insert',
