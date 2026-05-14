@@ -217,18 +217,13 @@ def get_user_llm_config(account_id: str) -> Optional[dict]:
     """
     同步获取用户的 LLM 配置（供 strategy_generator 使用）
     """
-    import sqlite3
-    from pathlib import Path
-
-    db_path = Path(__file__).parent.parent.parent / "data" / "stockwinner.db"
+    from services.common.database import get_sync_connection
     try:
-        conn = sqlite3.connect(str(db_path))
-        conn.row_factory = sqlite3.Row
+        conn = get_sync_connection()
         row = conn.execute(
             "SELECT * FROM llm_config WHERE account_id = ? AND enabled = 1",
             (account_id,)
         ).fetchone()
-        conn.close()
         if row:
             return dict(row)
     except Exception:

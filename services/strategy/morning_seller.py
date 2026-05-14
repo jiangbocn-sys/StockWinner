@@ -48,14 +48,13 @@ def calc_minute_drop_speed(stock_code, current_price):
 def update_highest_price(account_id, stock_code, highest_price):
     """同步更新 stock_positions 的最高价（直接 SQLite 连接）"""
     try:
-        db_path = str(get_db_manager().db_path)
-        conn = sqlite3.connect(db_path)
+        from services.common.database import get_sync_connection
+        conn = get_sync_connection()
         conn.execute(
             "UPDATE stock_positions SET highest_price = ? WHERE account_id = ? AND stock_code = ?",
             (highest_price, account_id, stock_code)
         )
         conn.commit()
-        conn.close()
     except Exception as e:
         print(f"  更新最高价失败 {stock_code}: {e}")
 

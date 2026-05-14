@@ -290,11 +290,10 @@ class StrategyEngine:
 
         # 注入同步数据库访问函数（只读，替代直接 import sqlite3）
         def _query_db(sql: str, params: tuple = None):
-            """同步执行 SQL 查询（只读）。返回 List[Dict]（SELECT）或 int（影响行数）。"""
-            import sqlite3
-            from services.common.database import DB_PATH
-            conn = sqlite3.connect(str(DB_PATH))
-            conn.row_factory = sqlite3.Row
+            """同步执行 SQL 查询。返回 List[Dict]（SELECT）或 int（影响行数）。
+            使用 get_sync_connection 确保 WAL mode + busy_timeout 配置一致。"""
+            from services.common.database import get_sync_connection
+            conn = get_sync_connection()
             cursor = conn.cursor()
             try:
                 if params:
@@ -303,15 +302,12 @@ class StrategyEngine:
                     cursor.execute(sql)
                 if sql.strip().upper().startswith("SELECT"):
                     rows = [dict(r) for r in cursor.fetchall()]
-                    conn.close()
                     return rows
                 else:
                     conn.commit()
-                    count = cursor.rowcount
-                    conn.close()
-                    return count
+                    return cursor.rowcount
             except Exception:
-                conn.close()
+                conn.rollback()
                 raise
 
         env["query_db"] = _query_db

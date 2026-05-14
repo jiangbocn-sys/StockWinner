@@ -223,13 +223,12 @@ class StrategyGenerator:
     def _load_config_from_db(self, account_id: str) -> Dict[str, Any]:
         """从数据库加载用户的 LLM 配置"""
         try:
-            conn = sqlite3.connect(str(DB_PATH))
-            conn.row_factory = sqlite3.Row
+            from services.common.database import get_sync_connection
+            conn = get_sync_connection()
             row = conn.execute(
                 "SELECT * FROM llm_config WHERE account_id = ? AND enabled = 1",
                 (account_id,)
             ).fetchone()
-            conn.close()
             if row:
                 return dict(row)
         except Exception:

@@ -131,6 +131,74 @@ from services.common.timezone import get_china_time, CHINA_TZ
 - 数据库统一存中国时间的 naive ISO string（不带 `+08:00`）
 - 前端收到 naive string 后应附加 `+08:00` 再解析
 
+## 数据访问架构（强制遵守）
+
+### 分层架构（自上而下，禁止跨层/逆向调用）
+
+```
+┌─────────────────────────────────────────────────┐
+│ UI 层 (services/ui/*.py)                        │
+│ 职责：接收请求、参数校验、路由                    │
+│ 禁止：直接调用 SDK / 直接连数据库取行情数据       │
+├─────────────────────────────────────────────────┤
+│ 业务层 (services/trading/execution_service.py)   │
+│         services/monitoring/service.py           │
+│         services/screening/*.py                  │
+│ 职责：业务逻辑、计算、状态管理                    │
+│ 允许：调用 gateway / database / SDKManager        │
+├─────────────────────────────────────────────────┤
+│ 网关层 (services/trading/gateway.py)             │
+│ 职责：交易相关 SDK 调用的统一抽象层               │
+│ 必须：内部通过 SDKManager 调用 SDK               │
+├─────────────────────────────────────────────────┤
+│ 数据层 (services/common/sdk_manager.py)          │
+│         services/common/database.py              │
+│         services/common/sdk_connection_manager.py│
+│ 职责：SDK 实例缓存、连接管理、并发串行化          │
+│         TGW 连接数限制的唯一管理者               │
+├─────────────────────────────────────────────────┤
+│ SDK 层 (AmazingData)                             │
+│ TGW TCP 连接（单用户单连接限制）                  │
+└─────────────────────────────────────────────────┘
+```
+
+### 强制规则
+
+**规则 1：所有实时行情/K 线/选股数据查询必须走 gateway → SDKManager**
+- UI 端点调用 `gateway.get_market_data()` / `gateway.get_kline_data()`
+- 禁止在 UI 层或业务层直接 `from AmazingData import xxx` 或创建 SDK 实例
+- 禁止用本地 DB 缓存替代 SDK 实时数据（交易相关场景）
+- SDK 连接失败时必须提示用户"券商服务器连接失败"，不得静默降级
+
+**规则 2：所有数据库访问必须走 DatabaseManager 单例**
+```python
+from services.common.database import get_db_manager
+db = get_db_manager()
+await db.fetchall("SELECT ...")
+```
+- 禁止直接 `sqlite3.connect()` / `asyncio.connect()` / `aiosqlite`
+- 禁止在多个模块中各自创建数据库连接
+
+**规则 3：SDK 调用必须走 SDKManager 单例**
+```python
+from services.common.sdk_manager import get_sdk_manager
+sdk_mgr = get_sdk_manager()
+result = sdk_mgr.query_kline(...)
+```
+- 禁止 `from AmazingData import InfoData, BaseData, MarketData` 直接创建实例
+- TGW 限制单用户单连接，绕过 SDKManager 会导致连接数超限
+
+**规则 4：网关是交易类数据的唯一出口**
+- 行情查询：`await gateway.get_market_data(stock_code)`
+- K 线查询：`await gateway.get_kline_data(stock_code, period=..., start_date=..., end_date=...)`
+- 批量行情：`await gateway.get_batch_market_data(codes)`
+- Gateway 内部自动走 SDKManager，无需调用方关心连接管理
+
+**规则 5：股票格式统一**
+- 内部统一使用 `600000.SH` / `000001.SZ` 格式
+- 使用 `services/common/stock_code.py` 的 `normalize_stock_code()` 规范化
+- 禁止各模块各自实现后缀判断逻辑
+
 ## SDK Integration (AmazingData/银河证券)
 
 The system integrates with Galaxy Securities SDK for real-time market data:

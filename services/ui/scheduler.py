@@ -148,7 +148,7 @@ async def get_data_status() -> Dict:
 
     db_path = Path(__file__).parent.parent.parent / "data" / "kline.db"
 
-    conn = sqlite3.connect(str(db_path))
+    conn = sqlite3.connect(str(db_path), timeout=30)
     cursor = conn.cursor()
 
     status = {}

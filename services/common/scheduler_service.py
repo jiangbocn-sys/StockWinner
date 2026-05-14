@@ -1307,13 +1307,18 @@ class SchedulerService:
                 # 注：当日实时行情已在策略执行前预取，直接传入 _pre_fetched_realtime_quotes
                 def _get_kline_spliced(stock_codes: list, lookback: int = 100):
                     """本地历史 + 当日实时行情拼接（仅当日走 TGW）"""
-                    from services.data.local_data_service import get_local_data_service
+                    from services.data.local_data_service import get_local_data_service, is_trading_hours
                     lds = get_local_data_service()
-                    # 使用预取的实时行情
+                    # 检查实时行情是否可用
                     realtime_quotes = {}
                     for code in stock_codes:
                         if code in _pre_fetched_realtime_quotes:
                             realtime_quotes[code] = _pre_fetched_realtime_quotes[code]
+                    if is_trading_hours() and not realtime_quotes:
+                        raise RuntimeError(
+                            f"盘中时段需要实时行情数据，但预取失败（{len(stock_codes)} 只股票均无实时数据）。"
+                            "请检查 SDK 连接状态或 TGW 连接数，确认数据源正常后再执行策略。"
+                        )
                     return lds.get_kline_spliced(stock_codes, lookback=lookback, realtime_quotes=realtime_quotes if realtime_quotes else None)
 
                 # ⑤b 智能 K 线获取：根据交易时段自动选择数据源
@@ -1333,7 +1338,12 @@ class SchedulerService:
                     else:
                         # 盘中：使用预取的实时行情
                         realtime_quotes = {code: data for code, data in _pre_fetched_realtime_quotes.items() if code in stock_codes}
-                        raw = lds.get_kline_spliced(stock_codes, lookback=lookback, realtime_quotes=realtime_quotes if realtime_quotes else None)
+                        if not realtime_quotes:
+                            raise RuntimeError(
+                                f"盘中时段需要实时行情数据，但预取失败（{len(stock_codes)} 只股票均无实时数据）。"
+                                "请检查 SDK 连接状态或 TGW 连接数，确认数据源正常后再执行策略。"
+                            )
+                        raw = lds.get_kline_spliced(stock_codes, lookback=lookback, realtime_quotes=realtime_quotes)
 
                     # DataFrame → List[Dict] 转换，兼容策略代码
                     result = {}

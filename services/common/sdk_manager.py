@@ -17,7 +17,6 @@ SDK 登录管理器
 
 from typing import Optional, Dict
 import pandas as pd
-import asyncio
 
 
 class SDKManager:
@@ -83,6 +82,7 @@ class SDKManager:
         """同步获取连接令牌
 
         先确保连接可用，再通过连接管理器 acquire 排队。
+        acquire 现在是同步方法（threading.Lock），无需事件循环。
         """
         # 先确保连接可用
         self._ensure_connected()
@@ -97,34 +97,7 @@ class SDKManager:
         ttype = TaskType.DOWNLOAD if task_type == "download" else (
             TaskType.SCREENING if task_type == "screening" else TaskType.QUERY
         )
-        # 需要在事件循环中执行
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            # 无运行中的事件循环，在新事件循环中执行
-            loop = asyncio.new_event_loop()
-            try:
-                token = loop.run_until_complete(conn_mgr.acquire(task_type=ttype))
-            finally:
-                loop.close()
-            return token
-
-        # 已有事件循环，创建新循环避免冲突
-        import concurrent.futures
-        result_container = [None]
-
-        def _acquire_in_new_loop():
-            new_loop = asyncio.new_event_loop()
-            try:
-                result_container[0] = new_loop.run_until_complete(conn_mgr.acquire(task_type=ttype))
-            finally:
-                new_loop.close()
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(_acquire_in_new_loop)
-            future.result()
-
-        return result_container[0]
+        return conn_mgr.acquire(task_type=ttype)
 
     def _release_sync(self, token):
         """同步释放连接令牌"""
@@ -175,6 +148,8 @@ class SDKManager:
         """获取股本结构数据（自动排队）"""
         info = self.get_info()
         token = self._acquire_sync("download")
+        if token is None:
+            return pd.DataFrame()
         try:
             result = info.get_equity_structure(stock_codes, is_local=False)
             if isinstance(result, dict):
@@ -194,6 +169,8 @@ class SDKManager:
         """获取利润表数据（自动排队）"""
         info = self.get_info()
         token = self._acquire_sync("download")
+        if token is None:
+            return pd.DataFrame()
         try:
             result = info.get_income(stock_codes, is_local=False)
             if isinstance(result, dict):
@@ -213,6 +190,8 @@ class SDKManager:
         """获取资产负债表数据（自动排队）"""
         info = self.get_info()
         token = self._acquire_sync("download")
+        if token is None:
+            return pd.DataFrame()
         try:
             result = info.get_balance_sheet(stock_codes, is_local=False)
             if isinstance(result, dict):
@@ -232,6 +211,8 @@ class SDKManager:
         """获取现金流量表数据（自动排队）"""
         info = self.get_info()
         token = self._acquire_sync("download")
+        if token is None:
+            return pd.DataFrame()
         try:
             result = info.get_cash_flow(stock_codes, is_local=False)
             if isinstance(result, dict):
@@ -251,6 +232,8 @@ class SDKManager:
         """获取行业分类/行业指数基本信息（申万行业分类）（自动排队）"""
         info = self.get_info()
         token = self._acquire_sync("download")
+        if token is None:
+            return pd.DataFrame()
         try:
             result = info.get_industry_base_info(is_local=False)
             if isinstance(result, dict):
@@ -269,6 +252,8 @@ class SDKManager:
     def get_code_info(self, security_type: str = 'EXTRA_STOCK_A') -> pd.DataFrame:
         """获取每日最新证券信息（自动排队）"""
         token = self._acquire_sync("query")
+        if token is None:
+            return pd.DataFrame()
         try:
             base_data = self.get_base_data()
             result = base_data.get_code_info(security_type=security_type)
@@ -284,6 +269,8 @@ class SDKManager:
     def get_code_list(self, security_type: str = 'EXTRA_STOCK_A') -> list:
         """获取每日最新代码表（自动排队）"""
         token = self._acquire_sync("query")
+        if token is None:
+            return []
         try:
             base_data = self.get_base_data()
             result = base_data.get_code_list(security_type=security_type)
@@ -323,6 +310,8 @@ class SDKManager:
         """
         md = self.get_market_data()
         token = self._acquire_sync(task_type)
+        if token is None:
+            return {}
         try:
             count = len(code_list) if isinstance(code_list, list) else 1
             if task_type == "query":
@@ -363,6 +352,8 @@ class SDKManager:
         """查询快照数据（自动排队）"""
         md = self.get_market_data()
         token = self._acquire_sync("query")
+        if token is None:
+            return {}
         try:
             result = self._call_with_timeout(
                 md.query_snapshot,
@@ -385,6 +376,8 @@ class SDKManager:
     def get_industry_daily(self, code_list: list) -> Dict[str, pd.DataFrame]:
         """获取行业指数日行情数据（自动排队）"""
         token = self._acquire_sync("download")
+        if token is None:
+            return {}
         try:
             info = self.get_info()
             result = info.get_industry_daily(code_list=code_list, is_local=False)
@@ -401,6 +394,8 @@ class SDKManager:
         """获取业绩预告（自动排队）"""
         info = self.get_info()
         token = self._acquire_sync("download")
+        if token is None:
+            return pd.DataFrame()
         try:
             result = info.get_profit_notice(code_list=stock_codes, is_local=False)
             if isinstance(result, dict):
@@ -420,6 +415,8 @@ class SDKManager:
         """获取业绩快报（自动排队）"""
         info = self.get_info()
         token = self._acquire_sync("download")
+        if token is None:
+            return pd.DataFrame()
         try:
             result = info.get_profit_express(code_list=stock_codes, is_local=False)
             if isinstance(result, dict):
@@ -439,6 +436,8 @@ class SDKManager:
         """获取龙虎榜数据（自动排队）"""
         info = self.get_info()
         token = self._acquire_sync("download")
+        if token is None:
+            return pd.DataFrame()
         try:
             result = info.get_long_hu_bang(code_list=stock_codes, begin_date=begin_date, end_date=end_date, is_local=False)
             if isinstance(result, pd.DataFrame):
@@ -454,6 +453,8 @@ class SDKManager:
         """获取融资融券汇总（自动排队，无需 stock_codes）"""
         info = self.get_info()
         token = self._acquire_sync("download")
+        if token is None:
+            return pd.DataFrame()
         try:
             result = info.get_margin_summary(begin_date=begin_date, end_date=end_date, is_local=False)
             if isinstance(result, pd.DataFrame):
@@ -469,6 +470,8 @@ class SDKManager:
         """获取融资融券明细（自动排队）"""
         info = self.get_info()
         token = self._acquire_sync("download")
+        if token is None:
+            return pd.DataFrame()
         try:
             result = info.get_margin_detail(code_list=stock_codes, begin_date=begin_date, end_date=end_date, is_local=False)
             if isinstance(result, dict):
@@ -488,6 +491,8 @@ class SDKManager:
         """获取大宗交易数据（自动排队）"""
         info = self.get_info()
         token = self._acquire_sync("download")
+        if token is None:
+            return pd.DataFrame()
         try:
             result = info.get_block_trading(code_list=stock_codes, begin_date=begin_date, end_date=end_date, is_local=False)
             if isinstance(result, pd.DataFrame):
@@ -503,6 +508,8 @@ class SDKManager:
         """获取国债收益率（自动排队）"""
         info = self.get_info()
         token = self._acquire_sync("download")
+        if token is None:
+            return pd.DataFrame()
         try:
             result = info.get_treasury_yield(is_local=False)
             if isinstance(result, dict):
@@ -522,6 +529,8 @@ class SDKManager:
         """获取行业成分股（自动排队）"""
         info = self.get_info()
         token = self._acquire_sync("download")
+        if token is None:
+            return pd.DataFrame()
         try:
             result = info.get_industry_constituent(code_list=index_codes, is_local=False)
             if isinstance(result, dict):
@@ -541,6 +550,8 @@ class SDKManager:
         """获取指数成分股（自动排队）"""
         info = self.get_info()
         token = self._acquire_sync("download")
+        if token is None:
+            return pd.DataFrame()
         try:
             result = info.get_index_constituent(code_list=index_codes, is_local=False)
             if isinstance(result, dict):

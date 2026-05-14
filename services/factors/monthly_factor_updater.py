@@ -102,7 +102,7 @@ class MonthlyFactorUpdater:
 
     def _get_connection(self) -> sqlite3.Connection:
         """获取数据库连接"""
-        conn = sqlite3.connect(str(self.db_path))
+        conn = sqlite3.connect(str(self.db_path), timeout=60)
         conn.row_factory = sqlite3.Row
         return conn
 
@@ -268,11 +268,10 @@ class MonthlyFactorUpdater:
     def _load_sw_classification(self, stock_codes: List[str]) -> Dict[str, Dict[str, str]]:
         """从 stock_base_info 表加载申万行业分类"""
         try:
-            conn = sqlite3.connect(str(self.winner_db_path))
-            conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
+            from services.common.database import get_sync_connection
+            conn = get_sync_connection()
             placeholders = ','.join(['?'] * len(stock_codes))
-            cursor.execute(f"""
+            cursor = conn.execute(f"""
                 SELECT stock_code, sw_level1, sw_level2, sw_level3
                 FROM stock_base_info
                 WHERE stock_code IN ({placeholders})
@@ -284,7 +283,6 @@ class MonthlyFactorUpdater:
                     'sw_level2': row['sw_level2'],
                     'sw_level3': row['sw_level3'],
                 }
-            conn.close()
             return result
         except Exception:
             return {}

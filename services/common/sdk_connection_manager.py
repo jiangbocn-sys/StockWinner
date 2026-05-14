@@ -2,10 +2,19 @@
 SDK 连接生命周期管理器
 
 统一管理 AmazingData SDK TGW 连接的完整生命周期：
-1. 连接状态检测 — 实时感知 TGW 是否可用
-2. 自动重连 — 连接断开时自动发起登录
-3. 并发排队 — 同一时刻只有一个任务持有连接
-4. 超时控制 — 等待超时有明确反馈
+1. 单一连接管理 — TGW 只允许一个 TCP 连接，由 login() 创建
+2. 连接状态检测 — 不创建新实例，通过已有实例验证
+3. 自动重连 — 连接断开时自动发起登录
+4. 并发排队 — threading.Lock 跨线程串行化所有 SDK 调用
+5. 超时控制 — 等待超时有明确反馈
+
+架构设计：
+- TGW 服务端限制每个用户只允许一个活跃 TCP 连接
+- SDK 的 AmazingData.login() 创建这个连接
+- InfoData/BaseData/MarketData 共享此连接
+- 所有 SDK 数据调用必须串行化（不能并发）
+- SDK 调用是同步阻塞的，可能在任何线程中执行
+- 因此使用 threading.Lock 做串行化（跨线程工作）
 
 调用方（中间层）透明调用，无需关心底层连接状态。
 
@@ -14,7 +23,6 @@ SDK 连接生命周期管理器
 - download/screening：普通优先级，分批次释放
 """
 
-import asyncio
 import threading
 from datetime import datetime
 from typing import Optional, Dict, Any, List
@@ -22,6 +30,7 @@ from enum import Enum
 from dataclasses import dataclass
 import uuid
 import time
+import concurrent.futures
 
 from services.common.timezone import get_china_time
 
@@ -34,10 +43,10 @@ _SDK_PORT = int(os.environ.get("SDK_PORT", "8600"))
 
 
 class TaskType(Enum):
-    """任务类型（决定优先级和超时时间）"""
+    """任务类型（决定超时时间）"""
     QUERY = "query"          # 短查询，最高优先级，默认超时15秒
-    DOWNLOAD = "download"    # 下载数据，批次间释放
-    SCREENING = "screening"  # 选股服务，批次间释放
+    DOWNLOAD = "download"    # 下载数据，默认超时300秒
+    SCREENING = "screening"  # 选股服务，默认超时60秒
 
 
 class ConnectionState(Enum):
@@ -64,10 +73,6 @@ class ConnectionToken:
             self._released = True
             self.manager._release_token(self)
 
-    async def release_async(self):
-        """异步释放"""
-        self.release()
-
     def __enter__(self):
         return self
 
@@ -81,7 +86,7 @@ class SDKConnectionManager:
 
     职责：
     1. TGW 连接状态管理（检测/重连/状态报告）
-    2. 并发排队（同一时刻只允许一个任务使用连接）
+    2. 并发串行化（threading.Lock，所有 SDK 调用排队）
     3. 超时控制（等待超过阈值返回明确错误）
 
     使用：
@@ -103,8 +108,8 @@ class SDKConnectionManager:
         if hasattr(self, '_initialized') and self._initialized:
             return
 
-        # asyncio.Lock 延迟初始化
-        self._async_lock: Optional[asyncio.Lock] = None
+        # 串行化锁（threading，跨线程工作）
+        self._serial_lock = threading.Lock()
 
         # 连接状态
         self._state: ConnectionState = ConnectionState.DISCONNECTED
@@ -118,7 +123,7 @@ class SDKConnectionManager:
         # 当前持有者信息
         self._current_holder: Optional[Dict[str, Any]] = None
 
-        # 等待队列
+        # 等待队列（受 _state_lock 保护）
         self._waiting_count = 0
         self._waiting_tasks: List[Dict[str, Any]] = []
 
@@ -132,21 +137,6 @@ class SDKConnectionManager:
         }
 
         self._initialized = True
-
-    def _get_lock(self) -> asyncio.Lock:
-        """获取当前事件循环的Lock（延迟初始化）"""
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            return None
-
-        if self._async_lock is None:
-            self._async_lock = asyncio.Lock()
-        elif hasattr(self._async_lock, '_loop'):
-            if self._async_lock._loop != loop:
-                self._async_lock = asyncio.Lock()
-
-        return self._async_lock
 
     # ================================================================
     # 连接状态管理
@@ -175,11 +165,34 @@ class SDKConnectionManager:
                 self._last_error_time = get_china_time().strftime("%Y-%m-%d %H:%M:%S")
 
     def _sdk_login(self) -> bool:
-        """发起 SDK 登录（同步阻塞）"""
+        """发起 SDK 登录（同步阻塞，带超时保护）"""
         try:
             from AmazingData import login
-            result = login(_SDK_USERNAME, _SDK_PASSWORD, _SDK_HOST, _SDK_PORT)
-            if result:
+
+            result_container: List[Optional[bool]] = [None]
+            error_container: List[Optional[Exception]] = [None]
+
+            def _do_login():
+                try:
+                    result_container[0] = login(_SDK_USERNAME, _SDK_PASSWORD, _SDK_HOST, _SDK_PORT)
+                except Exception as e:
+                    error_container[0] = e
+
+            t = threading.Thread(target=_do_login, daemon=True)
+            t.start()
+            t.join(timeout=30.0)
+
+            if t.is_alive():
+                print("[SDK] 登录超时（>30s）")
+                self._set_state(ConnectionState.FAILED, "登录超时")
+                return False
+
+            if error_container[0]:
+                print(f"[SDK] 登录异常：{error_container[0]}")
+                self._set_state(ConnectionState.FAILED, str(error_container[0]))
+                return False
+
+            if result_container[0]:
                 print("[SDK] 登录成功")
                 return True
             else:
@@ -190,16 +203,25 @@ class SDKConnectionManager:
             raise
 
     def _test_connection(self) -> bool:
-        """测试当前 SDK 连接是否有效"""
+        """
+        测试当前 SDK 连接是否有效
+
+        不创建新实例，使用 SDKManager 缓存的实例。
+        避免额外的 InfoData() 创建导致连接数增加。
+        """
         try:
-            from AmazingData import InfoData
-            info = InfoData()
-            # 轻量查询：获取一个股票的证券信息，超时快速返回
-            import concurrent.futures
+            from services.common.sdk_manager import get_sdk_manager
+            sdk_mgr = get_sdk_manager()
+
+            # 状态标记为已连接，先检查缓存实例是否存在
+            if sdk_mgr._info_instance is None:
+                # 实例尚未创建，认为需要重新初始化
+                return False
+
+            info = sdk_mgr._info_instance
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
                 future = executor.submit(info.get_income, ["600000.SH"], is_local=False)
                 result = future.result(timeout=5.0)
-            # 能返回结果（即使是空）说明连接有效
             return result is not None
         except Exception:
             return False
@@ -210,9 +232,11 @@ class SDKConnectionManager:
 
         流程：
         1. 检查当前状态
-        2. 如已连接：测试连接有效性，断开则重连
+        2. 如已连接：直接返回（不做主动探测，避免额外 SDK 调用干扰正常任务）
         3. 如未连接：发起登录
         4. 如连接失败：返回 False，附带错误信息
+
+        连接有效性检测延迟到实际 SDK 调用失败时再进行（在 acquire 超时后）。
 
         Returns:
             True: 连接可用
@@ -221,11 +245,8 @@ class SDKConnectionManager:
         current_state = self.get_state()
 
         if current_state == ConnectionState.CONNECTED:
-            # 已连接，但需验证有效性（TGW可能已静默断开）
-            if self._test_connection():
-                return True
-            # 连接已失效，需要重连
-            print("[SDK] TGW 连接已断开，尝试重连...")
+            # 已连接：直接信任，不做主动探测
+            return True
 
         # 需要连接/重连
         with self._state_lock:
@@ -262,20 +283,20 @@ class SDKConnectionManager:
             self._current_holder = None
 
     # ================================================================
-    # 连接令牌管理
+    # 连接令牌管理（threading.Lock，跨线程串行化）
     # ================================================================
 
-    async def acquire(
+    def acquire(
         self,
         task_type: TaskType = TaskType.QUERY,
         task_id: Optional[str] = None,
         timeout: float = None
-    ) -> ConnectionToken:
+    ) -> Optional[ConnectionToken]:
         """
-        获取 SDK 连接令牌
+        获取 SDK 连接令牌（同步，跨线程安全）
 
-        注意：调用前应先调用 ensure_connected() 确保连接可用。
-        此方法只负责并发排队。
+        调用前应先调用 ensure_connected() 确保连接可用。
+        此方法只负责并发排队串行化。
 
         Args:
             task_type: 任务类型
@@ -283,15 +304,11 @@ class SDKConnectionManager:
             timeout: 等待超时时间（秒）
 
         Returns:
-            ConnectionToken: 连接令牌
-
-        Raises:
-            asyncio.TimeoutError: 等待超时
-            RuntimeError: 连接不可用
+            ConnectionToken: 连接令牌，超时或不可用返回 None
         """
         # 检查连接状态
         if self.get_state() != ConnectionState.CONNECTED:
-            raise RuntimeError(f"SDK 连接不可用: {self.get_state().value}")
+            return None
 
         if task_id is None:
             task_id = f"{task_type.value}_{uuid.uuid4().hex[:8]}"
@@ -304,25 +321,36 @@ class SDKConnectionManager:
             else:
                 timeout = 60.0
 
-        wait_start = get_china_time()
+        wait_start = time.monotonic()
         wait_info = {
             "task_id": task_id,
             "task_type": task_type.value,
-            "wait_start": wait_start
+            "wait_start": get_china_time()
         }
-        self._waiting_count += 1
-        self._waiting_tasks.append(wait_info)
+        with self._state_lock:
+            self._waiting_count += 1
+            self._waiting_tasks.append(wait_info)
 
         try:
-            lock = self._get_lock()
-            if lock is None:
-                raise RuntimeError("无法获取asyncio.Lock：没有运行中的事件循环")
+            # threading.Lock.acquire 支持 timeout，跨线程生效
+            acquired = self._serial_lock.acquire(timeout=timeout)
 
-            async with asyncio.timeout(timeout):
-                await lock.acquire()
+            elapsed = time.monotonic() - wait_start
+            if elapsed > self._stats["max_wait_seconds"]:
+                self._stats["max_wait_seconds"] = elapsed
 
-            self._waiting_count -= 1
-            self._waiting_tasks.remove(wait_info)
+            if not acquired:
+                with self._state_lock:
+                    self._waiting_count -= 1
+                    if wait_info in self._waiting_tasks:
+                        self._waiting_tasks.remove(wait_info)
+                self._stats["total_timeout_fails"] += 1
+                return None
+
+            with self._state_lock:
+                self._waiting_count -= 1
+                if wait_info in self._waiting_tasks:
+                    self._waiting_tasks.remove(wait_info)
 
             self._current_holder = {
                 "task_id": task_id,
@@ -331,57 +359,44 @@ class SDKConnectionManager:
             }
             self._stats["total_acquires"] += 1
 
-            wait_seconds = (get_china_time() - wait_start).total_seconds()
-            if wait_seconds > self._stats["max_wait_seconds"]:
-                self._stats["max_wait_seconds"] = wait_seconds
-
             return ConnectionToken(task_id, task_type, self)
 
-        except asyncio.TimeoutError:
-            self._waiting_count -= 1
-            if wait_info in self._waiting_tasks:
-                self._waiting_tasks.remove(wait_info)
+        except Exception:
+            with self._state_lock:
+                self._waiting_count -= 1
+                if wait_info in self._waiting_tasks:
+                    self._waiting_tasks.remove(wait_info)
             self._stats["total_timeout_fails"] += 1
-            raise
+            return None
 
     def _release_token(self, token: ConnectionToken):
         """释放连接令牌（内部方法）"""
-        if self._current_holder and self._current_holder["task_id"] == token.task_id:
-            self._current_holder = None
+        with self._state_lock:
+            if self._current_holder and self._current_holder["task_id"] == token.task_id:
+                self._current_holder = None
 
         self._stats["total_releases"] += 1
 
         try:
-            lock = self._get_lock()
-            if lock:
-                lock.release()
+            self._serial_lock.release()
         except RuntimeError:
-            pass
+            pass  # lock already released
 
     def get_status(self) -> Dict[str, Any]:
-        """
-        获取连接状态
-
-        Returns:
-            {
-                connection_state: "connected" | "disconnected" | "connecting" | "failed",
-                connection_error: {message, time, consecutive_failures},
-                status: "idle" | "busy" | "queued",
-                current_holder: {...} | None,
-                waiting_count: int,
-                waiting_tasks: [...],
-                stats: {...}
-            }
-        """
+        """获取连接状态"""
         conn_state = self.get_state()
         error_info = self.get_error_info()
 
-        if self._current_holder is None and self._waiting_count == 0:
-            holder_status = "idle"
-        elif self._current_holder:
-            holder_status = "busy"
-        else:
-            holder_status = "queued"
+        with self._state_lock:
+            if self._current_holder is None and self._waiting_count == 0:
+                holder_status = "idle"
+            elif self._current_holder:
+                holder_status = "busy"
+            else:
+                holder_status = "queued"
+
+            waiting_count = self._waiting_count
+            waiting_tasks = list(self._waiting_tasks)
 
         holder_info = None
         if self._current_holder:
@@ -393,7 +408,7 @@ class SDKConnectionManager:
             }
 
         waiting_list = []
-        for w in self._waiting_tasks:
+        for w in waiting_tasks[:5]:
             wait_seconds = (get_china_time() - w["wait_start"]).total_seconds()
             waiting_list.append({
                 "task_id": w["task_id"],
@@ -406,15 +421,14 @@ class SDKConnectionManager:
             "connection_error": error_info,
             "status": holder_status,
             "current_holder": holder_info,
-            "waiting_count": self._waiting_count,
-            "waiting_tasks": waiting_list[:5],
+            "waiting_count": waiting_count,
+            "waiting_tasks": waiting_list,
             "stats": self._stats
         }
 
     def is_busy(self) -> bool:
         """检查连接是否被占用"""
-        lock = self._get_lock()
-        return lock.locked() if lock else False
+        return self._current_holder is not None
 
     @classmethod
     def get_instance(cls) -> 'SDKConnectionManager':

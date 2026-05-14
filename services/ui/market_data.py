@@ -32,7 +32,7 @@ async def test_query_kline_batch(
 
     # 获取股票代码
     kline_db = Path(__file__).parent.parent.parent / "data" / "kline.db"
-    conn = sqlite3.connect(str(kline_db))
+    conn = sqlite3.connect(str(kline_db), timeout=30)
     c = conn.cursor()
     c.execute(
         "SELECT DISTINCT stock_code FROM kline_data WHERE stock_code NOT LIKE '%.BJ' LIMIT ?",
@@ -379,3 +379,65 @@ async def get_latest_kline(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"获取 K 线数据失败：{str(e)}")
+
+
+@router.get("/api/v1/ui/{account_id}/market/stock-info/{stock_code}")
+async def get_stock_info(
+    account_id: str = Path(...),
+    stock_code: str = Path(..., description="股票代码（带后缀）"),
+):
+    """从本地 kline.db 查询股票名称和最新价格"""
+    import sqlite3
+    db = get_db_manager()
+    account = await db.fetchone("SELECT 1 FROM accounts WHERE account_id = ? AND is_active = 1", (account_id,))
+    if not account:
+        raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
+
+    kline_path = '/home/bobo/StockWinner/data/kline.db'
+    try:
+        conn = sqlite3.connect(kline_path, timeout=10)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        # 优先从 monthly_factors 查（有 stock_name 和最新数据）
+        cursor.execute(
+            "SELECT stock_name, total_market_cap FROM stock_monthly_factors WHERE stock_code = ? LIMIT 1",
+            (stock_code,)
+        )
+        row = cursor.fetchone()
+        if row and row['stock_name']:
+            # 再查最新K线价格
+            cursor.execute(
+                "SELECT close, trade_date FROM kline_data WHERE stock_code = ? ORDER BY trade_date DESC LIMIT 1",
+                (stock_code,)
+            )
+            kline_row = cursor.fetchone()
+            conn.close()
+            result = {
+                "success": True,
+                "stock_code": stock_code,
+                "stock_name": row['stock_name'],
+            }
+            if kline_row:
+                result["latest_price"] = kline_row['close']
+                result["latest_date"] = kline_row['trade_date']
+            return result
+
+        # 备用：从 kline_data 查
+        cursor.execute(
+            "SELECT DISTINCT stock_name, close, trade_date FROM kline_data WHERE stock_code = ? ORDER BY trade_date DESC LIMIT 1",
+            (stock_code,)
+        )
+        row = cursor.fetchone()
+        conn.close()
+        if row and row['stock_name']:
+            return {
+                "success": True,
+                "stock_code": stock_code,
+                "stock_name": row['stock_name'],
+                "latest_price": row['close'],
+                "latest_date": row['trade_date'],
+            }
+    except Exception as e:
+        pass
+
+    return {"success": False, "message": "未找到股票信息"}

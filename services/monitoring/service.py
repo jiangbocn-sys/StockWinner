@@ -119,10 +119,13 @@ class TradingMonitor:
         # === 第二部分：基于 watchlist 的传统监控（止损止盈）===
         await self._monitor_watchlist(account_id)
 
-        # === 第三部分：刷新持仓盈亏 ===
+        # === 第三部分：扫描手动 pending 信号并执行 ===
+        await self._scan_pending_signals(account_id)
+
+        # === 第四部分：刷新持仓盈亏 ===
         await self._refresh_positions_pnl(account_id)
 
-        # === 第四部分：更新 watchlist 现价 ===
+        # === 第五部分：更新 watchlist 现价 ===
         await self._update_watchlist_current_price(account_id)
 
     async def _evaluate_trading_strategies(self, account_id: str):
@@ -953,6 +956,78 @@ class TradingMonitor:
             await self._update_signal_status(
                 account_id, stock_code, 'cancelled', 0
             )
+
+    async def _scan_pending_signals(self, account_id: str):
+        """扫描手动创建的 pending 信号并执行
+
+        流程：
+        1. 查询 trading_signals 中 status=pending 的记录
+        2. 获取实时行情
+        3. 执行交易（买入/卖出）
+        4. 更新信号状态
+
+        注意：此方法只处理无 strategy_id 的手动信号，
+        有 strategy_id 的信号由 _execute_buy_signal / _execute_sell_signal 即时执行。
+        """
+        db = get_db_manager()
+        signals = await db.fetchall(
+            "SELECT * FROM trading_signals WHERE account_id = ? AND status = 'pending' AND strategy_id IS NULL ORDER BY created_at ASC",
+            (account_id,)
+        )
+        if not signals:
+            return
+
+        # 批量获取行情
+        stock_codes = [s['stock_code'] for s in signals]
+        try:
+            from services.trading.gateway import get_gateway
+            gateway = await get_gateway()
+            market_data = await gateway.get_batch_market_data(stock_codes)
+        except Exception as e:
+            print(f"[Monitor] 批量获取行情失败: {e}")
+            return
+
+        for signal in signals:
+            stock_code = signal['stock_code']
+            signal_type = signal['signal_type']
+            target_price = signal.get('price', 0)
+            quantity = signal.get('target_quantity', 0)
+
+            md = market_data.get(stock_code)
+            if not md or not md.current_price:
+                print(f"[Monitor] 无法获取 {stock_code} 行情，跳过信号 {signal['id']}")
+                continue
+
+            current_price = md.current_price
+            print(f"[Monitor] 执行手动 pending 信号: {stock_code} {signal_type}, "
+                  f"委托价={target_price:.2f}, 现价={current_price:.2f}, 数量={quantity}")
+
+            if signal_type == 'buy':
+                await self._execute_buy_signal(
+                    account_id,
+                    {"stock_code": stock_code, "stock_name": signal.get('stock_name', stock_code)},
+                    current_price,
+                    quantity,
+                    trigger_source="manual",
+                )
+            elif signal_type in ('sell_stop_loss', 'sell_take_profit', 'sell'):
+                await self._execute_sell_signal(
+                    account_id,
+                    {"stock_code": stock_code, "stock_name": signal.get('stock_name', stock_code)},
+                    current_price,
+                    signal_type,
+                    quantity,
+                    trigger_source="manual",
+                )
+            else:
+                # 未知信号类型，标记为 cancelled
+                await db.update(
+                    "trading_signals",
+                    {"status": "cancelled", "executed_at": format_china_time()},
+                    "id = ?",
+                    (signal['id'],)
+                )
+                print(f"[Monitor] 未知信号类型 {signal_type}，取消信号 {signal['id']}")
 
     async def _create_pending_signal(
         self,

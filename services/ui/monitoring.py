@@ -2,7 +2,7 @@
 交易监控 API — 只读状态查询（系统服务，前端不可启停）
 """
 
-from fastapi import APIRouter, Path, Query, Body
+from fastapi import APIRouter, HTTPException, Path, Query, Body
 from typing import List, Optional
 from datetime import datetime
 from services.common.database import get_db_manager
@@ -64,6 +64,32 @@ async def get_signals(
         f"SELECT * FROM trading_signals WHERE {where} ORDER BY created_at DESC LIMIT 100",
         params
     )
+
+    # 批量查询现价（从 kline.db）
+    stock_codes = list(set(s['stock_code'] for s in signals))
+    price_map = {}
+    if stock_codes:
+        import sqlite3
+        kline_path = '/home/bobo/StockWinner/data/kline.db'
+        try:
+            conn = sqlite3.connect(kline_path, timeout=5)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            placeholders = ','.join(['?' for _ in stock_codes])
+            cursor.execute(
+                f"SELECT stock_code, close FROM kline_data WHERE stock_code IN ({placeholders}) ORDER BY trade_date DESC",
+                stock_codes
+            )
+            for row in cursor.fetchall():
+                if row['stock_code'] not in price_map:
+                    price_map[row['stock_code']] = row['close']
+            conn.close()
+        except Exception:
+            pass
+
+    # 附加现价字段
+    for s in signals:
+        s['current_price'] = price_map.get(s['stock_code'])
 
     return {
         "account_id": account_id,
@@ -203,7 +229,15 @@ async def cancel_signal(
     account_id: str = Path(..., description="账户 ID"),
     signal_id: int = Path(..., description="信号 ID")
 ):
-    """取消交易信号"""
+    """取消交易信号
+
+    流程：
+    1. 查询信号记录
+    2. 查询关联的 orders 记录
+    3. 接入实盘后：调用 gateway.cancel_order 撤销券商委托
+    4. 更新信号状态为 cancelled
+    5. 更新订单状态为 cancelled
+    """
     db = get_db_manager()
 
     # 从数据库验证账户
@@ -219,9 +253,34 @@ async def cancel_signal(
     if not signal:
         raise HTTPException(status_code=404, detail="信号不存在")
 
+    if signal.get("status") != "pending":
+        return {"success": False, "message": f"信号状态为 {signal.get('status')}，仅 pending 状态可取消"}
+
+    # TODO: 接入券商实盘后，需要撤销券商委托单
+    # 流程：
+    # 1. 通过 signal 信息查询近期创建的 orders 记录
+    #    signal_created_at = signal.get("created_at")
+    #    order = await db.fetchone(
+    #        "SELECT * FROM orders WHERE account_id = ? AND stock_code = ? AND trade_type = ? AND status IN ('pending', 'submitted') AND created_at >= ? ORDER BY created_at DESC LIMIT 1",
+    #        (account_id, signal["stock_code"], signal["signal_type"], signal_created_at),
+    #    )
+    # 2. 如果存在券商委托号，调用 gateway.cancel_order
+    #    if order and order.get("broker_order_id"):
+    #        from services.trading.gateway import get_gateway
+    #        gateway = await get_gateway()
+    #        cancel_result = await gateway.cancel_order(
+    #            order_no=order["broker_order_id"],
+    #            account_id=account_id,
+    #        )
+    #        if not cancel_result.get("success"):
+    #            return {"success": False, "message": f"券商撤单失败: {cancel_result.get('message')}"}
+    # 3. 更新订单状态
+    #    await db.update("orders", {"status": "cancelled", "updated_at": format_china_time()}, "id = ?", (order["id"],))
+
+    # 更新信号状态
     await db.update(
         "trading_signals",
-        {"status": "cancelled"},
+        {"status": "cancelled", "executed_at": format_china_time()},
         "id = ?",
         (signal_id,)
     )
@@ -254,3 +313,286 @@ async def clear_signals(
         "success": True,
         "message": "交易信号已清空"
     }
+
+
+# ============== 手动下单 ==============
+
+@router.post("/api/v1/ui/{account_id}/manual-order/quote")
+async def get_manual_order_quote(
+    account_id: str = Path(..., description="账户 ID"),
+    stock_code: str = Body(..., embed=True, description="股票代码（纯数字或带后缀）"),
+):
+    """从 SDK 获取实时行情（用于下单前的价格参考和名称填充）"""
+    db = get_db_manager()
+    account = await db.fetchone("SELECT * FROM accounts WHERE account_id = ? AND is_active = 1", (account_id,))
+    if not account:
+        raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
+
+    from services.common.stock_code import normalize_stock_code
+    normalized_code = normalize_stock_code(stock_code)
+
+    from services.common.sdk_connection_manager import get_connection_manager, ConnectionState
+    conn_mgr = get_connection_manager()
+    if conn_mgr.get_state() != ConnectionState.CONNECTED:
+        return {"success": False, "message": "券商服务器连接失败，请检查网络后重试"}
+
+    try:
+        from services.trading.gateway import get_gateway
+        gateway = await get_gateway()
+        market_data = await gateway.get_market_data(normalized_code)
+
+        # 返回实时行情
+        result = {
+            "success": True,
+            "stock_code": normalized_code,
+            "stock_name": market_data.stock_name,
+            "current_price": market_data.current_price,
+            "bid1": market_data.bid[0] if market_data.bid else None,
+            "ask1": market_data.ask[0] if market_data.ask else None,
+            "change_percent": market_data.change_percent,
+            "high": market_data.high,
+            "low": market_data.low,
+            "open_price": market_data.open_price,
+            "prev_close": market_data.prev_close,
+            "volume": market_data.volume,
+            "amount": market_data.amount,
+        }
+
+        # 同时返回最大可买/可卖数量参考（基于可用资金和持仓）
+        from services.trading.execution_service import get_trade_execution_service
+        execution = get_trade_execution_service(account_id)
+
+        # 买入参考：分别返回策略上限和资金上限
+        if market_data.current_price and market_data.current_price > 0:
+            account = await execution.get_account_info()
+            available_cash = account.get("available_cash", 0.0) if account else 0.0
+            fees_cfg = await execution._get_fee_config()
+            cash_reserve_pct = account.get("cash_reserve_pct", 0.20) if account else 0.20
+            max_single_pct = account.get("max_single_position_pct", 0.15) if account else 0.15
+            fee_rate = fees_cfg["commission_rate"] + fees_cfg["transfer_fee"]
+            price = market_data.current_price
+
+            # 资金上限（全部可用资金，不含单只仓位限制）
+            fund_limit = int((available_cash - fees_cfg["min_commission"]) / (price * (1 + fee_rate)))
+            fund_limit = (fund_limit // 100) * 100
+
+            # 单只仓位上限（风控限制）
+            usable_cash = available_cash * (1 - cash_reserve_pct)
+            risk_limit = int(usable_cash * max_single_pct / price) if price > 0 and max_single_pct > 0 else 0
+            risk_limit = (risk_limit // 100) * 100
+
+            result["max_buy_quantity"] = risk_limit  # 策略允许的最大可买
+            result["fund_limit_quantity"] = fund_limit  # 资金允许的最大可买（可能超出策略上限）
+
+        # 卖出参考
+        position = await execution.get_position(normalized_code)
+        if position:
+            result["position_quantity"] = position.get("quantity", 0)
+            result["available_quantity"] = position.get("available_quantity", 0)
+        else:
+            result["position_quantity"] = 0
+            result["available_quantity"] = 0
+
+        return result
+    except Exception as e:
+        return {"success": False, "message": f"获取行情失败：{str(e)}"}
+
+
+@router.post("/api/v1/ui/{account_id}/manual-order/calculate")
+async def calculate_manual_order(
+    account_id: str = Path(..., description="账户 ID"),
+    stock_code: str = Body(..., description="股票代码（纯数字或带后缀）"),
+    stock_name: Optional[str] = Body("", description="股票名称"),
+    trade_type: str = Body(..., description="buy 或 sell"),
+    price: float = Body(..., description="委托价格"),
+    quantity: int = Body(0, description="委托数量，0 表示自动计算最大可买/可卖"),
+):
+    """预计算手动订单：可买/可卖数量、总价、手续费"""
+    db = get_db_manager()
+    account = await db.fetchone("SELECT * FROM accounts WHERE account_id = ? AND is_active = 1", (account_id,))
+    if not account:
+        raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
+
+    if trade_type not in ("buy", "sell"):
+        return {"success": False, "message": "trade_type 必须为 buy 或 sell"}
+
+    if price <= 0:
+        return {"success": False, "message": "委托价格必须大于 0"}
+
+    from services.common.stock_code import normalize_stock_code
+    normalized_code = normalize_stock_code(stock_code)
+
+    # SDK 连接检查
+    from services.common.sdk_connection_manager import get_connection_manager, ConnectionState
+    conn_mgr = get_connection_manager()
+    if conn_mgr.get_state() != ConnectionState.CONNECTED:
+        return {"success": False, "message": "券商服务器连接失败，请检查网络后重试"}
+
+    from services.trading.execution_service import get_trade_execution_service
+    execution = get_trade_execution_service(account_id)
+
+    position_qty = 0
+    available_qty = 0
+
+    if trade_type == "buy":
+        qty, total_amount, fees = await execution.calculate_buy_quantity(
+            stock_code=normalized_code, price=price,
+            target_quantity=quantity if quantity > 0 else None
+        )
+        max_qty = qty
+        available_cash = await execution.get_available_cash()
+    else:
+        position = await execution.get_position(normalized_code)
+        position_qty = position.get("quantity", 0) if position else 0
+        available_qty = position.get("available_quantity", 0) if position else 0
+
+        qty, net_amount, fees = await execution.calculate_sell_quantity(
+            stock_code=normalized_code, price=price,
+            target_quantity=quantity if quantity > 0 else None
+        )
+        max_qty = available_qty
+
+    result: dict = {
+        "success": True,
+        "stock_code": normalized_code,
+        "stock_name": stock_name,
+        "trade_type": trade_type,
+        "quantity": qty,
+        "max_quantity": max_qty,
+        "total_amount": round(
+            (price * qty + fees["total_fee"]) if trade_type == "buy"
+            else (price * qty - fees["total_fee"]), 2
+        ),
+        "fees": fees,
+        "position_quantity": position_qty,
+        "available_quantity": available_qty,
+    }
+    if trade_type == "buy":
+        result["available_cash"] = round(available_cash, 2)
+
+    return result
+
+
+@router.post("/api/v1/ui/{account_id}/manual-order/submit")
+async def submit_manual_order(
+    account_id: str = Path(..., description="账户 ID"),
+    stock_code: str = Body(..., description="股票代码"),
+    stock_name: str = Body("", description="股票名称"),
+    trade_type: str = Body(..., description="buy 或 sell"),
+    price: float = Body(..., description="委托价格"),
+    quantity: int = Body(..., description="委托数量"),
+    order_type: str = Body("day", description="day=当日有效，gtc=长期有效"),
+    group_id: Optional[int] = Body(None, description="watchlist 分组 ID（买入单且不在 watchlist 中时需要）"),
+):
+    """提交手动委托订单 → 创建 trading_signals 记录，由监控程序扫描执行"""
+    db = get_db_manager()
+
+    account = await db.fetchone("SELECT * FROM accounts WHERE account_id = ? AND is_active = 1", (account_id,))
+    if not account:
+        raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
+
+    if trade_type not in ("buy", "sell"):
+        return {"success": False, "message": "trade_type 必须为 buy 或 sell"}
+
+    if price <= 0:
+        return {"success": False, "message": "委托价格必须大于 0"}
+
+    if quantity <= 0:
+        return {"success": False, "message": "委托数量必须大于 0"}
+
+    if quantity % 100 != 0:
+        return {"success": False, "message": "委托数量必须是 100 的整数倍"}
+
+    # 非交易时段检查
+    from services.trading.trading_hours import can_trade, get_trading_phase, get_phase_description
+    trading_warning = None
+    if not can_trade():
+        phase = get_trading_phase()
+        phase_desc = get_phase_description(phase)
+        if order_type == "day":
+            return {
+                "success": False,
+                "message": f"非交易时段({phase_desc})，无法提交当日单。请切换为长期有效单(GTC)或等交易时段再试。",
+            }
+        trading_warning = f"当前非交易时段({phase_desc})，长期有效单已提交，交易时段自动生效"
+
+    from services.common.stock_code import normalize_stock_code
+    normalized_code = normalize_stock_code(stock_code)
+
+    from services.common.timezone import format_china_time
+
+    # 创建 trading_signals 记录，由监控程序扫描执行
+    signal_id = await db.insert("trading_signals", {
+        "account_id": account_id,
+        "strategy_id": None,
+        "stock_code": normalized_code,
+        "stock_name": stock_name or normalized_code,
+        "signal_type": trade_type,
+        "price": price,
+        "target_quantity": quantity,
+        "status": "pending",
+        "created_at": format_china_time(),
+        "executed_at": None,
+    })
+
+    watchlist_action = "existing"  # existing / added / skipped
+
+    # 如果是买入单，同时更新/创建 watchlist 记录（供监控程序扫描）
+    if trade_type == "buy":
+        existing = await db.fetchone(
+            "SELECT id FROM watchlist WHERE account_id = ? AND stock_code = ? AND status IN ('pending', 'watching', 'bought')",
+            (account_id, normalized_code)
+        )
+        if existing:
+            # 已在 watchlist 中，更新价格和数量
+            await db.update(
+                "watchlist",
+                {"buy_price": price, "target_quantity": quantity, "status": "pending", "updated_at": format_china_time()},
+                "id = ?",
+                (existing['id'],)
+            )
+        else:
+            # 不在 watchlist 中，自动创建「手动下单」分组并加入
+            existing_group = await db.fetchone(
+                "SELECT id FROM candidate_groups WHERE account_id = ? AND name = '手动下单' AND group_type = 'manual'",
+                (account_id,)
+            )
+            if existing_group:
+                group_id = existing_group['id']
+            else:
+                group_id = await db.insert("candidate_groups", {
+                    "account_id": account_id,
+                    "name": "手动下单",
+                    "group_type": "manual",
+                    "screening_strategy_id": None,
+                })
+
+            await db.insert("watchlist", {
+                "account_id": account_id,
+                "stock_code": normalized_code,
+                "stock_name": stock_name or normalized_code,
+                "buy_price": price,
+                "target_quantity": quantity,
+                "status": "pending",
+                "source_type": "manual",
+                "group_id": group_id,
+                "created_at": format_china_time(),
+                "updated_at": format_china_time(),
+            })
+            watchlist_action = "added"
+
+    result = {
+        "success": True,
+        "message": "委托单已提交，等待监控程序执行",
+        "signal_id": signal_id,
+        "stock_code": normalized_code,
+        "price": price,
+        "quantity": quantity,
+        "trade_type": trade_type,
+        "watchlist_action": watchlist_action,
+    }
+
+    if trading_warning:
+        result["warning"] = trading_warning
+
+    return result

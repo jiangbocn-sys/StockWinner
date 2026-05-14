@@ -58,7 +58,7 @@ def get_trading_day_end_date(current_time: Optional[datetime] = None,
         try:
             from services.common.sdk_manager import get_sdk_manager
             sdk_manager = get_sdk_manager()
-            sdk_manager._ensure_login()
+            sdk_manager.connect()
 
             calendar = sdk_manager.get_calendar()
 
@@ -348,7 +348,7 @@ def download_all_kline_data_sync(
     broker_password: str = "",
     calculate_factors: bool = True,
     market_filter: Optional[List[str]] = None,
-    download_industry: bool = True
+    download_industry: bool = False
 ) -> bool:
     """同步版本的下载函数，用于后台任务"""
     async def _async_download():

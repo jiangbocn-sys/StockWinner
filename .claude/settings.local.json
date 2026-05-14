@@ -67,7 +67,17 @@
       "Bash(pkill -9 -f uvicorn)",
       "Bash(pkill -9 -f vite)",
       "Bash(pkill -9 -f \"npm run dev\")",
-      "Bash(grep -n \"baseURL\\\\|API_BASE\\\\|fetch\" frontend/src/api/*.js frontend/src/api/*.ts)"
+      "Bash(grep -n \"baseURL\\\\|API_BASE\\\\|fetch\" frontend/src/api/*.js frontend/src/api/*.ts)",
+      "Bash(grep -rn \"jsonable_encoder\\\\|JSONEncoder\\\\|to_dict\\\\|orient=records\\\\|NaN\\\\|nan\\\\|isnan\" /home/bobo/StockWinner/services --include=*.py)",
+      "Bash(grep -rn \"JSONEncoder\\\\|json.dumps\\\\|default\\\\|encoder\\\\|allow_nan\\\\|replace.*nan\" /home/bobo/StockWinner/services --include=*.py)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(find /home/bobo/StockWinner/services -name *screening* -o -name *scheduler* -o -name *task*)",
+      "Bash(./start_backend.sh restart:*)",
+      "Bash(pkill -9 -f \"uvicorn services.main\")",
+      "Bash(./start_backend.sh start:*)",
+      "Bash(kill -9 1310470)",
+      "Bash(grep -rn \"query_kline\\\\|realtime_quote\\\\|realtime\\\\|position.*price\" /home/bobo/StockWinner/services/ui/ --include=*.py)"
     ]
   }
 }

@@ -28,14 +28,18 @@ def get_uptime_text() -> str:
 
 
 def check_sdk_connection() -> str:
-    """检测 Galaxy SDK 连接状态"""
+    """检测 Galaxy SDK 连接状态（只读状态，不触发登录）"""
     try:
         from services.common.sdk_manager import get_sdk_manager
+        from services.common.sdk_connection_manager import ConnectionState
         sdk_mgr = get_sdk_manager()
-        if sdk_mgr.connect():
+        state = sdk_mgr._get_conn_mgr().get_state()
+        if state == ConnectionState.CONNECTED:
             return "connected"
+        elif state == ConnectionState.CONNECTING:
+            return "connecting"
         else:
-            return "login_failed"
+            return "disconnected"
     except ImportError:
         return "disconnected"
     except Exception:
@@ -111,7 +115,7 @@ async def get_dashboard(account_id: str = Path(..., description="账户 ID")):
                 "base_info_count": 0}
     try:
         if kline_db_path.exists():
-            kconn = sqlite3.connect(str(kline_db_path))
+            kconn = sqlite3.connect(str(kline_db_path), timeout=30)
             kcursor = kconn.cursor()
 
             # 日K线

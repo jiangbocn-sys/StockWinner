@@ -18,14 +18,8 @@ router = APIRouter()
 @router.post("/api/v1/ui/{account_id}/data/download")
 async def download_kline_data(
     account_id: str = Path(..., description="账户 ID"),
-    years: Optional[float] = Body(None, description="下载的年数（默认 2 年）", ge=0.5, le=20),
-    start_date: Optional[str] = Body(None, description="开始日期（YYYY-MM-DD）"),
-    end_date: Optional[str] = Body(None, description="结束日期（YYYY-MM-DD）"),
-    batch_size: int = Body(20, description="每批次下载的股票数量", ge=10, le=50),
-    market_filter: Optional[List[str]] = Body(None, description="市场筛选：['SH'] 上证 A 股，['SZ'] 深证 A 股，['BJ'] 北交 A 股，默认全部下载"),
-    background_tasks: BackgroundTasks = None
 ):
-    """下载全市场 K 线数据到本地数据库"""
+    """触发 K 线数据增量检查（与策略任务列表中的"K线增量检查"使用同一段代码）"""
     db = get_db_manager()
 
     # 验证账户
@@ -33,83 +27,14 @@ async def download_kline_data(
     if not account:
         raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
 
-    # 获取账户的 broker credentials
-    broker_account = account.get("broker_account", "")
-    broker_password = account.get("broker_password", "")
-
-    # 预检查 SDK 是否可用
-    try:
-        from services.trading.gateway import create_gateway
-        # 使用账户的 broker credentials 创建网关
-        gateway = create_gateway(galaxy_app_id=broker_account, galaxy_password=broker_password)
-        if not gateway or not hasattr(gateway, 'sdk_available') or not gateway.sdk_available:
-            return {
-                "success": False,
-                "message": "交易网关 SDK 不可用，无法下载数据。请检查账户的券商配置是否正确。",
-                "gateway_status": "disconnected",
-                "hint": "请在账户管理中配置有效的银河证券资金账号和密码"
-            }
-    except Exception as e:
-        return {
-            "success": False,
-            "message": f"交易网关初始化失败：{str(e)}",
-            "gateway_status": "error"
-        }
-
-    # 导入下载函数
-    from services.data.local_data_service import download_all_kline_data, get_local_data_service, download_all_kline_data_sync
-
-    # 检查本地数据服务
-    local_service = get_local_data_service()
-    stats = local_service.get_download_stats()
-
-    # 解析日期范围参数
-    if start_date and end_date:
-        # 使用自定义日期范围
-        try:
-            from datetime import datetime
-            start_dt = datetime.strptime(start_date, '%Y-%m-%d')
-            end_dt = datetime.strptime(end_date, '%Y-%m-%d')
-            if start_dt > end_dt:
-                raise HTTPException(status_code=400, detail="开始日期不能晚于结束日期")
-            # 计算月数（用于增量下载逻辑）
-            months = int((end_dt - start_dt).days / 30)
-            months = max(1, months)  # 至少 1 个月
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail=f"日期格式错误：{e}")
-    elif years is not None:
-        # 使用年数（预设范围）
-        months = int(years * 12)
-    else:
-        # 默认 2 年
-        months = 24
-
-    # 使用 BackgroundTasks 执行下载任务
-    if background_tasks:
-        background_tasks.add_task(
-            download_all_kline_data_sync,
-            batch_size,
-            months,
-            start_date,
-            end_date,
-            broker_account,
-            broker_password,
-            True,  # calculate_factors
-            market_filter  # 市场筛选参数
-        )
+    # 直接调用 scheduler 的 K 线检查任务（完整流水线：检查 → 下载 → 行业指数 → 因子）
+    from services.common.scheduler_service import get_scheduler
+    scheduler = get_scheduler()
+    scheduler.run_manual_kline_check(full=False)
 
     return {
         "success": True,
-        "message": "开始下载 K 线数据，后台处理中...",
-        "current_stats": stats,
-        "download_params": {
-            "years": years,
-            "start_date": start_date,
-            "end_date": end_date,
-            "batch_size": batch_size,
-            "months": months,
-            "market_filter": market_filter or ["SH", "SZ", "BJ"]  # 默认全市场
-        }
+        "message": "K 线数据检查任务已启动，请在策略任务列表中查看进度"
     }
 
 
@@ -151,7 +76,7 @@ async def get_factor_stats(account_id: str = Path(..., description="账户 ID"))
     if not db_path.exists():
         return {"success": True, "stats": {"latest_date": None, "pending_count": 0}}
 
-    conn = sqlite3.connect(str(db_path))
+    conn = sqlite3.connect(str(db_path), timeout=30)
     cursor = conn.cursor()
 
     # 获取因子数据最新日期
@@ -272,7 +197,7 @@ async def calculate_factors(
         target_end = end_date
     else:
         db_path = Path(__file__).parent.parent.parent / "data" / "kline.db"
-        conn = sqlite3.connect(str(db_path))
+        conn = sqlite3.connect(str(db_path), timeout=30)
         cursor = conn.cursor()
 
         # 获取 kline_data 最新日期
@@ -1209,7 +1134,7 @@ async def preview_watchlist_import(
     kline_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "data", "kline.db")
     name_map = {}
     try:
-        conn = sqlite3.connect(kline_path)
+        conn = sqlite3.connect(kline_path, timeout=30)
         conn.row_factory = sqlite3.Row
         codes_to_lookup = []
         for item in items:

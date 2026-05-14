@@ -34,7 +34,7 @@ class DailyFactorCalculator:
 
     def _get_connection(self) -> sqlite3.Connection:
         """获取数据库连接"""
-        conn = sqlite3.connect(str(self.db_path))
+        conn = sqlite3.connect(str(self.db_path), timeout=60)
         conn.row_factory = sqlite3.Row
         return conn
 
