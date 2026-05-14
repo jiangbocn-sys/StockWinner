@@ -160,16 +160,47 @@ async def get_dashboard(account_id: str = Path(..., description="账户 ID")):
     except Exception:
         pass
 
+    # 获取交易监控 SDK 健康状态
+    try:
+        from services.monitoring.service import get_trading_monitor
+        monitor = get_trading_monitor()
+        monitor_status = monitor.get_status()
+        monitor_sdk_healthy = monitor_status.get("sdk_healthy", True)
+        monitor_sdk_error_time = monitor_status.get("sdk_error_time", "")
+        monitor_sdk_error_msg = monitor_status.get("sdk_error_msg", "")
+        monitor_running = monitor_status.get("running", False)
+    except Exception:
+        monitor_sdk_healthy = True
+        monitor_sdk_error_time = ""
+        monitor_sdk_error_msg = ""
+        monitor_running = False
+
+    # 综合健康状态：SDK + Galaxy API + 服务运行状态
+    sdk_connection_ok = check_sdk_connection()
+    overall_healthy = sdk_connection_ok == "connected" and monitor_sdk_healthy
+
+    # 确定异常原因
+    health_issues = []
+    if sdk_connection_ok != "connected":
+        health_issues.append(f"SDK连接异常: {sdk_connection_ok}")
+    if not monitor_sdk_healthy and monitor_running:
+        health_issues.append(f"行情获取失败: {monitor_sdk_error_msg}")
+
     return {
         "account_id": account_id,
         "account_name": account_name,
         "timestamp": get_china_time().isoformat(),
         "system_health": {
-            "status": "healthy",
+            "status": "healthy" if overall_healthy else "unhealthy",
+            "issues": health_issues,
             "version": VERSION,
             "uptime_text": get_uptime_text(),
             "server_start": get_start_time().isoformat() if get_start_time() else None,
-            "galaxy_api": check_sdk_connection(),
+            "galaxy_api": sdk_connection_ok,
+            "monitor_sdk_healthy": monitor_sdk_healthy,
+            "monitor_sdk_error_time": monitor_sdk_error_time,
+            "monitor_sdk_error_msg": monitor_sdk_error_msg,
+            "monitor_running": monitor_running,
             "cpu_percent": resources["cpu_percent"],
             "memory_mb": resources["memory_mb"],
             "disk_percent": resources["disk_percent"],

@@ -28,33 +28,49 @@ class TradingMonitor:
     def __init__(self):
         self._running = False
         self._task = None
-        self._account_id = None
-        # 冷却期记录：{strategy_id: last_trigger_time}
-        self._cooldown: Dict[int, float] = {}
+        self._account_ids: list[str] = []
+        # 冷却期记录：{(account_id, strategy_id): last_trigger_time}
+        self._cooldown: Dict[tuple, float] = {}
         # 策略代码编译缓存：{strategy_id: compiled_code}
         self._strategy_cache: Dict[int, Any] = {}
+        # SDK/TGW 连接健康状态
+        self._sdk_healthy = True  # SDK 连接是否正常
+        self._sdk_error_time: Optional[str] = None  # 最近一次 SDK 错误时间
+        self._sdk_error_msg: str = ""  # 最近一次 SDK 错误信息
+        self._consecutive_errors = 0  # 连续错误计数
 
     async def start_monitoring(
         self,
-        account_id: str,
+        account_ids: Optional[list[str]] = None,
         interval: int = 30
     ):
         """
         启动交易监控服务
 
         Args:
-            account_id: 账户 ID
+            account_ids: 账户 ID 列表，不传则自动查询所有活跃账户
             interval: 监控间隔（秒）
         """
         if self._running:
             return {"success": False, "message": "交易监控服务已在运行"}
 
+        if not account_ids:
+            from services.common.database import get_db_manager
+            db = get_db_manager()
+            accounts = await db.fetchall(
+                "SELECT account_id FROM accounts WHERE is_active = 1"
+            )
+            account_ids = [a["account_id"] for a in accounts]
+
+        if not account_ids:
+            return {"success": False, "message": "没有活跃账户可监控"}
+
         self._running = True
-        self._account_id = account_id
+        self._account_ids = account_ids
         self._task = asyncio.create_task(
-            self._run_monitoring_loop(account_id, interval)
+            self._run_monitoring_loop(account_ids, interval)
         )
-        return {"success": True, "message": "交易监控服务已启动"}
+        return {"success": True, "message": f"交易监控服务已启动，账户：{', '.join(account_ids)}"}
 
     async def stop_monitoring(self):
         """停止交易监控服务"""
@@ -69,18 +85,20 @@ class TradingMonitor:
 
     async def _run_monitoring_loop(
         self,
-        account_id: str,
+        account_ids: list[str],
         interval: int
     ):
-        """交易监控循环"""
-        print(f"[Monitor] 启动交易监控服务 - 账户：{account_id}, 间隔：{interval}s")
+        """交易监控循环 — 遍历所有账户"""
+        print(f"[Monitor] 启动交易监控服务 - 账户：{', '.join(account_ids)}, 间隔：{interval}s")
 
         while self._running:
             try:
-                # 交易时间检查：只在 A 股交易时段执行
                 from services.trading.trading_hours import can_trade
                 if can_trade():
-                    await self._run_monitoring(account_id)
+                    for acct_id in account_ids:
+                        if not self._running:
+                            break
+                        await self._run_monitoring(acct_id)
 
                 await asyncio.sleep(interval)
             except asyncio.CancelledError:
@@ -133,13 +151,14 @@ class TradingMonitor:
             strategy_id = decision["strategy_id"]
             cooldown_seconds = await self._get_cooldown_for_strategy(strategy_id)
 
-            # 检查冷却期
-            last_trigger = self._cooldown.get(strategy_id, 0)
+            # 检查冷却期（按账户+策略组合区分）
+            cooldown_key = (account_id, strategy_id)
+            last_trigger = self._cooldown.get(cooldown_key, 0)
             if time.time() - last_trigger < cooldown_seconds:
                 continue  # 冷却期内，跳过
 
             # 记录触发时间
-            self._cooldown[strategy_id] = time.time()
+            self._cooldown[cooldown_key] = time.time()
 
             # 执行交易
             if decision["action"] == "buy":
@@ -296,7 +315,17 @@ class TradingMonitor:
         try:
             gateway = await get_gateway()
             batch_data = await gateway.get_batch_market_data(stock_codes)
-        except Exception:
+            if not self._sdk_healthy:
+                print(f"[Monitor] SDK/TGW 连接已恢复")
+                self._sdk_healthy = True
+                self._sdk_error_time = None
+                self._sdk_error_msg = ""
+                self._consecutive_errors = 0
+        except Exception as e:
+            self._sdk_healthy = False
+            self._sdk_error_time = get_china_time().strftime("%Y-%m-%d %H:%M:%S")
+            self._sdk_error_msg = str(e)
+            self._consecutive_errors += 1
             return
 
         prices = {}
@@ -334,7 +363,18 @@ class TradingMonitor:
             from services.trading.gateway import get_gateway
             gateway = await get_gateway()
             batch_data = await gateway.get_batch_market_data(stock_codes)
+            # 成功获取后重置错误状态
+            if not self._sdk_healthy:
+                print(f"[Monitor] SDK/TGW 连接已恢复")
+                self._sdk_healthy = True
+                self._sdk_error_time = None
+                self._sdk_error_msg = ""
+                self._consecutive_errors = 0
         except Exception as e:
+            self._sdk_healthy = False
+            self._sdk_error_time = get_china_time().strftime("%Y-%m-%d %H:%M:%S")
+            self._sdk_error_msg = str(e)
+            self._consecutive_errors += 1
             print(f"[Monitor] 批量获取行情失败，跳过现价更新: {e}")
             return
 
@@ -990,8 +1030,12 @@ class TradingMonitor:
         """获取服务状态"""
         return {
             "running": self._running,
-            "account_id": self._account_id,
-            "task": "active" if self._task else None
+            "account_ids": self._account_ids,
+            "task": "active" if self._task else None,
+            "sdk_healthy": self._sdk_healthy,
+            "sdk_error_time": self._sdk_error_time,
+            "sdk_error_msg": self._sdk_error_msg,
+            "consecutive_errors": self._consecutive_errors,
         }
 
 

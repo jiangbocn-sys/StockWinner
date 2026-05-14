@@ -93,7 +93,7 @@
                   <span class="group-name">{{ group.name }}</span>
                 </div>
                 <span class="group-count">{{ group.stock_count }} 只</span>
-                <el-dropdown v-if="group.group_type === 'manual'" trigger="click" class="group-actions" @command="(cmd) => handleGroupAction(cmd, group)">
+                <el-dropdown trigger="click" class="group-actions" @command="(cmd) => handleGroupAction(cmd, group)">
                   <el-icon><MoreFilled /></el-icon>
                   <template #dropdown>
                     <el-dropdown-menu>

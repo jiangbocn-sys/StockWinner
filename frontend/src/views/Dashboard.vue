@@ -8,7 +8,6 @@
           <el-menu
             :default-active="currentAccountId"
             background-color="#f5f7fa"
-            @select="handleAccountSelect"
           >
             <el-sub-menu index="accounts">
               <template #title>
@@ -19,7 +18,8 @@
                 v-for="acc in accounts"
                 :key="acc.account_id"
                 :index="acc.account_id"
-                :class="{ 'active-account': acc.account_id === currentAccountId }"
+                :class="{ 'active-account': acc.account_id === currentAccountId, 'other-account': acc.account_id !== currentAccountId }"
+                :disabled="acc.account_id !== currentAccountId"
               >
                 {{ acc.display_name }}
               </el-menu-item>
@@ -32,7 +32,7 @@
           <h2>仪表盘 - {{ currentAccount?.display_name || currentAccountId }}</h2>
 
           <!-- 系统健康度 -->
-          <el-card class="health-card">
+          <el-card class="health-card" :class="{ 'health-card--unhealthy': healthStatus === 'unhealthy' }">
             <template #header>
               <div class="card-header">
                 <span>系统健康度</span>
@@ -48,6 +48,15 @@
               <el-descriptions-item label="内存">{{ memoryMb }} MB</el-descriptions-item>
               <el-descriptions-item label="硬盘">{{ diskPercent }}%</el-descriptions-item>
             </el-descriptions>
+            <el-alert v-if="sdkIssues.length > 0" type="error" :closable="false" style="margin-top: 15px">
+              <template #title>健康异常</template>
+              <div v-for="(issue, idx) in sdkIssues" :key="idx" style="margin-top: 5px">
+                <el-icon><WarningFilled /></el-icon> {{ issue }}
+              </div>
+              <div v-if="sdkErrorTime" style="margin-top: 5px; color: #909399; font-size: 12px">
+                最近一次异常: {{ sdkErrorTime }}
+              </div>
+            </el-alert>
           </el-card>
 
           <!-- 仓位信息 -->
@@ -160,6 +169,7 @@
 <script setup>
 import { ref, onMounted, onUnmounted, computed } from 'vue'
 import { useAccountStore } from '../stores/account'
+import { WarningFilled } from '@element-plus/icons-vue'
 import NavBar from '../components/NavBar.vue'
 
 const accountStore = useAccountStore()
@@ -173,6 +183,8 @@ const appVersion = ref('v7.0.0')
 const cpuPercent = ref(0)
 const memoryMb = ref(0)
 const diskPercent = ref(0)
+const sdkIssues = ref([])
+const sdkErrorTime = ref('')
 const taskCount = ref(0)
 const taskSuccess = ref(0)
 const taskFail = ref(0)
@@ -233,6 +245,8 @@ const loadDashboard = async () => {
     const data = await response.json()
 
     healthStatus.value = data.system_health?.status || 'unknown'
+    sdkIssues.value = data.system_health?.issues || []
+    sdkErrorTime.value = data.system_health?.monitor_sdk_error_time || ''
 
     // 服务器启动时间戳，用于本地时钟计算运行时长
     if (data.system_health?.server_start) {
@@ -285,10 +299,6 @@ const loadDashboard = async () => {
 
 const refreshData = () => {
   loadDashboard()
-}
-
-const handleAccountSelect = (accountId) => {
-  accountStore.setCurrentAccount(accountId)
 }
 
 const formatNumber = (num) => {
@@ -349,6 +359,15 @@ onUnmounted(() => {
   margin-bottom: 20px;
 }
 
+.health-card--unhealthy :deep(.el-card__header) {
+  background-color: #fef0f0;
+  border-color: #fbc4c4;
+}
+
+.health-card--unhealthy :deep(.el-card__header .card-header span:first-child) {
+  color: #f56c6c;
+}
+
 .stats-row {
   margin-bottom: 20px;
 }
@@ -374,5 +393,9 @@ onUnmounted(() => {
 .active-account {
   background-color: #ecf5ff !important;
   color: #409EFF !important;
+}
+
+.other-account {
+  color: #c0c4cc !important;
 }
 </style>

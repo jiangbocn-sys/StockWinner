@@ -5,6 +5,7 @@
 """
 import asyncio
 import logging
+import datetime
 from datetime import timedelta
 from typing import Optional, Dict, Any, List
 from abc import ABC, abstractmethod
@@ -868,13 +869,54 @@ class TradingGateway(TradingGatewayInterface):
         return []
 
     async def get_batch_market_data(self, stock_codes: List[str]) -> Dict[str, Optional[MarketData]]:
-        """批量获取行情数据"""
+        """批量获取行情数据 — 一次SDK调用获取所有代码的行情"""
+        if not stock_codes:
+            return {}
+
+        end_dt = get_china_time()
+        begin_dt = end_dt - datetime.timedelta(days=2)
+        end_date = int((end_dt + datetime.timedelta(days=1)).strftime('%Y%m%d'))
+        begin_date = int(begin_dt.strftime('%Y%m%d'))
+
+        # 一次SDK调用获取所有股票K线
+        try:
+            kline_data = self._query_kline_via_sdk(
+                code_list=stock_codes,
+                begin_date=begin_date,
+                end_date=end_date,
+                period=self.constant.Period.day.value
+            )
+        except Exception as e:
+            logger.warning(f"批量获取行情失败：{e}")
+            return {code: None for code in stock_codes}
+
         results = {}
         for code in stock_codes:
-            try:
-                results[code] = await self.get_market_data(code)
-            except Exception as e:
-                logger.warning(f"获取 {code} 行情失败：{e}")
+            if code in kline_data:
+                df = kline_data[code]
+                if df is not None and len(df) > 0:
+                    last_row = df.iloc[-1]
+                    current_price = float(last_row.get('close', 0)) if 'close' in last_row else 0
+                    high = float(last_row.get('high', current_price)) if 'high' in last_row else current_price
+                    low = float(last_row.get('low', current_price)) if 'low' in last_row else current_price
+                    open_price = float(last_row.get('open', current_price)) if 'open' in last_row else current_price
+                    prev_close = float(last_row.get('pre_close', 0)) if 'pre_close' in last_row else 0
+                    if prev_close == 0 and len(df) >= 2:
+                        prev_close = float(df.iloc[-2].get('close', current_price))
+                    if prev_close == 0:
+                        prev_close = current_price
+                    volume = int(last_row.get('volume', 0)) if 'volume' in last_row else 0
+                    amount = float(last_row.get('amount', 0)) if 'amount' in last_row else 0
+                    change_percent = ((current_price - prev_close) / prev_close * 100) if prev_close != 0 else 0
+                    stock_name = last_row.get('stock_name', '')
+                    results[code] = MarketData(
+                        stock_code=code, stock_name=stock_name, current_price=current_price,
+                        change_percent=change_percent, high=high, low=low, open_price=open_price,
+                        prev_close=prev_close, volume=volume, amount=amount,
+                    )
+                else:
+                    results[code] = None
+            else:
                 results[code] = None
         return results
 

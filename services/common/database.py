@@ -25,126 +25,198 @@ KLINE_DB_PATH = Path(__file__).parent.parent.parent / "data" / "kline.db"
 
 
 class DatabaseManager:
-    """数据库管理器"""
+    """数据库管理器 — 使用连接池而非单连接，避免长时间运行后连接失效"""
 
-    def __init__(self, db_path: Path = DB_PATH):
+    def __init__(self, db_path: Path = DB_PATH, pool_size: int = 5):
         self.db_path = db_path
-        self._connection: Optional[aiosqlite.Connection] = None
-        self._lock = asyncio.Lock()
+        self._pool_size = pool_size
+        self._pool: Optional[asyncio.Queue] = None  # 延迟初始化，避免跨事件循环问题
+        self._initialized = False
+        self._lock: Optional[asyncio.Lock] = None
+
+    def _ensure_loop_resources(self):
+        """确保在当前事件循环中初始化 pool 和 lock"""
+        if self._pool is None or self._lock is None:
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                return  # 没有运行中的事件循环
+            if self._lock is None:
+                self._lock = asyncio.Lock()
+            if self._pool is None:
+                self._pool = asyncio.Queue()
+
+    async def _create_connection(self) -> aiosqlite.Connection:
+        """创建并配置新连接"""
+        conn = await aiosqlite.connect(str(self.db_path))
+        conn.row_factory = aiosqlite.Row
+        await conn.execute("PRAGMA journal_mode = WAL")
+        await conn.execute("PRAGMA foreign_keys = ON")
+        await conn.execute("PRAGMA busy_timeout = 5000")
+        return conn
 
     async def connect(self):
-        """连接数据库"""
+        """初始化连接池"""
         self.db_path.parent.mkdir(exist_ok=True)
-        self._connection = await aiosqlite.connect(str(self.db_path))
-        self._connection.row_factory = aiosqlite.Row
-        await self._connection.execute("PRAGMA journal_mode = WAL")
-        await self._connection.execute("PRAGMA foreign_keys = ON")
-        await self._connection.execute("PRAGMA busy_timeout = 5000")
+        self._ensure_loop_resources()
+        if self._lock is None or self._pool is None:
+            return  # 事件循环未就绪
+        async with self._lock:
+            if self._initialized:
+                return
+            for _ in range(self._pool_size):
+                conn = await self._create_connection()
+                await self._pool.put(conn)
+            self._initialized = True
 
     async def close(self):
-        """关闭数据库连接"""
-        if self._connection:
-            try:
-                await self._connection.close()
-            except Exception:
-                pass
-            self._connection = None
-
-    async def _ensure_connection(self):
-        """确保连接有效，如果损坏则重建"""
-        if self._connection is not None:
-            try:
-                # 尝试一个轻量查询检测连接是否存活
-                await self._connection.execute("SELECT 1")
+        """关闭连接池中的所有连接"""
+        self._ensure_loop_resources()
+        if self._lock is None or self._pool is None:
+            return
+        async with self._lock:
+            if not self._initialized:
                 return
-            except Exception:
-                logger.warning("数据库连接已损坏，正在重建...")
+            while not self._pool.empty():
                 try:
-                    await self._connection.close()
+                    conn = self._pool.get_nowait()
+                    await conn.close()
                 except Exception:
                     pass
-                self._connection = None
+            self._initialized = False
 
-        await self.connect()
+    def _acquire(self):
+        """从池中获取一个连接（非阻塞，用于上下文）"""
+        return self._pool.get()
+
+    async def _release(self, conn):
+        """将连接释放回池中"""
+        # 验证连接是否仍然有效
+        try:
+            await conn.execute("SELECT 1")
+            await self._pool.put(conn)
+        except Exception:
+            # 连接已损坏，创建新连接替换
+            try:
+                await conn.close()
+            except Exception:
+                pass
+            new_conn = await self._create_connection()
+            await self._pool.put(new_conn)
 
     @asynccontextmanager
     async def transaction(self):
-        """事务上下文"""
-        await self._ensure_connection()
+        """事务上下文 — 从池中获取连接，使用完毕后释放"""
+        conn = await self._acquire()
         try:
-            yield self._connection
-            await self._connection.commit()
+            yield conn
+            await conn.commit()
         except Exception as e:
-            await self._connection.rollback()
+            await conn.rollback()
             raise
+        finally:
+            await self._release(conn)
+
+    async def _execute_with_conn(self, query: str, params: Tuple = (), commit: bool = True) -> aiosqlite.Cursor:
+        """内部方法：从池中获取连接执行查询"""
+        conn = await self._acquire()
+        try:
+            cursor = await conn.execute(query, params)
+            if commit:
+                await conn.commit()
+            return cursor
+        finally:
+            await self._release(conn)
 
     async def execute(self, query: str, params: Tuple = ()) -> aiosqlite.Cursor:
         """执行 SQL"""
-        await self._ensure_connection()
-        cursor = await self._connection.execute(query, params)
-        await self._connection.commit()
-        return cursor
+        return await self._execute_with_conn(query, params, commit=True)
 
     async def executemany(self, query: str, params_list: List[Tuple]) -> aiosqlite.Cursor:
         """批量执行 SQL"""
-        await self._ensure_connection()
-        cursor = await self._connection.executemany(query, params_list)
-        await self._connection.commit()
-        return cursor
+        conn = await self._acquire()
+        try:
+            cursor = await conn.executemany(query, params_list)
+            await conn.commit()
+            return cursor
+        finally:
+            await self._release(conn)
 
     async def fetchone(self, query: str, params: Tuple = ()) -> Optional[Dict]:
         """查询单条记录"""
-        await self._ensure_connection()
-        cursor = await self._connection.execute(query, params)
-        row = await cursor.fetchone()
-        return dict(row) if row else None
+        conn = await self._acquire()
+        try:
+            cursor = await conn.execute(query, params)
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+        finally:
+            await self._release(conn)
 
     async def fetchall(self, query: str, params: Tuple = ()) -> List[Dict]:
         """查询多条记录"""
-        await self._ensure_connection()
-        cursor = await self._connection.execute(query, params)
-        rows = await cursor.fetchall()
-        return [dict(row) for row in rows]
+        conn = await self._acquire()
+        try:
+            cursor = await conn.execute(query, params)
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+        finally:
+            await self._release(conn)
 
     async def fetchval(self, query: str, params: Tuple = ()) -> Optional[Any]:
         """查询单个值"""
-        await self._ensure_connection()
-        cursor = await self._connection.execute(query, params)
-        row = await cursor.fetchone()
-        if row:
-            return row[0]
-        return None
+        conn = await self._acquire()
+        try:
+            cursor = await conn.execute(query, params)
+            row = await cursor.fetchone()
+            if row:
+                return row[0]
+            return None
+        finally:
+            await self._release(conn)
 
     async def insert(self, table: str, data: Dict) -> int:
         """插入记录"""
         columns = ', '.join(data.keys())
         placeholders = ', '.join(['?' for _ in data])
         query = f"INSERT INTO {table} ({columns}) VALUES ({placeholders})"
-        cursor = await self.execute(query, tuple(data.values()))
-        return cursor.lastrowid
+        conn = await self._acquire()
+        try:
+            cursor = await conn.execute(query, tuple(data.values()))
+            await conn.commit()
+            return cursor.lastrowid
+        finally:
+            await self._release(conn)
 
     async def update(self, table: str, data: Dict, where: str, params: Tuple = ()) -> int:
         """更新记录"""
         set_clause = ', '.join([f"{k} = ?" for k in data.keys()])
         query = f"UPDATE {table} SET {set_clause} WHERE {where}"
-        cursor = await self.execute(query, tuple(data.values()) + params)
-        return cursor.rowcount
+        conn = await self._acquire()
+        try:
+            cursor = await conn.execute(query, tuple(data.values()) + params)
+            await conn.commit()
+            return cursor.rowcount
+        finally:
+            await self._release(conn)
 
     async def delete(self, table: str, where: str, params: Tuple = ()) -> int:
         """删除记录"""
         query = f"DELETE FROM {table} WHERE {where}"
-        cursor = await self.execute(query, params)
-        return cursor.rowcount
+        conn = await self._acquire()
+        try:
+            cursor = await conn.execute(query, params)
+            await conn.commit()
+            return cursor.rowcount
+        finally:
+            await self._release(conn)
 
     async def commit(self):
-        """提交事务"""
-        if self._connection:
-            await self._connection.commit()
+        """提交事务 — 池化模式下不直接支持，建议使用 transaction()"""
+        pass
 
     async def rollback(self):
-        """回滚事务"""
-        if self._connection:
-            await self._connection.rollback()
+        """回滚事务 — 池化模式下不直接支持，建议使用 transaction()"""
+        pass
 
 
 # 全局单例

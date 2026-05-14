@@ -5,10 +5,6 @@
       <div class="page-header">
         <h2>交易信号 - {{ currentAccount?.display_name }}</h2>
         <el-space>
-          <el-button :type="monitoringRunning ? 'danger' : 'success'" @click="toggleMonitoring">
-            <el-icon><VideoPlay /></el-icon>
-            {{ monitoringRunning ? '停止监控' : '启动监控' }}
-          </el-button>
           <el-button @click="loadSignals">
             <el-icon><Refresh /></el-icon>
             刷新
@@ -21,14 +17,14 @@
         <el-descriptions :column="3" border>
           <el-descriptions-item label="监控服务">
             <el-tag :type="monitoringRunning ? 'success' : 'info'" size="small">
-              {{ monitoringRunning ? '运行中' : '已停止' }}
+              {{ monitoringRunning ? '运行中（自动管理）' : '未启动' }}
             </el-tag>
+          </el-descriptions-item>
+          <el-descriptions-item label="监控账户">
+            {{ monitoringAccountIds.length > 0 ? monitoringAccountIds.join(', ') : '无' }}
           </el-descriptions-item>
           <el-descriptions-item label="待处理信号">
             {{ signals.filter(s => s.status === 'pending').length }}
-          </el-descriptions-item>
-          <el-descriptions-item label="已执行">
-            {{ signals.filter(s => s.status === 'executed').length }}
           </el-descriptions-item>
         </el-descriptions>
       </el-card>
@@ -124,6 +120,7 @@ const loading = ref(false)
 const signals = ref([])
 const filterType = ref('')
 const monitoringRunning = ref(false)
+const monitoringAccountIds = ref([])
 
 // 加载交易信号
 const loadSignals = async () => {
@@ -144,33 +141,15 @@ const loadSignals = async () => {
   }
 }
 
-// 检查监控服务状态
+// 检查监控服务状态（只读）
 const checkServiceStatus = async () => {
   try {
     const response = await fetch(`/api/v1/ui/${currentAccountId.value}/monitoring/status`)
     const data = await response.json()
     monitoringRunning.value = data.monitoring?.running || false
+    monitoringAccountIds.value = data.monitoring?.account_ids || []
   } catch (error) {
     console.error('检查服务状态失败:', error)
-  }
-}
-
-// 切换监控服务
-const toggleMonitoring = async () => {
-  try {
-    const url = `/api/v1/ui/${currentAccountId.value}/monitoring/${monitoringRunning.value ? 'stop' : 'start'}`
-    const response = await fetch(url, { method: 'POST' })
-    const data = await response.json()
-
-    if (data.success) {
-      ElMessage.success(monitoringRunning.value ? '监控服务已停止' : '监控服务已启动')
-      monitoringRunning.value = !monitoringRunning.value
-    } else {
-      ElMessage.error(data.message || '操作失败')
-    }
-  } catch (error) {
-    console.error('切换监控服务失败:', error)
-    ElMessage.error('操作失败')
   }
 }
 

@@ -98,8 +98,8 @@ const handleLogin = async () => {
 
         ElMessage.success('登录成功')
 
-        // 跳转到首页
-        router.push('/dashboard')
+        // 刷新页面，让 Pinia store 重新初始化
+        window.location.reload()
       } else {
         ElMessage.error('登录失败：' + data.message)
       }

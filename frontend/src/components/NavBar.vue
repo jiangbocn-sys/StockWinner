@@ -16,9 +16,10 @@
         active-text-color="#409EFF"
         @select="handleMenuSelect"
       >
-        <el-menu-item index="/dashboard">
+        <el-menu-item index="/dashboard" :class="{ 'nav-item--unhealthy': systemUnhealthy }">
           <el-icon><DataAnalysis /></el-icon>
           <span>仪表盘</span>
+          <el-badge v-if="systemUnhealthy" is-dot type="danger" style="margin-left: 4px" />
         </el-menu-item>
         <el-menu-item index="/watchlist">
           <el-icon><Search /></el-icon>
@@ -99,6 +100,7 @@ import { Lock, SwitchButton, ArrowDown, DataLine, Files, DataBoard } from '@elem
 const router = useRouter()
 const route = useRoute()
 const currentUser = ref(null)
+const systemUnhealthy = ref(false)
 
 const activeMenu = computed(() => route.path)
 
@@ -112,7 +114,6 @@ onMounted(async () => {
       if (data.success) {
         currentUser.value = data.data
         localStorage.setItem('current_user', JSON.stringify(data.data))
-        return
       }
     } catch (e) { /* fallback */ }
   }
@@ -120,7 +121,23 @@ onMounted(async () => {
   if (userStr) {
     currentUser.value = JSON.parse(userStr)
   }
+
+  // 检查系统健康状态
+  checkHealth()
+  // 每30秒轮询一次健康状态
+  setInterval(checkHealth, 30000)
 })
+
+const checkHealth = async () => {
+  const userStr = localStorage.getItem('current_user')
+  const account = userStr ? JSON.parse(userStr) : null
+  if (!account?.account_id) return
+  try {
+    const res = await fetch(`/api/v1/ui/${account.account_id}/dashboard`)
+    const data = await res.json()
+    systemUnhealthy.value = data.system_health?.status === 'unhealthy'
+  } catch (e) { /* ignore */ }
+}
 
 const handleMenuSelect = (index) => {
   router.push(index)
@@ -138,11 +155,11 @@ const handleLogout = async () => {
   } catch (error) {
     console.error('登出失败:', error)
   } finally {
-    // 清除本地存储
+    // 清除本地存储并刷新页面
     localStorage.removeItem('auth_token')
     localStorage.removeItem('current_user')
     ElMessage.success('已退出登录')
-    router.push('/login')
+    window.location.href = '/ui/login'
   }
 }
 </script>
@@ -200,5 +217,9 @@ const handleLogout = async () => {
 
 .account-name {
   font-size: 14px;
+}
+
+.nav-item--unhealthy :deep(.el-menu-item__content span) {
+  color: #f56c6c !important;
 }
 </style>

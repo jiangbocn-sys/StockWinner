@@ -117,24 +117,13 @@ def add_signal_indicators(df: pd.DataFrame) -> pd.DataFrame:
 # ================================================================
 
 def _calculate_price_performance(df: pd.DataFrame) -> pd.DataFrame:
-    """计算价格表现：涨幅、振幅、涨跌额、波动率、动量"""
+    """计算价格表现：涨幅、乖离率、振幅、波动率、动量"""
     if df.empty:
         return df
 
-    # 涨跌幅
-    df['change_pct'] = df['close'].pct_change()
-
-    # 涨跌额
-    df['change'] = df['close'] - df['close'].shift(1)
-
-    # 振幅
-    df['amplitude'] = (df['high'] - df['low']) / df['close'].shift(1) * 100
-
-    # 20日波动率
-    df['volatility'] = df['change_pct'].rolling(20, min_periods=1).std()
-
-    # 10日动量
-    df['momentum_10d'] = df['close'].pct_change(periods=10)
+    # 调用完整的价格表现因子计算（change_Nd, bias_N, amplitude_N, change_std_N, amount_std_N）
+    from services.common.technical_indicators import add_price_performance_to_df
+    df = add_price_performance_to_df(df, windows=[5, 10, 20])
 
     return df
 

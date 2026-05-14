@@ -1,8 +1,8 @@
 """
-交易监控 API
+交易监控 API — 只读状态查询（系统服务，前端不可启停）
 """
 
-from fastapi import APIRouter, HTTPException, Path, Body, Query
+from fastapi import APIRouter, Path, Query, Body
 from typing import List, Optional
 from datetime import datetime
 from services.common.database import get_db_manager
@@ -12,50 +12,15 @@ from services.common.timezone import get_china_time, format_china_time
 router = APIRouter()
 
 
-# ============== 交易监控服务控制 ==============
-
-@router.post("/api/v1/ui/{account_id}/monitoring/start")
-async def start_monitoring(
-    account_id: str = Path(..., description="账户 ID"),
-    interval: int = Body(30, embed=True, description="监控间隔（秒）", ge=10, le=300)
-):
-    """启动交易监控服务"""
-    db = get_db_manager()
-
-    # 从数据库验证账户
-    account = await db.fetchone("SELECT * FROM accounts WHERE account_id = ? AND is_active = 1", (account_id,))
-    if not account:
-        raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
-
-    monitor = get_trading_monitor()
-    result = await monitor.start_monitoring(account_id, interval)
-
-    return result
-
-
-@router.post("/api/v1/ui/{account_id}/monitoring/stop")
-async def stop_monitoring(account_id: str = Path(..., description="账户 ID")):
-    """停止交易监控服务"""
-    db = get_db_manager()
-
-    # 从数据库验证账户
-    account = await db.fetchone("SELECT * FROM accounts WHERE account_id = ? AND is_active = 1", (account_id,))
-    if not account:
-        raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
-
-    monitor = get_trading_monitor()
-    result = await monitor.stop_monitoring()
-
-    return result
-
+# ============== 只读状态查询 ==============
 
 @router.get("/api/v1/ui/{account_id}/monitoring/status")
-async def get_monitoring_status(account_id: str = Path(..., description="账户 ID")):
-    """获取交易监控服务状态"""
+async def get_monitoring_status(account_id: str = Path(..., description="账户 ID（仅验证账户存在，返回全局监控状态）")):
+    """获取交易监控服务状态（只读，系统服务由调度器自动管理）"""
     db = get_db_manager()
 
-    # 从数据库验证账户
-    account = await db.fetchone("SELECT * FROM accounts WHERE account_id = ? AND is_active = 1", (account_id,))
+    # 验证账户存在即可
+    account = await db.fetchone("SELECT 1 FROM accounts WHERE account_id = ? AND is_active = 1", (account_id,))
     if not account:
         raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
 

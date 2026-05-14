@@ -87,6 +87,9 @@ class SchedulerService:
             # 注册内置功能任务（从 strategy_tasks 表读取，含 cron 配置）
             self._register_strategy_tasks()
 
+            # 注册交易监控自动启动任务（每天 9:15）
+            self._register_monitor_auto_start_job()
+
         except ImportError:
             logger.warning("APScheduler 未安装，使用简单的定时检查方案")
             self._start_simple_scheduler()
@@ -521,7 +524,7 @@ class SchedulerService:
                     self.task_type = task_type
                     self.last_pct = 0
 
-                def update_sync(self, processed=0, current_stock="", message=""):
+                def update_sync(self, processed=0, current_stock="", message="", total_tasks=None):
                     # 从消息中提取批次进度
                     import re
                     match = re.search(r'批次\s+(\d+)/(\d+)', message) if message else None
@@ -900,6 +903,60 @@ class SchedulerService:
         except Exception as e:
             logger.error(f"注册任务失败: {e}", exc_info=True)
 
+    def _register_monitor_auto_start_job(self):
+        """注册交易监控自动启动任务 — 9:15 + 13:00（周一至周五，仅交易日）"""
+        try:
+            # 早盘启动：9:15
+            self._scheduler.add_job(
+                self._monitor_auto_start_job,
+                CronTrigger.from_crontab("15 9 * * 1-5", timezone=CHINA_TZ),
+                id="monitor_auto_start",
+                name="系统任务: 自动启动交易监控",
+                replace_existing=True,
+            )
+            logger.info("  注册监控任务: monitor_auto_start (cron=15 9 * * 1-5)")
+
+            # 午盘启动：13:00（覆盖后端在午间重启的场景）
+            self._scheduler.add_job(
+                self._monitor_auto_start_job,
+                CronTrigger.from_crontab("0 13 * * 1-5", timezone=CHINA_TZ),
+                id="monitor_auto_start_afternoon",
+                name="系统任务: 自动启动交易监控（午后）",
+                replace_existing=True,
+            )
+            logger.info("  注册监控任务: monitor_auto_start_afternoon (cron=0 13 * * 1-5)")
+        except Exception as e:
+            logger.error(f"注册监控自动启动任务失败: {e}")
+
+    def _monitor_auto_start_job(self):
+        """9:15 定时任务 — 自动启动交易监控"""
+        logger.info("执行交易监控自动启动任务")
+
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(self._do_monitor_auto_start())
+        finally:
+            loop.close()
+
+    async def _do_monitor_auto_start(self):
+        """检查并自动启动交易监控"""
+        from services.trading.trading_hours import is_today_trading_day, can_trade
+        from services.monitoring.service import get_trading_monitor
+
+        if not is_today_trading_day():
+            logger.info("今天非交易日，跳过交易监控自动启动")
+            return
+
+        monitor = get_trading_monitor()
+        if monitor._running:
+            logger.info("交易监控已在运行，跳过自动启动")
+            return
+
+        # 自动启动所有活跃账户的监控
+        result = await monitor.start_monitoring(interval=30)
+        logger.info(f"交易监控自动启动结果: {result}")
+
     def reload_strategy_tasks(self):
         """重新加载策略任务：移除已有 job，重新注册"""
         try:
@@ -939,6 +996,10 @@ class SchedulerService:
                 logger.info(f"  重新注册任务: {job_id} (cron={task['cron_expression']})")
 
             logger.info(f"策略任务重新加载完成，共 {count} 个任务")
+
+            # 重新注册监控自动启动任务（9:15 + 13:00）
+            self._register_monitor_auto_start_job()
+
             return {"success": True, "count": count}
 
         except Exception as e:

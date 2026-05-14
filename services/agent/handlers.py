@@ -661,30 +661,58 @@ async def query_kline(
     limit: int = Query(100, description="返回数量限制"),
     agent: dict = Depends(verify_agent_key),
 ):
-    """K 线数据（优先从本地数据库读取）"""
+    """K 线数据：优先本地，无数据则 SDK 兜底"""
     await log_action(
         agent_id=agent["agent_id"], action="query.kline", risk_level="low",
         ip_address=request.client.host if request.client else None,
     )
 
-    db = get_db_manager()
+    from services.common.database import get_sync_connection
+    from services.common.timezone import get_china_time
+    import datetime
 
     code = stock_code
     if '.' not in code:
         code = f"{code}.SH" if code.startswith('6') else f"{code}.SZ"
 
-    if period == "week":
-        rows = await db.fetchall(
-            "SELECT * FROM weekly_kline_data WHERE stock_code = ? ORDER BY week_end_date DESC LIMIT ?",
-            (code, limit)
-        )
-    else:
-        rows = await db.fetchall(
-            "SELECT * FROM kline_data WHERE stock_code = ? ORDER BY trade_date DESC LIMIT ?",
-            (code, limit)
-        )
+    # ① 优先从本地 kline.db 获取
+    try:
+        conn = get_sync_connection("kline")
+        if period == "week":
+            cursor = conn.execute(
+                "SELECT * FROM weekly_kline_data WHERE stock_code = ? ORDER BY week_end_date DESC LIMIT ?",
+                (code, limit)
+            )
+        else:
+            cursor = conn.execute(
+                "SELECT * FROM kline_data WHERE stock_code = ? ORDER BY trade_date DESC LIMIT ?",
+                (code, limit)
+            )
+        columns = [desc[0] for desc in cursor.description]
+        rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
+        if rows:
+            return {"stock_code": code, "period": period, "source": "local", "data": rows}
+    except Exception as e:
+        import logging
+        logging.getLogger("agent").debug(f"本地 K 线查询失败，回退 SDK: {e}")
 
-    return {"stock_code": code, "period": period, "data": rows}
+    # ② 本地无数据，通过 gateway/SDK 从券商接口拉取
+    try:
+        from services.trading.gateway import get_gateway
+        gateway = await get_gateway()
+        # gateway 的 start_date/end_date 为 YYYYMMDD
+        end_dt = get_china_time()
+        start_dt = end_dt - datetime.timedelta(days=limit)  # 按天数估算
+        kline_data = await gateway.get_kline_data(
+            stock_code=code,
+            period=period,
+            start_date=start_dt.strftime("%Y%m%d"),
+            end_date=(end_dt + datetime.timedelta(days=1)).strftime("%Y%m%d"),
+            limit=limit
+        )
+        return {"stock_code": code, "period": period, "source": "sdk", "data": kline_data}
+    except Exception as e:
+        return {"stock_code": code, "period": period, "source": "none", "data": [], "error": str(e)}
 
 
 @router.get("/query/factors")
@@ -694,27 +722,32 @@ async def query_factors(
     date: Optional[str] = Query(None, description="日期 YYYY-MM-DD"),
     agent: dict = Depends(verify_agent_key),
 ):
-    """因子数据"""
+    """因子数据（本地 kline.db）"""
     await log_action(
         agent_id=agent["agent_id"], action="query.factors", risk_level="low",
         ip_address=request.client.host if request.client else None,
     )
 
-    db = get_db_manager()
+    from services.common.database import get_sync_connection
+
     code = stock_code
     if '.' not in code:
         code = f"{code}.SH" if code.startswith('6') else f"{code}.SZ"
 
+    conn = get_sync_connection("kline")
     if date:
-        rows = await db.fetchall(
+        cursor = conn.execute(
             "SELECT * FROM stock_daily_factors WHERE stock_code = ? AND trade_date = ? LIMIT 1",
             (code, date)
         )
     else:
-        rows = await db.fetchall(
+        cursor = conn.execute(
             "SELECT * FROM stock_daily_factors WHERE stock_code = ? ORDER BY trade_date DESC LIMIT 1",
             (code,)
         )
+
+    columns = [desc[0] for desc in cursor.description]
+    rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
 
     return {"stock_code": code, "factors": rows[0] if rows else None}
 
@@ -1851,31 +1884,21 @@ async def scheduler_toggle(
 @router.post("/manage/monitoring/start")
 async def monitoring_start(
     request: Request,
-    account_id: str = Query(...),
     interval: int = Query(30, description="监控轮询间隔(秒)"),
     agent: dict = Depends(verify_agent_key),
     _: None = Depends(require_role(AgentRole.OPERATOR)),
 ):
-    """启动交易监控"""
+    """启动交易监控 — 自动启动所有活跃账户的监控"""
     from services.monitoring.service import get_trading_monitor
 
-    # 验证账户
-    db = get_db_manager()
-    account = await db.fetchone(
-        "SELECT account_id FROM accounts WHERE account_id = ? AND is_active = 1",
-        (account_id,)
-    )
-    if not account:
-        return {"success": False, "message": f"账户 {account_id} 不存在或未激活"}
-
     monitor = get_trading_monitor()
-    result = await monitor.start_monitoring(account_id, interval)
+    result = await monitor.start_monitoring(interval=interval)  # 自动查询所有活跃账户
 
     agent_id = agent.get("id", "")
     await log_action(
         agent_id=agent_id, action="monitoring:start", risk_level="medium",
-        account_id=account_id, resource_type="monitoring", resource_id=account_id,
-        request_payload={"account_id": account_id, "interval": interval},
+        account_id="", resource_type="monitoring", resource_id="",
+        request_payload={"interval": interval},
         response_summary=str(result),
         ip_address=request.client.host if request.client else None,
     )

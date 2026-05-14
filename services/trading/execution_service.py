@@ -157,8 +157,8 @@ class TradeExecutionService:
 
         # 计算费用
         if quantity > 0:
-            await self._get_fee_config()  # 确保缓存已加载
-            fees = self._calculate_fees(stock_code, price, quantity, "sell")
+            fees_cfg = await self._get_fee_config()
+            fees = self._calculate_fees(stock_code, price, quantity, "sell", fees_cfg["commission_rate"])
         else:
             fees = {"commission": 0, "transfer_fee": 0, "stamp_tax": 0, "total_fee": 0}
 
@@ -173,6 +173,7 @@ class TradeExecutionService:
         price: float,
         quantity: int,
         trade_type: str,
+        commission_rate: Optional[float] = None,
     ) -> Dict[str, float]:
         """
         计算交易费用（从账户配置读取费率）
@@ -182,9 +183,13 @@ class TradeExecutionService:
             price: 价格
             quantity: 数量
             trade_type: buy 或 sell
+            commission_rate: 佣金费率（可选，不传则使用 fee config 缓存）
         """
-        fees_cfg = self._fee_cache or DEFAULT_FEE_CONFIG
-        commission_rate = fees_cfg["commission_rate"]
+        if commission_rate is not None:
+            fees_cfg = self._fee_cache or DEFAULT_FEE_CONFIG
+        else:
+            fees_cfg = self._fee_cache or DEFAULT_FEE_CONFIG
+        commission_rate = commission_rate if commission_rate is not None else fees_cfg["commission_rate"]
         stamp_tax = fees_cfg["stamp_tax"]
         transfer_fee_rate = fees_cfg["transfer_fee"]
         min_commission = fees_cfg["min_commission"]

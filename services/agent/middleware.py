@@ -81,16 +81,26 @@ def check_rate_limit(agent_id: str, rate_per_min: int):
 async def verify_agent_key(
     request: Request,
     x_agent_key: Optional[str] = Header(None, alias="X-Agent-Key"),
+    authorization: Optional[str] = Header(None, alias="Authorization"),
 ) -> dict:
     """FastAPI 依赖：验证 Agent API Key，加载档案到 request.state
+
+    兼容两种认证方式：
+    - X-Agent-Key: sk-agent-xxxx（推荐）
+    - Authorization: Bearer sk-agent-xxxx（LiteLLM 等标准客户端）
 
     用法：
         @router.get("/agent/me")
         async def get_me(agent: dict = Depends(verify_agent_key)):
             ...
     """
-    if not x_agent_key:
-        raise HTTPException(status_code=401, detail="缺少 X-Agent-Key 请求头")
+    # 优先使用 X-Agent-Key，其次从 Authorization: Bearer 提取
+    api_key = x_agent_key
+    if not api_key and authorization and authorization.startswith("Bearer "):
+        api_key = authorization[7:]
+
+    if not api_key:
+        raise HTTPException(status_code=401, detail="缺少 X-Agent-Key 请求头或 Authorization: Bearer token")
 
     from services.agent.models import hash_api_key
     key_hash = hash_api_key(x_agent_key)
