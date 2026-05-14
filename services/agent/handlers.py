@@ -6,6 +6,7 @@ Phase 1 交付查询端点，后续阶段补充其他端点。
 """
 
 import json
+import math
 from typing import Optional, List
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Query, Path, Body, Request
@@ -1151,6 +1152,29 @@ async def query_data_index_constituent(
         return {"success": False, "error": str(e)}
 
 
+def _sanitize_nan(obj):
+    """将 NaN/Inf 转换为 None，避免 JSON 序列化失败"""
+    if isinstance(obj, float) and (math.isnan(obj) or math.isinf(obj)):
+        return None
+    return obj
+
+
+def _records_from_df(df, stock_code: str):
+    """将财务 DataFrame 过滤并转为 JSON records，清理 NaN"""
+    if df.empty:
+        return []
+    df.columns = df.columns.str.lower()
+    records = df[df["market_code"] == stock_code].to_dict(orient="records")
+    for record in records:
+        for key, value in record.items():
+            record[key] = _sanitize_nan(value)
+    return records
+
+
+# ================================================================
+# 财报数据
+# ================================================================
+
 @router.get("/query/data/financial/income")
 async def query_data_financial_income(
     request: Request,
@@ -1166,10 +1190,7 @@ async def query_data_financial_income(
         from services.common.sdk_manager import get_sdk_manager
         sdk_mgr = get_sdk_manager()
         df = sdk_mgr.get_income_statement(stock_codes=[stock_code])
-        if df.empty:
-            return {"success": True, "data": {"stock_code": stock_code, "records": []}}
-        df.columns = df.columns.str.lower()
-        records = df[df["market_code"] == stock_code].to_dict(orient="records")
+        records = _records_from_df(df, stock_code)
         return {"success": True, "data": {"stock_code": stock_code, "records": records, "count": len(records)}}
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -1190,10 +1211,7 @@ async def query_data_financial_balance(
         from services.common.sdk_manager import get_sdk_manager
         sdk_mgr = get_sdk_manager()
         df = sdk_mgr.get_balance_sheet(stock_codes=[stock_code])
-        if df.empty:
-            return {"success": True, "data": {"stock_code": stock_code, "records": []}}
-        df.columns = df.columns.str.lower()
-        records = df[df["market_code"] == stock_code].to_dict(orient="records")
+        records = _records_from_df(df, stock_code)
         return {"success": True, "data": {"stock_code": stock_code, "records": records, "count": len(records)}}
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -1214,10 +1232,7 @@ async def query_data_financial_cashflow(
         from services.common.sdk_manager import get_sdk_manager
         sdk_mgr = get_sdk_manager()
         df = sdk_mgr.get_cash_flow_statement(stock_codes=[stock_code])
-        if df.empty:
-            return {"success": True, "data": {"stock_code": stock_code, "records": []}}
-        df.columns = df.columns.str.lower()
-        records = df[df["market_code"] == stock_code].to_dict(orient="records")
+        records = _records_from_df(df, stock_code)
         return {"success": True, "data": {"stock_code": stock_code, "records": records, "count": len(records)}}
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -1238,10 +1253,7 @@ async def query_data_financial_profit_notice(
         from services.common.sdk_manager import get_sdk_manager
         sdk_mgr = get_sdk_manager()
         df = sdk_mgr.get_profit_notice(stock_codes=[stock_code])
-        if df.empty:
-            return {"success": True, "data": {"stock_code": stock_code, "records": []}}
-        df.columns = df.columns.str.lower()
-        records = df[df["market_code"] == stock_code].to_dict(orient="records")
+        records = _records_from_df(df, stock_code)
         return {"success": True, "data": {"stock_code": stock_code, "records": records, "count": len(records)}}
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -1262,10 +1274,7 @@ async def query_data_financial_profit_express(
         from services.common.sdk_manager import get_sdk_manager
         sdk_mgr = get_sdk_manager()
         df = sdk_mgr.get_profit_express(stock_codes=[stock_code])
-        if df.empty:
-            return {"success": True, "data": {"stock_code": stock_code, "records": []}}
-        df.columns = df.columns.str.lower()
-        records = df[df["market_code"] == stock_code].to_dict(orient="records")
+        records = _records_from_df(df, stock_code)
         return {"success": True, "data": {"stock_code": stock_code, "records": records, "count": len(records)}}
     except Exception as e:
         return {"success": False, "error": str(e)}

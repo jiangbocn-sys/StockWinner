@@ -182,12 +182,25 @@ async def get_index_constituent(
 # 财报数据
 # ================================================================
 
+import math
+
+def _sanitize_nan(obj):
+    """将 NaN/Inf 转换为 None，避免 JSON 序列化失败"""
+    if isinstance(obj, float) and (math.isnan(obj) or math.isinf(obj)):
+        return None
+    return obj
+
+
 def _financial_to_records(df, stock_code: str):
     """将财务 DataFrame 转为 JSON records"""
     if df.empty:
         return []
     df.columns = df.columns.str.lower()
     records = df[df["market_code"] == stock_code].to_dict(orient="records")
+    # 清理 NaN/Inf 值，避免 JSON 序列化失败
+    for record in records:
+        for key, value in record.items():
+            record[key] = _sanitize_nan(value)
     return records
 
 

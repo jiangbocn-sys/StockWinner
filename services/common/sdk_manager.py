@@ -9,10 +9,10 @@ SDK 登录管理器
 2. 所有 SDK 数据调用自动通过 SDKConnectionManager 排队，避免 TGW 连接数超限
 3. 其他模块应该通过 get_sdk_manager() 获取实例，禁止自行创建 SDK 连接
 
-设计原则：
-- SDKManager 负责：登录状态 + 实例缓存
-- SDKConnectionManager 负责：并发排队 + 超时控制
-- 所有数据获取方法内部自动 acquire/release token，调用方无需手动处理
+架构分层：
+- SDKConnectionManager（底层）：TGW 连接生命周期管理（状态检测、自动重连、并发排队、超时控制、错误报告）
+- SDKManager（中间层）：SDK 实例缓存 + 数据方法封装，连接需求透明委托给底层
+- 调用方：通过 get_sdk_manager() 获取实例，所有数据方法自动 acquire/release token
 """
 
 from typing import Optional, Dict
@@ -21,14 +21,18 @@ import asyncio
 
 
 class SDKManager:
-    """SDK 登录管理器（单例模式）"""
+    """SDK 登录管理器（单例模式）
+
+    连接生命周期委托给 SDKConnectionManager，本类只负责：
+    - SDK 实例缓存（避免重复创建）
+    - 数据方法封装（自动 acquire/release token）
+    """
 
     _instance: Optional['SDKManager'] = None
-    _login_cache: bool = False
     _info_instance = None
-    _base_data_instance = None  # 缓存 BaseData 实例，避免重复创建导致连接数超限
-    _market_data_instance = None  # 缓存 MarketData 实例
-    _calendar = None  # 缓存交易日历
+    _base_data_instance = None
+    _market_data_instance = None
+    _calendar = None
 
     def __new__(cls):
         if cls._instance is None:
@@ -42,56 +46,54 @@ class SDKManager:
             cls._instance = SDKManager()
         return cls._instance
 
+    # ================================================================
+    # 连接管理 — 委托给 SDKConnectionManager
+    # ================================================================
+
+    def _get_conn_mgr(self):
+        """获取底层连接管理器"""
+        from services.common.sdk_connection_manager import get_connection_manager
+        return get_connection_manager()
+
     def connect(self) -> bool:
-        """登录 SDK（连接状态的唯一入口）"""
-        return self._ensure_login()
+        """确保 SDK 连接可用（委托给连接管理器）"""
+        return self._get_conn_mgr().ensure_connected()
 
     def disconnect(self):
-        """登出 SDK，重置所有缓存"""
-        SDKManager._login_cache = False
+        """主动断开连接，重置实例缓存"""
+        self._get_conn_mgr().disconnect()
         SDKManager._base_data_instance = None
         SDKManager._market_data_instance = None
         SDKManager._info_instance = None
 
     def is_connected(self) -> bool:
-        """检查 SDK 是否已连接"""
-        return SDKManager._login_cache
+        """检查 SDK 连接状态"""
+        from services.common.sdk_connection_manager import ConnectionState
+        return self._get_conn_mgr().get_state() == ConnectionState.CONNECTED
 
-    def _ensure_login(self) -> bool:
-        """确保已登录 SDK（内部方法，外部请调用 connect()）"""
-        if not SDKManager._login_cache:
-            try:
-                from AmazingData import login
-                result = login(
-                    SDK_USERNAME,
-                    SDK_PASSWORD,
-                    SDK_HOST,
-                    SDK_PORT
-                )
-                if result:
-                    SDKManager._login_cache = True
-                    print("[SDK] 登录成功")
-                else:
-                    print("[SDK] 登录失败")
-            except Exception as e:
-                print(f"[SDK] 登录异常：{e}")
-                raise
-
-        return SDKManager._login_cache
+    def _ensure_connected(self) -> bool:
+        """确保连接可用（内部方法，外部请调用 connect()）"""
+        return self._get_conn_mgr().ensure_connected()
 
     # ================================================================
     # 连接令牌管理 — 所有 SDK 数据调用自动排队
     # ================================================================
 
-    def _get_conn_manager(self):
-        """获取 SDK 连接管理器"""
-        from services.common.sdk_connection_manager import get_connection_manager
-        return get_connection_manager()
-
     def _acquire_sync(self, task_type="download"):
-        """同步获取连接令牌"""
-        from services.common.sdk_connection_manager import TaskType
-        conn_mgr = self._get_conn_manager()
+        """同步获取连接令牌
+
+        先确保连接可用，再通过连接管理器 acquire 排队。
+        """
+        # 先确保连接可用
+        self._ensure_connected()
+
+        from services.common.sdk_connection_manager import TaskType, ConnectionState
+        conn_mgr = self._get_conn_mgr()
+
+        # 如果连接不可用，返回 None
+        if conn_mgr.get_state() != ConnectionState.CONNECTED:
+            return None
+
         ttype = TaskType.DOWNLOAD if task_type == "download" else (
             TaskType.SCREENING if task_type == "screening" else TaskType.QUERY
         )
@@ -130,20 +132,20 @@ class SDKManager:
             token.release()
 
     # ================================================================
-    # 实例获取方法 — 这些方法本身不发起 SDK 调用，不需要排队
+    # 实例获取方法 — 确保连接后返回缓存实例
     # ================================================================
 
     def get_info(self):
         """获取 InfoData 实例（缓存）"""
-        self._ensure_login()
+        self._ensure_connected()
         if SDKManager._info_instance is None:
             from AmazingData import InfoData
             SDKManager._info_instance = InfoData()
         return SDKManager._info_instance
 
     def get_base_data(self):
-        """获取 BaseData 实例（缓存，避免重复创建导致TGW连接数超限）"""
-        self._ensure_login()
+        """获取 BaseData 实例（缓存）"""
+        self._ensure_connected()
         if SDKManager._base_data_instance is None:
             from AmazingData import BaseData
             SDKManager._base_data_instance = BaseData()
@@ -157,8 +159,8 @@ class SDKManager:
         return SDKManager._calendar
 
     def get_market_data(self):
-        """获取 MarketData 实例（缓存，需要交易日历）"""
-        self._ensure_login()
+        """获取 MarketData 实例（缓存）"""
+        self._ensure_connected()
         if SDKManager._market_data_instance is None:
             from AmazingData import MarketData
             calendar = self.get_calendar()
@@ -266,7 +268,6 @@ class SDKManager:
 
     def get_code_info(self, security_type: str = 'EXTRA_STOCK_A') -> pd.DataFrame:
         """获取每日最新证券信息（自动排队）"""
-        self._ensure_login()
         token = self._acquire_sync("query")
         try:
             base_data = self.get_base_data()
@@ -282,7 +283,6 @@ class SDKManager:
 
     def get_code_list(self, security_type: str = 'EXTRA_STOCK_A') -> list:
         """获取每日最新代码表（自动排队）"""
-        self._ensure_login()
         token = self._acquire_sync("query")
         try:
             base_data = self.get_base_data()
@@ -321,7 +321,6 @@ class SDKManager:
         - query 大批量（21-100 只）：60s
         - download 下载批次：每只股票 30s，最少 5 分钟
         """
-        self._ensure_login()
         md = self.get_market_data()
         token = self._acquire_sync(task_type)
         try:
@@ -362,7 +361,6 @@ class SDKManager:
 
     def query_snapshot(self, code_list: list, begin_date: int, end_date: int) -> dict:
         """查询快照数据（自动排队）"""
-        self._ensure_login()
         md = self.get_market_data()
         token = self._acquire_sync("query")
         try:
@@ -386,7 +384,6 @@ class SDKManager:
 
     def get_industry_daily(self, code_list: list) -> Dict[str, pd.DataFrame]:
         """获取行业指数日行情数据（自动排队）"""
-        self._ensure_login()
         token = self._acquire_sync("download")
         try:
             info = self.get_info()
