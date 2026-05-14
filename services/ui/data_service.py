@@ -91,6 +91,10 @@ async def get_industry_list(
             return {"success": True, "data": [], "count": 0}
         filtered = df[df["LEVEL_TYPE"] == level]
         records = filtered.to_dict(orient="records")
+        # Clean NaN/Inf
+        for record in records:
+            for key, value in record.items():
+                record[key] = _sanitize_nan(value)
         return {"success": True, "data": records, "count": len(records)}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"获取行业列表失败：{str(e)}")
@@ -123,6 +127,9 @@ async def get_industry_kline(
                 lambda x: x.strftime("%Y-%m-%d") if hasattr(x, "strftime") else str(x)[:10]
             )
         records = df.to_dict(orient="records")
+        for record in records:
+            for key, value in record.items():
+                record[key] = _sanitize_nan(value)
         return {"success": True, "data": {"index_code": index_code, "kline": records, "count": len(records)}}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"获取行业行情失败：{str(e)}")
@@ -148,6 +155,9 @@ async def get_industry_constituent(
             return {"success": True, "data": {"index_code": index_code, "constituents": []}}
         df.columns = df.columns.str.lower()
         records = df.to_dict(orient="records")
+        for record in records:
+            for key, value in record.items():
+                record[key] = _sanitize_nan(value)
         return {"success": True, "data": {"index_code": index_code, "constituents": records, "count": len(records)}}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"获取行业成分股失败：{str(e)}")
@@ -173,6 +183,9 @@ async def get_index_constituent(
             return {"success": True, "data": {"index_code": index_code, "constituents": []}}
         df.columns = df.columns.str.lower()
         records = df.to_dict(orient="records")
+        for record in records:
+            for key, value in record.items():
+                record[key] = _sanitize_nan(value)
         return {"success": True, "data": {"index_code": index_code, "constituents": records, "count": len(records)}}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"获取指数成分股失败：{str(e)}")
@@ -183,11 +196,33 @@ async def get_index_constituent(
 # ================================================================
 
 import math
+import numpy as np
 
 def _sanitize_nan(obj):
-    """将 NaN/Inf 转换为 None，避免 JSON 序列化失败"""
+    """将 NaN/Inf 转换为 None，避免 JSON 序列化失败。
+    处理 Python float、numpy 浮点数、pandas NA、NaT 等所有变体。"""
+    if obj is None:
+        return None
+    # numpy 原生 NaN / Inf（DataFrame 中最常见）
+    if isinstance(obj, (np.floating, np.integer)):
+        if np.isnan(obj) or np.isinf(obj):
+            return None
+        return obj.item()  # numpy 标量 → Python 原生类型
+    # Python float
     if isinstance(obj, float) and (math.isnan(obj) or math.isinf(obj)):
         return None
+    # pandas NA / NaT
+    if obj is getattr(np, "NA", None) or obj is getattr(np, "NaT", None):
+        return None
+    # 兼容 pandas.api.extensions.NAType
+    try:
+        import pandas as pd
+        if obj is pd.NA or obj is pd.NaT:
+            return None
+        if isinstance(obj, pd.Timestamp):
+            return obj.strftime("%Y-%m-%d")
+    except Exception:
+        pass
     return obj
 
 
@@ -290,6 +325,9 @@ async def get_profit_notice(
             return {"success": True, "data": {"stock_code": stock_code, "records": []}}
         df.columns = df.columns.str.lower()
         records = df[df["market_code"] == stock_code].to_dict(orient="records")
+        for record in records:
+            for key, value in record.items():
+                record[key] = _sanitize_nan(value)
         return {"success": True, "data": {"stock_code": stock_code, "records": records, "count": len(records)}}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"获取业绩预告失败：{str(e)}")
@@ -315,6 +353,9 @@ async def get_profit_express(
             return {"success": True, "data": {"stock_code": stock_code, "records": []}}
         df.columns = df.columns.str.lower()
         records = df[df["market_code"] == stock_code].to_dict(orient="records")
+        for record in records:
+            for key, value in record.items():
+                record[key] = _sanitize_nan(value)
         return {"success": True, "data": {"stock_code": stock_code, "records": records, "count": len(records)}}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"获取业绩快报失败：{str(e)}")
@@ -349,6 +390,9 @@ async def get_dragon_tiger(
             return {"success": True, "data": {"stock_code": stock_code, "records": []}}
         df.columns = df.columns.str.lower()
         records = df.to_dict(orient="records")
+        for record in records:
+            for key, value in record.items():
+                record[key] = _sanitize_nan(value)
         return {"success": True, "data": {"stock_code": stock_code, "records": records, "count": len(records)}}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"获取龙虎榜数据失败：{str(e)}")
@@ -382,6 +426,9 @@ async def get_margin_summary(
             return {"success": True, "data": {"records": []}}
         df.columns = df.columns.str.lower()
         records = df.to_dict(orient="records")
+        for record in records:
+            for key, value in record.items():
+                record[key] = _sanitize_nan(value)
         return {"success": True, "data": {"records": records, "count": len(records)}}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"获取融资融券汇总失败：{str(e)}")
@@ -412,6 +459,9 @@ async def get_margin_detail(
             return {"success": True, "data": {"stock_code": stock_code, "records": []}}
         df.columns = df.columns.str.lower()
         records = df.to_dict(orient="records")
+        for record in records:
+            for key, value in record.items():
+                record[key] = _sanitize_nan(value)
         return {"success": True, "data": {"stock_code": stock_code, "records": records, "count": len(records)}}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"获取融资融券明细失败：{str(e)}")
@@ -446,6 +496,9 @@ async def get_block_trading(
             return {"success": True, "data": {"stock_code": stock_code, "records": []}}
         df.columns = df.columns.str.lower()
         records = df.to_dict(orient="records")
+        for record in records:
+            for key, value in record.items():
+                record[key] = _sanitize_nan(value)
         return {"success": True, "data": {"stock_code": stock_code, "records": records, "count": len(records)}}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"获取大宗交易数据失败：{str(e)}")
@@ -474,6 +527,9 @@ async def get_treasury_yield(
             return {"success": True, "data": {"records": []}}
         df.columns = df.columns.str.lower()
         records = df.to_dict(orient="records")
+        for record in records:
+            for key, value in record.items():
+                record[key] = _sanitize_nan(value)
         return {"success": True, "data": {"records": records, "count": len(records)}}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"获取国债收益率失败：{str(e)}")

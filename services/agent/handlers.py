@@ -6,7 +6,6 @@ Phase 1 交付查询端点，后续阶段补充其他端点。
 """
 
 import json
-import math
 from typing import Optional, List
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Query, Path, Body, Request
@@ -582,12 +581,12 @@ async def query_candidates(
     db = get_db_manager()
     if group_id:
         candidates = await db.fetchall(
-            "SELECT cs.* FROM candidate_stocks cs JOIN candidate_groups cg ON cs.group_id = cg.id WHERE cg.account_id = ? AND cs.group_id = ?",
+            "SELECT w.* FROM watchlist w JOIN candidate_groups cg ON w.group_id = cg.id WHERE cg.account_id = ? AND w.group_id = ? AND w.status IN ('pending', 'watching')",
             (account_id, group_id)
         )
     else:
         candidates = await db.fetchall(
-            "SELECT cs.* FROM candidate_stocks cs JOIN candidate_groups cg ON cs.group_id = cg.id WHERE cg.account_id = ? ORDER BY cs.stock_code",
+            "SELECT w.* FROM watchlist w JOIN candidate_groups cg ON w.group_id = cg.id WHERE cg.account_id = ? AND w.status IN ('pending', 'watching') ORDER BY w.stock_code",
             (account_id,)
         )
 
@@ -605,51 +604,33 @@ async def query_market(
     stock_code: str = Query(..., description="股票代码"),
     agent: dict = Depends(verify_agent_key),
 ):
-    """实时行情（通过 SDK）"""
+    """实时行情（通过 Gateway）"""
     await log_action(
         agent_id=agent["agent_id"], action="query.market", risk_level="low",
         ip_address=request.client.host if request.client else None,
     )
 
     try:
-        from services.common.sdk_manager import get_sdk_manager
-        sdk_mgr = get_sdk_manager()
+        from services.trading.gateway import get_gateway
+        gateway = await get_gateway()
 
         code = stock_code
         if '.' not in code:
             code = f"{code}.SH" if code.startswith('6') else f"{code}.SZ"
 
-        import datetime
-        from services.common.timezone import CHINA_TZ
-        end_dt = datetime.datetime.now(CHINA_TZ)
-        begin_dt = end_dt - datetime.timedelta(days=2)
-        end_date = int((end_dt + datetime.timedelta(days=1)).strftime('%Y%m%d'))
-        begin_date = int(begin_dt.strftime('%Y%m%d'))
-
-        kline_data = sdk_mgr.query_kline(
-            code_list=[code],
-            begin_date=begin_date,
-            end_date=end_date,
-            period=10008,  # day
-            task_type="query"
-        )
-
-        if kline_data and code in kline_data:
-            df = kline_data[code]
-            if len(df) > 0:
-                latest = df.iloc[-1]
-                return {
-                    "stock_code": code,
-                    "close": float(latest.get('close', 0)),
-                    "open": float(latest.get('open', 0)),
-                    "high": float(latest.get('high', 0)),
-                    "low": float(latest.get('low', 0)),
-                    "volume": int(latest.get('volume', 0)),
-                    "amount": float(latest.get('amount', 0)),
-                    "date": latest.get('trade_date', ''),
-                }
-
-        return {"stock_code": code, "error": "无数据"}
+        market_data = await gateway.get_market_data(code)
+        return {
+            "stock_code": code,
+            "close": market_data.current_price,
+            "open": market_data.open_price,
+            "high": market_data.high,
+            "low": market_data.low,
+            "volume": market_data.volume,
+            "amount": market_data.amount,
+            "date": market_data.trade_date,
+            "change_percent": market_data.change_percent,
+            "stock_name": market_data.stock_name,
+        }
     except Exception as e:
         return {"stock_code": stock_code, "error": str(e)}
 
@@ -869,97 +850,66 @@ async def query_stock_code(
         ip_address=request.client.host if request.client else None,
     )
 
-    db = get_db_manager()
-
     results = []
+
+    def _lookup_local(c):
+        """本地数据库查询（同步）"""
+        try:
+            import sqlite3 as _sqlite3
+            from pathlib import Path as _Path
+            kline_path = _Path(__file__).parent.parent.parent / "data" / "kline.db"
+            if kline_path.exists():
+                kconn = _sqlite3.connect(str(kline_path), timeout=30)
+                kconn.row_factory = _sqlite3.Row
+                row = kconn.execute(
+                    "SELECT DISTINCT stock_code, stock_name FROM kline_data WHERE stock_code = ? LIMIT 1",
+                    (c,)
+                ).fetchone()
+                if not row:
+                    row = kconn.execute(
+                        "SELECT DISTINCT stock_code, stock_name FROM stock_base_info WHERE stock_code = ? LIMIT 1",
+                        (c,)
+                    ).fetchone()
+                kconn.close()
+                if row:
+                    return {"stock_code": row["stock_code"], "stock_name": row["stock_name"]}
+        except Exception:
+            pass
+        return None
 
     # 代码 → 名称
     if stock_code:
         code = stock_code
         if '.' not in code:
-            # 自动匹配市场后缀：先按规则推测，再 fallback 双市场查找
             code_sh = f"{code}.SH"
             code_sz = f"{code}.SZ"
-            # 优先按 A 股规则快速推测
             inferred = code_sh if code.startswith('6') else code_sz
 
-            def _lookup(c):
-                try:
-                    import sqlite3 as _sqlite3
-                    from pathlib import Path as _Path
-                    kline_path = _Path(__file__).parent.parent.parent / "data" / "kline.db"
-                    if kline_path.exists():
-                        kconn = _sqlite3.connect(str(kline_path))
-                        kconn.row_factory = _sqlite3.Row
-                        row = kconn.execute(
-                            "SELECT DISTINCT stock_code, stock_name FROM kline_data WHERE stock_code = ? LIMIT 1",
-                            (c,)
-                        ).fetchone()
-                        if not row:
-                            row = kconn.execute(
-                                "SELECT DISTINCT stock_code, stock_name FROM stock_base_info WHERE stock_code = ? LIMIT 1",
-                                (c,)
-                            ).fetchone()
-                        kconn.close()
-                        if row:
-                            return {"stock_code": row["stock_code"], "stock_name": row["stock_name"]}
-                except Exception:
-                    pass
-                # SDK 兜底
-                try:
-                    from services.common.sdk_manager import get_sdk_manager
-                    sdk_mgr = get_sdk_manager()
-                    code_info = sdk_mgr.get_code_info()
-                    match = code_info[code_info["code"] == c]
-                    if len(match) > 0:
-                        return {"stock_code": c, "stock_name": match.iloc[0].get("name", "")}
-                except Exception:
-                    pass
-                return None
-
             # 先查推测的市场
-            result = _lookup(inferred)
+            result = _lookup_local(inferred)
             if result:
                 results.append(result)
             else:
-                # 另一个市场
                 other = code_sz if inferred == code_sh else code_sh
-                result = _lookup(other)
+                result = _lookup_local(other)
                 if result:
                     results.append(result)
         else:
-            # 已有完整代码后缀，直接查询
+            result = _lookup_local(code)
+            if result:
+                results.append(result)
+
+        # 本地无数据，通过 Gateway 查询
+        if not results:
             try:
-                import sqlite3 as _sqlite3
-                from pathlib import Path as _Path
-                kline_path = _Path(__file__).parent.parent.parent / "data" / "kline.db"
-                if kline_path.exists():
-                    kconn = _sqlite3.connect(str(kline_path))
-                    kconn.row_factory = _sqlite3.Row
-                    row = kconn.execute(
-                        "SELECT DISTINCT stock_code, stock_name FROM kline_data WHERE stock_code = ? LIMIT 1",
-                        (code,)
-                    ).fetchone()
-                    if not row:
-                        row = kconn.execute(
-                            "SELECT DISTINCT stock_code, stock_name FROM stock_base_info WHERE stock_code = ? LIMIT 1",
-                            (code,)
-                        ).fetchone()
-                    kconn.close()
-                    if row:
-                        results.append({"stock_code": row["stock_code"], "stock_name": row["stock_name"]})
+                from services.trading.gateway import get_gateway
+                gateway = await get_gateway()
+                code_info = await gateway.get_code_info()
+                match = [c for c in code_info if c.get("code") == code or c.get("code") == stock_code]
+                if match:
+                    results.append({"stock_code": match[0]["code"], "stock_name": match[0]["name"]})
             except Exception:
                 pass
-            if not results:
-                try:
-                    from services.common.sdk_manager import get_sdk_manager
-                    sdk_mgr = get_sdk_manager()
-                    code_info = sdk_mgr.get_code_info()
-                    match = code_info[code_info["code"] == code]
-                    if len(match) > 0:
-                        results.append({"stock_code": code, "stock_name": match.iloc[0].get("name", "")})
-                except Exception:
-                    pass
 
         if not results:
             return {"stock_code": code, "error": "未找到该股票"}
@@ -972,7 +922,7 @@ async def query_stock_code(
             from pathlib import Path as _Path
             kline_path = _Path(__file__).parent.parent.parent / "data" / "kline.db"
             if kline_path.exists():
-                kconn = _sqlite3.connect(str(kline_path))
+                kconn = _sqlite3.connect(str(kline_path), timeout=30)
                 kconn.row_factory = _sqlite3.Row
                 rows = kconn.execute(
                     "SELECT DISTINCT stock_code, stock_name FROM kline_data WHERE stock_name LIKE ? ORDER BY stock_code LIMIT 50",
@@ -985,15 +935,14 @@ async def query_stock_code(
 
         if not results:
             try:
-                from services.common.sdk_manager import get_sdk_manager
-                sdk_mgr = get_sdk_manager()
-                code_info = sdk_mgr.get_code_info()
-                mask = code_info["name"].str.contains(stock_name, na=False)
-                match = code_info[mask]
+                from services.trading.gateway import get_gateway
+                gateway = await get_gateway()
+                code_info = await gateway.get_code_info()
                 results = [
-                    {"stock_code": row["code"], "stock_name": row["name"]}
-                    for _, row in match.head(50).iterrows()
-                ]
+                    {"stock_code": c["code"], "stock_name": c["name"]}
+                    for c in code_info
+                    if stock_name in c.get("name", "")
+                ][:50]
             except Exception:
                 pass
 
@@ -1062,13 +1011,9 @@ async def query_data_industry_list(
         ip_address=request.client.host if request.client else None,
     )
     try:
-        from services.common.sdk_manager import get_sdk_manager
-        sdk_mgr = get_sdk_manager()
-        df = sdk_mgr.get_industry_base_info()
-        if df.empty:
-            return {"success": True, "data": [], "count": 0}
-        filtered = df[df["LEVEL_TYPE"] == level]
-        records = filtered.to_dict(orient="records")
+        from services.trading.gateway import get_gateway
+        gateway = await get_gateway()
+        records = await gateway.get_industry_list(level=level)
         return {"success": True, "data": records, "count": len(records)}
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -1086,19 +1031,9 @@ async def query_data_industry_kline(
         ip_address=request.client.host if request.client else None,
     )
     try:
-        from services.common.sdk_manager import get_sdk_manager
-        sdk_mgr = get_sdk_manager()
-        result = sdk_mgr.get_industry_daily(code_list=[index_code])
-        if not result or index_code not in result:
-            return {"success": True, "data": {"index_code": index_code, "kline": []}}
-        df = result[index_code]
-        df = df.reset_index()
-        df.columns = df.columns.str.lower()
-        if "trade_date" in df.columns:
-            df["trade_date"] = df["trade_date"].apply(
-                lambda x: x.strftime("%Y-%m-%d") if hasattr(x, "strftime") else str(x)[:10]
-            )
-        records = df.to_dict(orient="records")
+        from services.trading.gateway import get_gateway
+        gateway = await get_gateway()
+        records = await gateway.get_industry_kline(index_code)
         return {"success": True, "data": {"index_code": index_code, "kline": records, "count": len(records)}}
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -1116,13 +1051,9 @@ async def query_data_industry_constituent(
         ip_address=request.client.host if request.client else None,
     )
     try:
-        from services.common.sdk_manager import get_sdk_manager
-        sdk_mgr = get_sdk_manager()
-        df = sdk_mgr.get_industry_constituent(index_codes=[index_code])
-        if df.empty:
-            return {"success": True, "data": {"index_code": index_code, "constituents": []}}
-        df.columns = df.columns.str.lower()
-        records = df.to_dict(orient="records")
+        from services.trading.gateway import get_gateway
+        gateway = await get_gateway()
+        records = await gateway.get_industry_constituent(index_code)
         return {"success": True, "data": {"index_code": index_code, "constituents": records, "count": len(records)}}
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -1140,35 +1071,12 @@ async def query_data_index_constituent(
         ip_address=request.client.host if request.client else None,
     )
     try:
-        from services.common.sdk_manager import get_sdk_manager
-        sdk_mgr = get_sdk_manager()
-        df = sdk_mgr.get_index_constituent(index_codes=[index_code])
-        if df.empty:
-            return {"success": True, "data": {"index_code": index_code, "constituents": []}}
-        df.columns = df.columns.str.lower()
-        records = df.to_dict(orient="records")
+        from services.trading.gateway import get_gateway
+        gateway = await get_gateway()
+        records = await gateway.get_index_constituent(index_code)
         return {"success": True, "data": {"index_code": index_code, "constituents": records, "count": len(records)}}
     except Exception as e:
         return {"success": False, "error": str(e)}
-
-
-def _sanitize_nan(obj):
-    """将 NaN/Inf 转换为 None，避免 JSON 序列化失败"""
-    if isinstance(obj, float) and (math.isnan(obj) or math.isinf(obj)):
-        return None
-    return obj
-
-
-def _records_from_df(df, stock_code: str):
-    """将财务 DataFrame 过滤并转为 JSON records，清理 NaN"""
-    if df.empty:
-        return []
-    df.columns = df.columns.str.lower()
-    records = df[df["market_code"] == stock_code].to_dict(orient="records")
-    for record in records:
-        for key, value in record.items():
-            record[key] = _sanitize_nan(value)
-    return records
 
 
 # ================================================================
@@ -1187,10 +1095,9 @@ async def query_data_financial_income(
         ip_address=request.client.host if request.client else None,
     )
     try:
-        from services.common.sdk_manager import get_sdk_manager
-        sdk_mgr = get_sdk_manager()
-        df = sdk_mgr.get_income_statement(stock_codes=[stock_code])
-        records = _records_from_df(df, stock_code)
+        from services.trading.gateway import get_gateway
+        gateway = await get_gateway()
+        records = await gateway.get_income_statement(stock_code)
         return {"success": True, "data": {"stock_code": stock_code, "records": records, "count": len(records)}}
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -1208,10 +1115,9 @@ async def query_data_financial_balance(
         ip_address=request.client.host if request.client else None,
     )
     try:
-        from services.common.sdk_manager import get_sdk_manager
-        sdk_mgr = get_sdk_manager()
-        df = sdk_mgr.get_balance_sheet(stock_codes=[stock_code])
-        records = _records_from_df(df, stock_code)
+        from services.trading.gateway import get_gateway
+        gateway = await get_gateway()
+        records = await gateway.get_balance_sheet(stock_code)
         return {"success": True, "data": {"stock_code": stock_code, "records": records, "count": len(records)}}
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -1229,10 +1135,9 @@ async def query_data_financial_cashflow(
         ip_address=request.client.host if request.client else None,
     )
     try:
-        from services.common.sdk_manager import get_sdk_manager
-        sdk_mgr = get_sdk_manager()
-        df = sdk_mgr.get_cash_flow_statement(stock_codes=[stock_code])
-        records = _records_from_df(df, stock_code)
+        from services.trading.gateway import get_gateway
+        gateway = await get_gateway()
+        records = await gateway.get_cash_flow_statement(stock_code)
         return {"success": True, "data": {"stock_code": stock_code, "records": records, "count": len(records)}}
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -1250,10 +1155,9 @@ async def query_data_financial_profit_notice(
         ip_address=request.client.host if request.client else None,
     )
     try:
-        from services.common.sdk_manager import get_sdk_manager
-        sdk_mgr = get_sdk_manager()
-        df = sdk_mgr.get_profit_notice(stock_codes=[stock_code])
-        records = _records_from_df(df, stock_code)
+        from services.trading.gateway import get_gateway
+        gateway = await get_gateway()
+        records = await gateway.get_profit_notice(stock_code)
         return {"success": True, "data": {"stock_code": stock_code, "records": records, "count": len(records)}}
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -1271,10 +1175,9 @@ async def query_data_financial_profit_express(
         ip_address=request.client.host if request.client else None,
     )
     try:
-        from services.common.sdk_manager import get_sdk_manager
-        sdk_mgr = get_sdk_manager()
-        df = sdk_mgr.get_profit_express(stock_codes=[stock_code])
-        records = _records_from_df(df, stock_code)
+        from services.trading.gateway import get_gateway
+        gateway = await get_gateway()
+        records = await gateway.get_profit_express(stock_code)
         return {"success": True, "data": {"stock_code": stock_code, "records": records, "count": len(records)}}
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -1294,13 +1197,9 @@ async def query_data_dragon_tiger(
         ip_address=request.client.host if request.client else None,
     )
     try:
-        from services.common.sdk_manager import get_sdk_manager
-        sdk_mgr = get_sdk_manager()
-        df = sdk_mgr.get_long_hu_bang(stock_codes=[stock_code], begin_date=start_date, end_date=end_date)
-        if df.empty:
-            return {"success": True, "data": {"stock_code": stock_code, "records": []}}
-        df.columns = df.columns.str.lower()
-        records = df.to_dict(orient="records")
+        from services.trading.gateway import get_gateway
+        gateway = await get_gateway()
+        records = await gateway.get_long_hu_bang(stock_code, start_date, end_date)
         return {"success": True, "data": {"stock_code": stock_code, "records": records, "count": len(records)}}
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -1319,13 +1218,9 @@ async def query_data_margin_summary(
         ip_address=request.client.host if request.client else None,
     )
     try:
-        from services.common.sdk_manager import get_sdk_manager
-        sdk_mgr = get_sdk_manager()
-        df = sdk_mgr.get_margin_summary(begin_date=start_date, end_date=end_date)
-        if df.empty:
-            return {"success": True, "data": {"records": []}}
-        df.columns = df.columns.str.lower()
-        records = df.to_dict(orient="records")
+        from services.trading.gateway import get_gateway
+        gateway = await get_gateway()
+        records = await gateway.get_margin_summary(start_date, end_date)
         return {"success": True, "data": {"records": records, "count": len(records)}}
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -1345,13 +1240,9 @@ async def query_data_margin_detail(
         ip_address=request.client.host if request.client else None,
     )
     try:
-        from services.common.sdk_manager import get_sdk_manager
-        sdk_mgr = get_sdk_manager()
-        df = sdk_mgr.get_margin_detail(stock_codes=[stock_code], begin_date=start_date, end_date=end_date)
-        if df.empty:
-            return {"success": True, "data": {"stock_code": stock_code, "records": []}}
-        df.columns = df.columns.str.lower()
-        records = df.to_dict(orient="records")
+        from services.trading.gateway import get_gateway
+        gateway = await get_gateway()
+        records = await gateway.get_margin_detail(stock_code, start_date, end_date)
         return {"success": True, "data": {"stock_code": stock_code, "records": records, "count": len(records)}}
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -1371,13 +1262,9 @@ async def query_data_block_trading(
         ip_address=request.client.host if request.client else None,
     )
     try:
-        from services.common.sdk_manager import get_sdk_manager
-        sdk_mgr = get_sdk_manager()
-        df = sdk_mgr.get_block_trading(stock_codes=[stock_code], begin_date=start_date, end_date=end_date)
-        if df.empty:
-            return {"success": True, "data": {"stock_code": stock_code, "records": []}}
-        df.columns = df.columns.str.lower()
-        records = df.to_dict(orient="records")
+        from services.trading.gateway import get_gateway
+        gateway = await get_gateway()
+        records = await gateway.get_block_trading(stock_code, start_date, end_date)
         return {"success": True, "data": {"stock_code": stock_code, "records": records, "count": len(records)}}
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -1394,13 +1281,9 @@ async def query_data_treasury_yield(
         ip_address=request.client.host if request.client else None,
     )
     try:
-        from services.common.sdk_manager import get_sdk_manager
-        sdk_mgr = get_sdk_manager()
-        df = sdk_mgr.get_treasury_yield()
-        if df.empty:
-            return {"success": True, "data": {"records": []}}
-        df.columns = df.columns.str.lower()
-        records = df.to_dict(orient="records")
+        from services.trading.gateway import get_gateway
+        gateway = await get_gateway()
+        records = await gateway.get_treasury_yield()
         return {"success": True, "data": {"records": records, "count": len(records)}}
     except Exception as e:
         return {"success": False, "error": str(e)}

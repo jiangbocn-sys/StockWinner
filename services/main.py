@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
+from typing import Optional
 import asyncio
 import os
 
@@ -509,6 +510,21 @@ async def lifespan(app: FastAPI):
 
     from services.common.scheduler_service import stop_scheduler
     stop_scheduler()
+
+    # 断开 SDK 连接，清理 gateway 缓存
+    try:
+        from services.common.sdk_manager import get_sdk_manager
+        get_sdk_manager().disconnect()
+        print("SDK 连接已断开")
+    except Exception as e:
+        print(f"断开 SDK 连接失败: {e}")
+
+    try:
+        from services.trading.gateway import clear_gateway_cache
+        clear_gateway_cache()
+    except Exception:
+        pass
+
     await db_manager.close()
     reset_db_manager()
     reset_account_manager()
@@ -589,9 +605,70 @@ async def ui_token_middleware(request: Request, call_next):
 
 # ============================================================
 # Agent 安全约束中间件
-# 任何携带 X-Agent-Key 的请求（无论走哪个路径）都必须通过 Agent 认证 + 审计
+# 任何携带 X-Agent-Key 的请求（无论走哪个路径）都必须通过 Agent 认证 + 权限校验 + 审计
 # 不携带该 header 的请求（浏览器/UI）完全不受影响
 # ============================================================
+
+# Agent 路径 → 权限映射：将 URL 路径 + HTTP 方法映射到所需权限
+# 仅对写操作（POST/PUT/DELETE/PATCH）进行权限检查，GET 由 query:* 覆盖
+_AGENT_ACTION_PERMS: dict = {
+    # 手动下单 / 信号执行
+    ("POST", "manual-order/submit"): "trading:execute",
+    ("POST", "signals/*/execute"): "trading:execute",
+    ("POST", "signals/*/cancel"): "trading:execute",
+    ("POST", "signals/clear"): "trading:execute",
+    # 监控服务启停
+    ("POST", "monitoring/start"): "monitoring:start",
+    ("POST", "monitoring/stop"): "monitoring:stop",
+    # 调度/任务管理
+    ("POST", "scheduler/*"): "scheduler:start",
+    ("PUT", "scheduler/*"): "scheduler:start",
+    ("DELETE", "scheduler/*"): "scheduler:stop",
+    # 策略管理（写操作）
+    ("POST", "strategies"): "strategy:create",
+    ("PUT", "strategies/*"): "strategy:update",
+    ("DELETE", "strategies/*"): "strategy:delete",
+    ("POST", "strategies/*/execute"): "strategy:execute",
+    # 选股任务
+    ("POST", "screening/*"): "screening:create",
+    # 账户管理
+    ("PUT", "accounts/*"): "account:write",
+    ("POST", "accounts/*"): "account:write",
+    # 持仓调整规则
+    ("POST", "position-rules/*"): "account:write",
+    ("PUT", "position-rules/*"): "account:write",
+    # 通知配置
+    ("POST", "notifications/webhook"): "system:config",
+    ("DELETE", "notifications/webhook"): "system:config",
+    # LLM 配置
+    ("POST", "llm/*"): "system:config",
+    ("PUT", "llm/*"): "system:config",
+    ("DELETE", "llm/*"): "system:config",
+    # Agent 管理
+    ("POST", "auth/agent/*"): "agent:manage",
+    ("DELETE", "auth/agent/*"): "agent:manage",
+    ("PUT", "auth/agent/*"): "agent:manage",
+}
+
+
+def _match_agent_action(method: str, path: str) -> Optional[str]:
+    """根据方法和路径匹配所需权限"""
+    # 先尝试精确匹配
+    key = (method, path)
+    if key in _AGENT_ACTION_PERMS:
+        return _AGENT_ACTION_PERMS[key]
+    # 通配符匹配
+    for (m, p), perm in _AGENT_ACTION_PERMS.items():
+        if m != method:
+            continue
+        if p.endswith("*"):
+            prefix = p[:-1]  # 去掉末尾 *
+            if path.startswith(prefix):
+                return perm
+        elif p == path:
+            return perm
+    return None
+
 
 @app.middleware("http")
 async def agent_security_middleware(request: Request, call_next):
@@ -605,7 +682,7 @@ async def agent_security_middleware(request: Request, call_next):
         return await call_next(request)
 
     # 携带了 X-Agent-Key → 必须走 Agent 认证
-    from services.agent.models import hash_api_key, get_effective_permissions, ROLE_RATE_LIMITS
+    from services.agent.models import hash_api_key, get_effective_permissions, ROLE_RATE_LIMITS, has_permission
     import json as _json
 
     key_hash = hash_api_key(agent_key)
@@ -652,6 +729,14 @@ async def agent_security_middleware(request: Request, call_next):
     request.state.agent_allowed_accounts = allowed_accounts
     request.state.agent_rate_limit = agent.get("rate_limit_per_min") or ROLE_RATE_LIMITS.get(agent["role"], 60)
     request.state.is_agent_request = True
+
+    # 权限检查（仅写操作）
+    method = request.method
+    if method in ("POST", "PUT", "DELETE", "PATCH"):
+        path = request.url.path.lstrip("/api/v1/")
+        required_perm = _match_agent_action(method, path)
+        if required_perm and not has_permission(effective_perms, required_perm):
+            return JSONResponse(status_code=403, content={"success": False, "message": f"权限不足：需要 '{required_perm}' 权限"})
 
     # 限速检查
     from services.agent.middleware import check_rate_limit
