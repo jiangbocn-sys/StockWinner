@@ -367,7 +367,6 @@ async def lifespan(app: FastAPI):
     # T+1 解冻（每次启动执行，只解冻今天之前买入的持仓）
     try:
         from services.trading.position_manager import get_position_manager
-        from services.common.timezone import get_china_time
         accounts = await db_manager.fetchall("SELECT DISTINCT account_id FROM stock_positions")
         today = get_china_time().strftime("%Y-%m-%d")
         total_thawed = 0
