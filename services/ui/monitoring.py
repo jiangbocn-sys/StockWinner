@@ -519,19 +519,6 @@ async def submit_manual_order(
                 "message": f"单笔仓位限制：该金额（{total_amount:.2f} 元）超过可用资金的 15%（{account_available_cash * 0.15:.2f} 元），请减少数量",
             }
 
-    # 非交易时段检查
-    from services.trading.trading_hours import can_trade, get_trading_phase, get_phase_description
-    trading_warning = None
-    if not can_trade():
-        phase = get_trading_phase()
-        phase_desc = get_phase_description(phase)
-        if order_type == "day":
-            return {
-                "success": False,
-                "message": f"非交易时段({phase_desc})，无法提交当日单。请切换为长期有效单(GTC)或等交易时段再试。",
-            }
-        trading_warning = f"当前非交易时段({phase_desc})，长期有效单已提交，交易时段自动生效"
-
     from services.common.stock_code import normalize_stock_code
     normalized_code = normalize_stock_code(stock_code)
 
@@ -625,8 +612,5 @@ async def submit_manual_order(
         "trade_type": trade_type,
         "watchlist_action": watchlist_action,
     }
-
-    if trading_warning:
-        result["warning"] = trading_warning
 
     return result

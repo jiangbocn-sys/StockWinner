@@ -364,22 +364,32 @@ async def lifespan(app: FastAPI):
     except Exception:
         pass
 
-    # T+1 解冻（每次启动执行）
+    # T+1 解冻（每次启动执行，只解冻今天之前买入的持仓）
     try:
-        positions = await db_manager.fetchall(
-            "SELECT DISTINCT account_id FROM stock_positions WHERE available_quantity < quantity"
-        )
-        for row in positions:
-            await db_manager.execute(
-                "UPDATE stock_positions SET available_quantity = quantity, updated_at = ? WHERE account_id = ? AND available_quantity < quantity",
-                (get_china_time().isoformat(), row["account_id"])
+        from services.trading.position_manager import get_position_manager
+        from services.common.timezone import get_china_time
+        accounts = await db_manager.fetchall("SELECT DISTINCT account_id FROM stock_positions")
+        today = get_china_time().strftime("%Y-%m-%d")
+        total_thawed = 0
+        total_reset = 0
+        for row in accounts:
+            pm = get_position_manager(row["account_id"])
+            count = await pm.unfreeze_positions()
+            total_thawed += count
+            # 重置 watchlist pending→watching，排除今天有买入的股票
+            result = await db_manager.execute(
+                """UPDATE watchlist SET status = 'watching'
+                   WHERE account_id = ? AND status = 'pending'
+                   AND stock_code NOT IN (
+                       SELECT stock_code FROM trade_records
+                       WHERE account_id = ? AND trade_type = 'buy'
+                         AND date(trade_time) = ?
+                   )""",
+                (row["account_id"], row["account_id"], today)
             )
-            await db_manager.execute(
-                "UPDATE watchlist SET status = 'watching' WHERE account_id = ? AND status = 'pending'",
-                (row["account_id"],)
-            )
-        if positions:
-            log.log_event("migration_t1_thaw", f"已解冻 {len(positions)} 个账户的 T+1 持仓，pending 状态已重置为 watching", count=len(positions))
+            total_reset += getattr(result, 'rowcount', 0) if hasattr(result, 'rowcount') else 0
+        if total_thawed > 0 or total_reset > 0:
+            log.log_event("migration_t1_thaw", f"已解冻 {total_thawed} 只持仓，{total_reset} 个 pending 已重置为 watching", count=total_thawed)
     except Exception as e:
         log.error("db_migration", f"T+1 解冻跳过 ({e})")
 

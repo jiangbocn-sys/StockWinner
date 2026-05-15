@@ -1189,11 +1189,19 @@ class SchedulerService:
                 if count > 0:
                     logger.info(f"T+1 解冻账户 {row['account_id']}: {count} 只股票")
 
-                # 将该账户 watchlist 中所有 pending 状态重置为 watching
-                # 防止昨日因信号进入 pending 的股票被重复买入
+                # 将该账户 watchlist 中 pending 状态重置为 watching
+                # 但排除今天有买入的股票（T+1 规则，次日才能交易）
+                from services.common.timezone import get_china_time
+                today = get_china_time().strftime("%Y-%m-%d")
                 result = await db.execute(
-                    "UPDATE watchlist SET status = 'watching' WHERE account_id = ? AND status = 'pending'",
-                    (row["account_id"],)
+                    """UPDATE watchlist SET status = 'watching'
+                       WHERE account_id = ? AND status = 'pending'
+                       AND stock_code NOT IN (
+                           SELECT stock_code FROM trade_records
+                           WHERE account_id = ? AND trade_type = 'buy'
+                             AND date(trade_time) = ?
+                       )""",
+                    (row["account_id"], row["account_id"], today)
                 )
                 reset_count = getattr(result, 'rowcount', 0) if hasattr(result, 'rowcount') else 0
                 if reset_count > 0:

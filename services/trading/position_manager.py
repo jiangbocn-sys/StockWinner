@@ -140,16 +140,60 @@ class PositionManager:
         """
         解冻昨日买入的持仓（T+1 规则）
 
+        只解冻今天之前买入的份额，今日买入的继续冻结。
+        对于今天有买入的股票：available = quantity - 今日买入量
+        对于今天无买入的股票：available = quantity（全部解冻）
+
         Returns:
             解冻数量
         """
-        result = await self.db.execute(
+        now = get_china_time()
+        today = now.strftime("%Y-%m-%d")
+
+        # 1. 今天无买入的持仓：全部解冻
+        no_buy_today = await self.db.execute(
             """UPDATE stock_positions
                SET available_quantity = quantity, updated_at = ?
-               WHERE account_id = ? AND available_quantity < quantity""",
-            (get_china_time().isoformat(), self.account_id)
+               WHERE account_id = ?
+                 AND available_quantity < quantity
+                 AND stock_code NOT IN (
+                     SELECT stock_code FROM trade_records
+                     WHERE account_id = ? AND trade_type = 'buy'
+                       AND date(trade_time) = ?
+                 )""",
+            (now.isoformat(), self.account_id, self.account_id, today)
         )
-        return result.rowcount if result.rowcount else 0
+        count = no_buy_today.rowcount if no_buy_today.rowcount else 0
+
+        # 2. 今天有买入的持仓：available = quantity - 今日买入量
+        #    仅对 available != quantity - today_buy 的记录执行更新
+        partial_unfreeze = await self.db.execute(
+            """UPDATE stock_positions
+               SET available_quantity = quantity - COALESCE(
+                       (SELECT SUM(t.quantity) FROM trade_records t
+                        WHERE t.account_id = stock_positions.account_id
+                          AND t.stock_code = stock_positions.stock_code
+                          AND t.trade_type = 'buy'
+                          AND date(t.trade_time) = ?), 0),
+                   updated_at = ?
+               WHERE account_id = ?
+                 AND stock_code IN (
+                     SELECT stock_code FROM trade_records
+                     WHERE account_id = ? AND trade_type = 'buy'
+                       AND date(trade_time) = ?
+                 )
+                 AND available_quantity != quantity - COALESCE(
+                       (SELECT SUM(t.quantity) FROM trade_records t
+                        WHERE t.account_id = stock_positions.account_id
+                          AND t.stock_code = stock_positions.stock_code
+                          AND t.trade_type = 'buy'
+                          AND date(t.trade_time) = ?), 0)""",
+            (today, now.isoformat(), self.account_id,
+             self.account_id, today, today)
+        )
+        count += partial_unfreeze.rowcount if partial_unfreeze.rowcount else 0
+
+        return count
 
 
 # 全局缓存
