@@ -1316,8 +1316,8 @@ class SchedulerService:
                         sdk_mgr = get_sdk_manager()
                         if sdk_mgr.connect():
                             today_int = int(get_china_time().strftime('%Y%m%d'))
-                            # 分批查询，每批 10 只，避免超时
-                            batch_size = 10
+                            # 分批查询，每批 50 只，避免超时
+                            batch_size = 50
                             for i in range(0, len(stock_codes), batch_size):
                                 batch_codes = stock_codes[i:i + batch_size]
                                 try:
