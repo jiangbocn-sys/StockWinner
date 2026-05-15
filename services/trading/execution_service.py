@@ -255,6 +255,19 @@ class TradeExecutionService:
                 "fees": {"commission": 0, "transfer_fee": 0, "stamp_tax": 0, "total_fee": 0}
             }
 
+        # 计算可买数量和费用
+        quantity, total_amount, fees = await self.calculate_buy_quantity(
+            stock_code, price, target_quantity
+        )
+
+        if quantity <= 0:
+            return {
+                "success": False,
+                "message": "可用资金不足",
+                "quantity": 0,
+                "fees": {"commission": 0, "transfer_fee": 0, "stamp_tax": 0, "total_fee": 0}
+            }
+
         # 创建订单（pending 状态）
         from services.trading.order_service import get_order_service
         order_svc = get_order_service(self.account_id)
@@ -263,7 +276,7 @@ class TradeExecutionService:
             stock_name=stock_name,
             trade_type="buy",
             price=price,
-            quantity=target_quantity or 100,
+            quantity=quantity,
             trigger_source=trigger_source,
             stop_loss_price=None,
             take_profit_price=None,
@@ -273,7 +286,7 @@ class TradeExecutionService:
         try:
             from services.trading.risk_service import get_risk_service
             risk = get_risk_service(self.account_id)
-            passed, reason = await risk.check_buy(stock_code, price, target_quantity or 100)
+            passed, reason = await risk.check_buy(stock_code, price, quantity)
             if not passed:
                 await order_svc.update_status(db_order_id, "rejected", reject_reason=reason)
                 return {
@@ -284,20 +297,6 @@ class TradeExecutionService:
                 }
         except Exception as e:
             print(f"[RiskService] 风控检查异常: {e}，放行")
-
-        # 计算可买数量和费用
-        quantity, total_amount, fees = await self.calculate_buy_quantity(
-            stock_code, price, target_quantity
-        )
-
-        if quantity <= 0:
-            await order_svc.update_status(db_order_id, "rejected", reject_reason="可用资金不足")
-            return {
-                "success": False,
-                "message": "可用资金不足",
-                "quantity": 0,
-                "fees": fees
-            }
 
         # 更新订单为 submitted
         await order_svc.update_status(db_order_id, "submitted")
