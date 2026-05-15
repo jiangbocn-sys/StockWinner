@@ -39,34 +39,6 @@
         </div>
       </el-card>
 
-      <!-- 本地数据状态 -->
-      <el-card class="status-card">
-        <el-descriptions :column="5" border>
-          <el-descriptions-item label="本地股票数">{{ dataStats.total_stocks || 0 }}</el-descriptions-item>
-          <el-descriptions-item label="K 线数据量">{{ dataStats.total_records || 0 }}</el-descriptions-item>
-          <el-descriptions-item label="最新日期">{{ dataStats.latest_date || '无数据' }}</el-descriptions-item>
-          <el-descriptions-item label="最早日期">{{ dataStats.earliest_date || '无数据' }}</el-descriptions-item>
-          <el-descriptions-item label="数据源">
-            <el-tag :type="dataStats.total_stocks > 0 ? 'success' : 'warning'" size="small">
-              {{ dataStats.total_stocks > 0 ? '本地' : 'SDK' }}
-            </el-tag>
-          </el-descriptions-item>
-        </el-descriptions>
-      </el-card>
-
-      <!-- 服务状态 -->
-      <el-card class="status-card">
-        <el-descriptions :column="3" border>
-          <el-descriptions-item label="监控服务">
-            <el-tag :type="monitoringRunning ? 'success' : 'info'" size="small">
-              {{ monitoringRunning ? '运行中' : '已停止' }}
-            </el-tag>
-          </el-descriptions-item>
-          <el-descriptions-item label="当前候选组">{{ currentGroup?.label || '未选择' }}</el-descriptions-item>
-          <el-descriptions-item label="候选股票数">{{ currentStocks.length }}</el-descriptions-item>
-        </el-descriptions>
-      </el-card>
-
       <!-- 左右分栏：候选组 + 股票列表（宽度可调） -->
       <div class="main-row resizable-split">
         <!-- 左侧：候选组列表 -->
@@ -547,11 +519,6 @@ const currentGroup = computed(() => candidateGroups.value.find(g => g.id === sel
 const currentStocks = ref([])
 const stocksLoading = ref(false)
 const filterStatus = ref('')
-
-// 服务状态
-const loading = ref(false)
-const monitoringRunning = ref(false)
-const dataStats = ref({ total_stocks: 0, total_records: 0, latest_date: null, earliest_date: null })
 
 // 策略
 const strategies = ref([])
@@ -1418,30 +1385,9 @@ const rejectCandidates = async (rejectAll) => {
 
 const cancelCandidates = () => { showCandidatesDialog.value = false; screeningProgress.processing = false; screeningProgress.status = '' }
 
-const loadDataStats = async () => {
-  try {
-    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/data/stats`)
-    const data = await res.json()
-    if (data.success) dataStats.value = data.stats
-  } catch (e) {
-    console.error('加载数据统计失败:', e)
-  }
-}
-
-const checkServiceStatus = async () => {
-  try {
-    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/monitoring/status`)
-    const data = await res.json()
-    monitoringRunning.value = data.monitoring?.running || false
-  } catch (e) {
-    console.error('检查服务状态失败:', e)
-  }
-}
-
 const loadAll = async () => {
   await loadGroups()
   if (selectedGroupId.value) await loadCurrentGroupStocks()
-  await loadDataStats()
 }
 
 const getStatusType = (status) => ({ pending: 'info', watching: 'warning', bought: 'success', sold: 'success', ignored: 'info' }[status] || 'info')
@@ -1488,8 +1434,6 @@ onUnmounted(() => {
 })
 
 onMounted(async () => {
-  await checkServiceStatus()
-  await loadDataStats()
   await loadStrategies()
   await loadGroups()
   // 默认选中第一个组
@@ -1506,7 +1450,6 @@ onMounted(async () => {
 .main-content { padding: 20px; }
 .page-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
 .page-header h2 { color: #303133; margin: 0; }
-.status-card { margin-bottom: 20px; }
 .card-header { display: flex; justify-content: space-between; align-items: center; }
 .stock-toolbar { flex-wrap: wrap; gap: 8px; }
 .progress-card { margin-bottom: 20px; }
