@@ -801,21 +801,11 @@ class TradingMonitor:
         # 检查买入条件
         if status == 'pending':
             if buy_price > 0 and abs(current_price - buy_price) / buy_price <= 0.02:
-                # 防重复：检查是否已有 pending 的 trading_signals 记录
-                existing_signal = await db.fetchone(
-                    "SELECT id FROM trading_signals WHERE account_id = ? AND stock_code = ? AND status = 'pending' AND strategy_id IS NULL",
-                    (account_id, stock_code)
-                )
-                if not existing_signal:
-                    get_logger("monitor").log_event("buy_signal",
-                        f"触发买入信号：{stock_code}, 目标价：{buy_price:.2f}, 当前价：{current_price:.2f}",
-                        stock_code=stock_code, buy_price=buy_price, current_price=current_price)
-                    await self._create_pending_signal(account_id, stock, 'buy', current_price, target_quantity)
-                    await self._execute_buy_signal(account_id, stock, current_price, target_quantity)
-                else:
-                    get_logger("monitor").log_event("buy_signal_skip",
-                        f"跳过 watchlist pending 信号 {stock_code}，已有 pending 的 trading_signals 记录（id={existing_signal['id']}）",
-                        stock_code=stock_code, signal_id=existing_signal['id'])
+                get_logger("monitor").log_event("buy_signal",
+                    f"触发买入信号：{stock_code}, 目标价：{buy_price:.2f}, 当前价：{current_price:.2f}",
+                    stock_code=stock_code, buy_price=buy_price, current_price=current_price)
+                await self._create_pending_signal(account_id, stock, 'buy', current_price, target_quantity)
+                await self._execute_buy_signal(account_id, stock, current_price, target_quantity)
 
         # 检查止损/止盈条件（动态策略引擎）
         elif status in ('watching', 'bought'):

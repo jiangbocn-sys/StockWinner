@@ -558,8 +558,9 @@ async def submit_manual_order(
 
     watchlist_action = "existing"  # existing / added / skipped
 
-    # 如果是买入单，同时更新/创建 watchlist 记录（供监控程序扫描）
+    # 如果是买入单，同时更新/创建 watchlist 记录（供止损止盈监控）
     if trade_type == "buy":
+        # 手动下单使用 'watching' 状态，避免被 _monitor_watchlist 当作策略选出的 pending 股票再次买入
         existing = await db.fetchone(
             "SELECT id FROM watchlist WHERE account_id = ? AND stock_code = ? AND status IN ('pending', 'watching', 'bought')",
             (account_id, normalized_code)
@@ -568,7 +569,7 @@ async def submit_manual_order(
             # 已在 watchlist 中，更新价格和数量
             await db.update(
                 "watchlist",
-                {"buy_price": price, "target_quantity": quantity, "status": "pending", "updated_at": format_china_time()},
+                {"buy_price": price, "target_quantity": quantity, "status": "watching", "updated_at": format_china_time()},
                 "id = ?",
                 (existing['id'],)
             )
@@ -594,7 +595,7 @@ async def submit_manual_order(
                 "stock_name": stock_name or normalized_code,
                 "buy_price": price,
                 "target_quantity": quantity,
-                "status": "pending",
+                "status": "watching",
                 "source_type": "manual",
                 "group_id": group_id,
                 "created_at": format_china_time(),
