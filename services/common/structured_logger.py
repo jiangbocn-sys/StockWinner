@@ -300,20 +300,28 @@ class StructuredLogger:
     # 兼容 ErrorReporter 接口
     # ---------------------------------------------------------------
 
-    def error(self, component: str, message: str, context: Optional[Dict[str, Any]] = None):
-        extra = f" | {json.dumps(context, ensure_ascii=False, default=str)}" if context else ""
+    def error(self, component: str, message: str, context: Optional[Dict[str, Any]] = None, **kwargs):
+        ctx = context or {}
+        ctx.update(kwargs)
+        extra = f" | {json.dumps(ctx, ensure_ascii=False, default=str)}" if ctx else ""
         self._logger.error(f"[{component}] ERROR | {message}{extra}")
 
-    def warn(self, component: str, message: str, context: Optional[Dict[str, Any]] = None):
-        extra = f" | {json.dumps(context, ensure_ascii=False, default=str)}" if context else ""
+    def warn(self, component: str, message: str, context: Optional[Dict[str, Any]] = None, **kwargs):
+        ctx = context or {}
+        ctx.update(kwargs)
+        extra = f" | {json.dumps(ctx, ensure_ascii=False, default=str)}" if ctx else ""
         self._logger.warning(f"[{component}] WARN | {message}{extra}")
 
-    def info(self, component: str, message: str, context: Optional[Dict[str, Any]] = None):
-        extra = f" | {json.dumps(context, ensure_ascii=False, default=str)}" if context else ""
+    def info(self, component: str, message: str, context: Optional[Dict[str, Any]] = None, **kwargs):
+        ctx = context or {}
+        ctx.update(kwargs)
+        extra = f" | {json.dumps(ctx, ensure_ascii=False, default=str)}" if ctx else ""
         self._logger.info(f"[{component}] INFO | {message}{extra}")
 
-    def debug(self, component: str, message: str, context: Optional[Dict[str, Any]] = None):
-        extra = f" | {json.dumps(context, ensure_ascii=False, default=str)}" if context else ""
+    def debug(self, component: str, message: str, context: Optional[Dict[str, Any]] = None, **kwargs):
+        ctx = context or {}
+        ctx.update(kwargs)
+        extra = f" | {json.dumps(ctx, ensure_ascii=False, default=str)}" if ctx else ""
         self._logger.debug(f"[{component}] DEBUG | {message}{extra}")
 
 

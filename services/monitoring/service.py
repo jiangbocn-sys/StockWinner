@@ -316,6 +316,9 @@ class TradingMonitor:
                 continue
 
             # 注入行情数据到 stock 对象
+            if market_data.current_price <= 0:
+                # 价格无效（竞价阶段/数据缺失），跳过不检查
+                continue
             stock_with_price = {**stock, "current_price": market_data.current_price}
             await self._check_stock_signals_with_price(
                 account_id, stock_with_price,
@@ -680,7 +683,11 @@ class TradingMonitor:
         result["stop_loss_price"] = float(sl)
         result["take_profit_price"] = float(tp)
 
-        if sl > 0 and current_price <= sl:
+        # 价格无效时不触发止盈止损（防止竞价阶段 price=0 误触发）
+        if current_price <= 0:
+            result["should_sell"] = False
+            result["reason"] = "invalid_price"
+        elif sl > 0 and current_price <= sl:
             result["should_sell"] = True
             result["reason"] = "stop_loss"
         elif tp > 0 and current_price >= tp:
@@ -783,6 +790,12 @@ class TradingMonitor:
         db = get_db_manager()
 
         if current_price is None:
+            return
+
+        # 价格无效时跳过（防止竞价阶段 price=0 触发止损/止盈）
+        if current_price <= 0:
+            get_logger("monitor").warn("monitor", f"跳过价格为0的股票 {stock_code}，不触发止盈止损",
+                                        stock_code=stock_code, current_price=current_price)
             return
 
         # 检查买入条件
@@ -1034,12 +1047,21 @@ class TradingMonitor:
                 continue
 
             current_price = md.current_price
-            get_logger("monitor").log_event("pending_signal_execute",
-                f"执行手动 pending 信号: {stock_code} {signal_type}",
-                stock_code=stock_code, signal_type=signal_type,
-                target_price=target_price, current_price=current_price, quantity=quantity)
 
             if signal_type == 'buy':
+                # 买入信号：检查现价与目标价是否接近（2% 以内）
+                if target_price > 0 and abs(current_price - target_price) / target_price > 0.02:
+                    get_logger("monitor").log_event("pending_signal_skip",
+                        f"跳过手动 pending 信号: {stock_code} 买入，现价 {current_price:.2f} 偏离目标价 {target_price:.2f}",
+                        stock_code=stock_code, signal_type=signal_type,
+                        target_price=target_price, current_price=current_price, quantity=quantity)
+                    continue
+
+                get_logger("monitor").log_event("pending_signal_execute",
+                    f"执行手动 pending 信号: {stock_code} {signal_type}",
+                    stock_code=stock_code, signal_type=signal_type,
+                    target_price=target_price, current_price=current_price, quantity=quantity)
+
                 await self._execute_buy_signal(
                     account_id,
                     {"stock_code": stock_code, "stock_name": signal.get('stock_name', stock_code)},
@@ -1047,6 +1069,16 @@ class TradingMonitor:
                     quantity,
                     trigger_source="manual",
                 )
+                # 无论成功或失败，标记信号为 executed/cancelled，防止重复执行
+                if signal_type == 'buy':
+                    # 买入信号：执行后标记为 executed（即使被风控拒绝，也不再重复尝试）
+                    await db.update(
+                        "trading_signals",
+                        {"status": "cancelled", "executed_at": format_china_time(),
+                         "result": '{"message": "执行失败，见订单记录"}'},
+                        "id = ?",
+                        (signal['id'],)
+                    )
             elif signal_type in ('sell_stop_loss', 'sell_take_profit', 'sell'):
                 await self._execute_sell_signal(
                     account_id,
@@ -1134,12 +1166,21 @@ class TradingMonitor:
     ):
         """更新 watchlist 状态"""
         db = get_db_manager()
+        old = await db.fetchone(
+            "SELECT status FROM watchlist WHERE account_id = ? AND stock_code = ?",
+            (account_id, stock_code)
+        )
+        old_status = old["status"] if old else "unknown"
         await db.update(
             "watchlist",
             {"status": status, "updated_at": get_china_time()},
             "account_id = ? AND stock_code = ?",
             (account_id, stock_code)
         )
+        get_logger("monitor").log_event("watchlist_status_change",
+            f"watchlist 状态变更: {stock_code} {old_status} → {status}",
+            account_id=account_id, stock_code=stock_code,
+            old_status=old_status, new_status=status)
 
     def get_status(self) -> Dict:
         """获取服务状态"""

@@ -503,6 +503,22 @@ async def submit_manual_order(
     if quantity % 100 != 0:
         return {"success": False, "message": "委托数量必须是 100 的整数倍"}
 
+    # 买入资金预检（防止下单数量超过可用资金，产生无效信号）
+    if trade_type == "buy":
+        total_amount = price * quantity
+        account_available_cash = account.get("available_cash", 0)
+        if total_amount > account_available_cash:
+            return {
+                "success": False,
+                "message": f"买入金额 {total_amount:.2f} 元超过账户可用资金 {account_available_cash:.2f} 元，请减少数量或降低价格",
+            }
+        # 15% 仓位限制提示（非硬性拦截，因为执行层会再次检查）
+        if total_amount > account_available_cash * 0.15:
+            return {
+                "success": False,
+                "message": f"单笔仓位限制：该金额（{total_amount:.2f} 元）超过可用资金的 15%（{account_available_cash * 0.15:.2f} 元），请减少数量",
+            }
+
     # 非交易时段检查
     from services.trading.trading_hours import can_trade, get_trading_phase, get_phase_description
     trading_warning = None

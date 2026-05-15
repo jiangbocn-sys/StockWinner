@@ -18,6 +18,7 @@ from services.common.timezone import get_china_time, format_china_time, CHINA_TZ
 from services.common.technical_indicators import calculate_indicators_for_screening, calculate_rsi
 from services.common.indicators import TechnicalIndicators
 from services.data.local_data_service import get_local_data_service
+from services.common.structured_logger import get_logger
 from .factor_registry import get_factor_registry, FactorRegistry
 from .condition_parser import get_condition_parser, normalize_conditions
 
@@ -83,7 +84,9 @@ class ScreeningService:
         interval: int
     ):
         """选股扫描循环"""
-        print(f"[Screening] 启动选股服务 - 账户：{account_id}, 间隔：{interval}s")
+        log = get_logger("screening")
+        log.log_event("screening_start", f"启动选股服务",
+                      account_id=account_id, interval=interval, strategy_id=strategy_id)
 
         while self._running:
             try:
@@ -92,10 +95,10 @@ class ScreeningService:
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                print(f"[Screening] 错误：{e}")
+                log.error("screening", f"选股扫描错误: {e}")
                 await asyncio.sleep(interval)
 
-        print(f"[Screening] 选股服务已停止")
+        log.log_event("screening_stop", "选股服务已停止")
 
     async def _run_screening(
         self,
@@ -586,6 +589,10 @@ class ScreeningService:
                     matched_count += 1
 
         print(f"[Screening] 本地筛选完成，共匹配 {matched_count}/{len(stock_codes)} 只股票 (匹配度阈值：{match_score_threshold*100:.0f}%)")
+        get_logger("screening").log_event("screening_complete",
+            f"选股筛选完成，匹配 {matched_count}/{len(stock_codes)} 只股票",
+            matched_count=matched_count, total_stocks=len(stock_codes),
+            match_score_threshold=match_score_threshold)
         return candidates
 
     async def _evaluate_conditions(self, config: Dict, match_score_threshold: float = 0.5) -> List[Dict]:
@@ -610,6 +617,8 @@ class ScreeningService:
             if not stock_list or len(stock_list) == 0:
                 raise Exception("交易网关返回空股票列表，请检查 SDK 连接状态和券商 credentials 配置")
             print(f"[Screening] 获取到 {len(stock_list)} 只股票")
+            get_logger("screening").log_event("screening_stock_list",
+                f"获取到 {len(stock_list)} 只股票", stock_count=len(stock_list))
             # 设置进度
             self._progress["total_stocks"] = len(stock_list)
             self._progress["processed"] = 0
@@ -828,7 +837,13 @@ class ScreeningService:
         }
 
         await db.insert("watchlist", watchlist_data)
-        print(f"[Screening] 添加至 watchlist: {candidate['stock_code']} - {candidate.get('stock_name')} (目标数量：{target_quantity}股)")
+        get_logger("screening").log_event("screening_add_watchlist",
+            f"选股加入 watchlist: {candidate['stock_code']}",
+            account_id=account_id, stock_code=candidate['stock_code'],
+            stock_name=candidate.get('stock_name', ''),
+            strategy_id=strategy.get("id") if strategy else strategy_id,
+            buy_price=current_price, stop_loss=stop_loss,
+            take_profit=take_profit, target_quantity=target_quantity)
 
     async def _add_to_temp_candidates(
         self,
@@ -954,6 +969,12 @@ class ScreeningService:
                         "updated_at": format_china_time()
                     })
                     result["confirmed"] += 1
+                    get_logger("screening").log_event("screening_confirm_pending",
+                        f"确认选股加入 watchlist: {stock_code}",
+                        account_id=account_id, stock_code=stock_code,
+                        stock_name=candidate['stock_name'],
+                        strategy_id=candidate['strategy_id'],
+                        buy_price=candidate['buy_price'])
                 else:
                     result["rejected"] += 1
 

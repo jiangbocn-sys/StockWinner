@@ -15,6 +15,7 @@ from typing import Dict, List, Optional
 from services.common.database import get_db_manager
 from services.common.stock_code import normalize_stock_code
 from services.common.kronos_service import get_kronos_service
+from services.common.structured_logger import get_logger
 
 
 # 白名单：允许在策略代码中使用的模块和函数
@@ -444,6 +445,11 @@ class StrategyEngine:
                         (new_price, new_sl, new_tp, signal.get("reason", "价格更优"), strategy_id, now, now, account_id, code)
                     )
                     updated += 1
+                    get_logger("strategy").log_event("strategy_signal_update",
+                        f"策略信号更新为 pending: {code}",
+                        account_id=account_id, stock_code=code,
+                        strategy_id=strategy_id, buy_price=new_price,
+                        reason=signal.get("reason", "价格更优"))
                 else:
                     # 价格更高或无新价格 → 保留原信号
                     skipped += 1
@@ -466,6 +472,11 @@ class StrategyEngine:
                     "updated_at": now,
                 })
                 added += 1
+                get_logger("strategy").log_event("strategy_signal_add",
+                    f"策略新增 pending 信号: {code}",
+                    account_id=account_id, stock_code=code,
+                    strategy_id=strategy_id, buy_price=new_price,
+                    reason=signal.get("reason", "策略信号"))
 
                 # 发送信号触发通知
                 try:

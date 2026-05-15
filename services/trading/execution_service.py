@@ -238,6 +238,15 @@ class TradeExecutionService:
         Returns:
             交易结果
         """
+        # 价格校验
+        if price <= 0:
+            return {
+                "success": False,
+                "message": f"无效价格: {price}，拒绝买入",
+                "quantity": 0,
+                "fees": {"commission": 0, "transfer_fee": 0, "stamp_tax": 0, "total_fee": 0}
+            }
+
         # 创建订单（pending 状态）
         from services.trading.order_service import get_order_service
         order_svc = get_order_service(self.account_id)
@@ -445,6 +454,13 @@ class TradeExecutionService:
         Returns:
             交易结果
         """
+        # 价格校验（防止 price=0 导致止损误卖）
+        if price <= 0:
+            return {
+                "success": False,
+                "message": f"无效价格: {price}，拒绝卖出",
+            }
+
         # 创建订单（pending 状态）
         from services.trading.order_service import get_order_service
         order_svc = get_order_service(self.account_id)
