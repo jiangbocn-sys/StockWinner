@@ -262,11 +262,16 @@ async def calculate_daily_factors(
 
 
 @router.post("/api/v1/ui/factors/daily/fill-empty")
-async def fill_daily_factors_empty():
+async def fill_daily_factors_empty(
+    lookback_days: int = Body(365, embed=True, description="前溯天数，默认365天（一年）")
+):
     """
     补算日频因子空值
 
     对已有记录但因子字段为空值的记录进行填充计算
+
+    Args:
+        lookback_days: 前溯天数，默认365天（一年）。设为0则自动检测最早K线日期
 
     Returns:
         计算结果统计
@@ -292,9 +297,20 @@ async def fill_daily_factors_empty():
             from services.common.timezone import get_china_time
             from datetime import timedelta
 
-            # 自动计算日期范围：最近120天
             end_date = get_china_time().strftime('%Y-%m-%d')
-            start_date = (get_china_time() - timedelta(days=120)).strftime('%Y-%m-%d')
+            if lookback_days > 0:
+                start_date = (get_china_time() - timedelta(days=lookback_days)).strftime('%Y-%m-%d')
+            else:
+                # 自动检测最早K线日期
+                import sqlite3
+                from pathlib import Path
+                db_path = Path(__file__).parent.parent.parent / "data" / "kline.db"
+                conn = sqlite3.connect(str(db_path), timeout=30)
+                cursor = conn.cursor()
+                cursor.execute("SELECT MIN(trade_date) FROM kline_data")
+                row = cursor.fetchone()
+                conn.close()
+                start_date = row[0] if row and row[0] else (get_china_time() - timedelta(days=365)).strftime('%Y-%m-%d')
 
             task_manager.update_progress(TaskType.DAILY_FACTOR_FILL, 10, f"正在补算空值 {start_date} ~ {end_date}...")
 
@@ -313,6 +329,6 @@ async def fill_daily_factors_empty():
 
     return {
         "success": True,
-        "message": "日频因子补算空值任务已启动",
+        "message": f"日频因子补算空值任务已启动（前溯 {lookback_days if lookback_days > 0 else '自动检测'} 天）",
         "task_status": task_manager.get_status(TaskType.DAILY_FACTOR_FILL).to_dict()
     }

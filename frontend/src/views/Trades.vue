@@ -315,7 +315,18 @@ const stats = reactive({
 
 const loadTrades = async () => {
   try {
-    const response = await fetch(`/api/v1/ui/${currentAccountId.value}/trades/today`)
+    let response
+    if (dateRange.value && dateRange.value.length === 2) {
+      // 有日期范围 → 调用历史交易接口
+      const startDate = dateRange.value[0].toISOString().slice(0, 10)
+      const endDate = dateRange.value[1].toISOString().slice(0, 10)
+      response = await fetch(
+        `/api/v1/ui/${currentAccountId.value}/trades?start_date=${startDate}&end_date=${endDate}&limit=200`
+      )
+    } else {
+      // 无日期范围 → 默认今日
+      response = await fetch(`/api/v1/ui/${currentAccountId.value}/trades/today`)
+    }
     const data = await response.json()
     trades.value = data.trades || []
     stats.totalCount = data.stats?.total_count || 0

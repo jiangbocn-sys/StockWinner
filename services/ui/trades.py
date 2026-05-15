@@ -89,6 +89,17 @@ async def get_trades(
 
     where_clause = " AND ".join(conditions)
 
+    # 统计汇总
+    stats = await db.fetchone(f"""
+        SELECT
+            COUNT(*) as total_count,
+            SUM(CASE WHEN trade_type = 'buy' THEN 1 ELSE 0 END) as buy_count,
+            SUM(CASE WHEN trade_type = 'sell' THEN 1 ELSE 0 END) as sell_count,
+            SUM(amount) as total_amount
+        FROM trade_records
+        WHERE {where_clause}
+    """, params)
+
     trades = await db.fetchall(
         f"SELECT * FROM trade_records WHERE {where_clause} ORDER BY trade_time DESC LIMIT ?",
         params + [limit]
@@ -97,6 +108,7 @@ async def get_trades(
     return {
         "account_id": account_id,
         "trades": trades,
+        "stats": stats,
         "count": len(trades)
     }
 

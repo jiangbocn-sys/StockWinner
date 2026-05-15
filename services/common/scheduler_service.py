@@ -25,13 +25,12 @@ from services.common.async_helper import run_async_safe
 from services.common.database import get_sync_connection
 import sqlite3
 
-# 配置日志
+# 配置日志 — 只写文件，控制台由 structured_logger 统一管理
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         logging.FileHandler(Path(__file__).parent.parent.parent / 'logs' / 'scheduler.log'),
-        logging.StreamHandler(),
     ],
 )
 logger = logging.getLogger(__name__)
@@ -1055,6 +1054,16 @@ class SchedulerService:
             )
             logger.info(f"  注册 T+1 解冻任务 (cron=5 15 * * 1-5)")
 
+            # 收盘后失效当日单（15:05）
+            self._scheduler.add_job(
+                self._expire_day_orders_job,
+                CronTrigger.from_crontab("5 15 * * 1-5", timezone=CHINA_TZ),
+                id="expire_day_orders",
+                name="收盘后失效当日单",
+                replace_existing=True,
+            )
+            logger.info(f"  注册收盘失效当日单任务 (cron=5 15 * * 1-5)")
+
         except Exception as e:
             logger.error(f"注册监控任务失败: {e}", exc_info=True)
 
@@ -1104,6 +1113,67 @@ class SchedulerService:
         """T+1 持仓解冻"""
         logger.info("开始 T+1 持仓解冻")
         run_async_safe(self._do_unfreeze)
+
+    def _expire_day_orders_job(self):
+        """收盘后失效当日单（长期单保持 pending，第二天重新提交委托）"""
+        logger.info("开始收盘后失效当日单")
+        run_async_safe(self._do_expire_day_orders)
+
+    async def _do_expire_day_orders(self):
+        """执行收盘后当日单失效处理
+
+        规则：
+        - 当日单（order_type='day'）：pending → expired（券商端已自动失效，无需撤单）
+          executed → 重置为 pending（次日重新提交委托）
+        - 长期单（order_type='gtc'）：executed → 重置为 pending（次日重新提交券商委托）
+          pending → 保持不变（次日扫描执行）
+        """
+        from services.common.database import get_db_manager
+        from services.common.timezone import format_china_time
+        from services.common.structured_logger import get_logger
+
+        db = get_db_manager()
+        log = get_logger("scheduler")
+        now = format_china_time()
+
+        # 1. 失效当日 pending 信号
+        result = await db.execute(
+            "UPDATE trading_signals SET status = 'expired', executed_at = ? WHERE status = 'pending' AND order_type = 'day'",
+            (now,)
+        )
+        expired_count = getattr(result, 'rowcount', 0) if hasattr(result, 'rowcount') else 0
+
+        # 2. 当日 executed 信号 → 重置为 pending（次日重新提交）
+        result = await db.execute(
+            "UPDATE trading_signals SET status = 'pending', executed_at = NULL WHERE status = 'executed' AND order_type = 'day'",
+        )
+        day_reset_count = getattr(result, 'rowcount', 0) if hasattr(result, 'rowcount') else 0
+
+        # 3. 长期单 executed → 重置为 pending（次日重新提交委托）
+        result = await db.execute(
+            "UPDATE trading_signals SET status = 'pending', executed_at = NULL WHERE status = 'executed' AND order_type = 'gtc'",
+        )
+        gtc_reset_count = getattr(result, 'rowcount', 0) if hasattr(result, 'rowcount') else 0
+
+        # 4. 统计剩余 pending 长期单（之前未 executed 的）
+        gtc_pending = await db.fetchall(
+            "SELECT account_id, stock_code, stock_name, signal_type FROM trading_signals WHERE status = 'pending' AND order_type = 'gtc'"
+        )
+
+        log.log_event("day_orders_expired",
+            f"收盘处理: 失效 {expired_count} 个当日pending单, 重置 {day_reset_count} 个当日已执行单, 重置 {gtc_reset_count} 个长期已执行单",
+            expired_count=expired_count, day_reset_count=day_reset_count,
+            gtc_reset_count=gtc_reset_count, gtc_pending_count=len(gtc_pending))
+
+        if expired_count > 0:
+            logger.info(f"失效当日pending单: {expired_count} 个")
+        if day_reset_count > 0:
+            logger.info(f"重置当日已执行单: {day_reset_count} 个（次日重新委托）")
+        if gtc_reset_count > 0:
+            logger.info(f"重置长期已执行单: {gtc_reset_count} 个（次日重新委托）")
+        if gtc_pending:
+            gtc_info = [f"{g['account_id']}:{g['stock_code']}({g['signal_type']})" for g in gtc_pending]
+            logger.info(f"待执行长期单: {', '.join(gtc_info)}")
 
     async def _do_unfreeze(self):
         """执行 T+1 解冻 + 重置 pending 状态为 watching"""

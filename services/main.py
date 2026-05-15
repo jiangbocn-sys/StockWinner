@@ -18,6 +18,7 @@ import os
 from services.common.timezone import get_china_time
 from services.common.database import get_db_manager, reset_db_manager
 from services.common.account_manager import get_account_manager, reset_account_manager
+from services.common.structured_logger import get_logger
 from services.ui import dashboard, accounts, positions, trades, strategies, screening, monitoring, market_data, data_explorer, position_rules, factors, scheduler, notifications, trading_strategies, strategy_performance, data_service
 from services.strategy.api import router as strategy_v2_router
 from services.account_management.api import router as account_management_router
@@ -29,61 +30,63 @@ from services._version import VERSION, set_start_time
 _server_start_time = None
 
 # 数据库迁移版本号 —— 每次新增迁移时递增
-MIGRATION_VERSION = 4
+MIGRATION_VERSION = 5
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期"""
     set_start_time()
+    log = get_logger("core")
 
     # 启动时初始化
-    print(f"StockWinner v{VERSION} 启动中...")
+    log.log_event("startup", f"StockWinner v{VERSION} 启动中...")
 
     # 初始化数据库连接
     db_manager = get_db_manager()
     await db_manager.connect()
-    print("数据库连接已建立")
+    log.log_event("db_connected", "数据库连接已建立")
 
     # 从数据库加载账户列表
     account_manager = get_account_manager()
     accounts = await account_manager.list_accounts()
     active_accounts = [a for a in accounts if a.get('is_active')]
-    print(f"已加载 {len(active_accounts)} 个激活账户：{', '.join([a['account_id'] for a in active_accounts])}")
+    active_ids = ', '.join([a['account_id'] for a in active_accounts])
+    log.log_event("accounts_loaded", f"已加载 {len(active_accounts)} 个激活账户：{active_ids}", count=len(active_accounts))
 
-    # 启动调度服务（每天凌晨1点检查K线，每月5日检查月频因子）
+    # 启动调度服务
     from services.common.scheduler_service import start_scheduler, get_scheduler, _set_fastapi_loop
     start_scheduler()
-    print("调度服务已启动")
+    log.log_event("scheduler_started", "调度服务已启动")
 
-    # 设置 FastAPI 事件循环引用（供 APScheduler 线程提交协程）
+    # 设置 FastAPI 事件循环引用
     loop = asyncio.get_running_loop()
     _set_fastapi_loop(loop)
 
-    # 启动时检查周K线覆盖情况（仅检查，不阻塞下载）
+    # 启动时检查周K线覆盖情况
     try:
         scheduler = get_scheduler()
         need, msg = scheduler._check_weekly_kline_coverage()
         if need:
-            print(f"周K线数据不完整: {msg}，将在周六 02:00 自动补下载")
+            log.log_event("weekly_kline_check", f"周K线数据不完整: {msg}", incomplete=True)
         else:
-            print(f"周K线数据已覆盖: {msg}")
+            log.log_event("weekly_kline_check", f"周K线数据已覆盖: {msg}")
     except Exception as e:
-        print(f"启动时周K线检查失败: {e}")
+        log.error("weekly_kline", f"启动时周K线检查失败: {e}")
 
-    # 启动时自动启动交易监控（如果当前在交易日交易时段）
+    # 启动时自动启动交易监控
     try:
         from services.monitoring.service import get_trading_monitor
         from services.trading.trading_hours import can_trade, is_today_trading_day
 
         if is_today_trading_day() and can_trade():
             monitor = get_trading_monitor()
-            result = await monitor.start_monitoring(interval=30)  # 自动启动所有活跃账户
-            print(f"交易监控已启动: {result.get('message', '')}")
+            result = await monitor.start_monitoring(interval=30)
+            log.log_event("monitor_autostart", f"交易监控已启动: {result.get('message', '')}")
         else:
-            print(f"不在交易时段或非交易日，跳过自动启动监控")
+            log.log_event("monitor_autostart", "不在交易时段或非交易日，跳过自动启动监控")
     except Exception as e:
-        print(f"启动时自动监控检测失败: {e}")
+        log.error("monitor_autostart", f"启动时自动监控检测失败: {e}")
 
     # 数据库迁移框架：按版本号执行，避免每次启动重复执行
     try:
@@ -96,14 +99,14 @@ async def lifespan(app: FastAPI):
         current_version = await db_manager.fetchone("SELECT MAX(version) as v FROM migration_version")
         applied_v = current_version["v"] if current_version and current_version.get("v") else 0
     except Exception as e:
-        print(f"数据库迁移: 版本检查失败 ({e})，跳过迁移")
+        log.error("db_migration", f"数据库迁移: 版本检查失败 ({e})，跳过迁移")
         applied_v = 9999  # 跳过所有迁移
 
     async def run_migration(v: int, desc: str, sql_blocks: list):
         """执行指定版本的迁移"""
         if v <= applied_v:
             return
-        print(f"数据库迁移 [v{v}]: {desc}...")
+        log.log_event("db_migration_start", desc, version=v)
         for sql in sql_blocks:
             try:
                 await db_manager.execute(sql)
@@ -111,9 +114,9 @@ async def lifespan(app: FastAPI):
                 pass  # 列/表已存在
         try:
             await db_manager.execute("INSERT INTO migration_version (version) VALUES (?)", (v,))
-            print(f"数据库迁移 [v{v}]: 完成")
+            log.log_event("db_migration_complete", desc, version=v)
         except Exception as e:
-            print(f"数据库迁移 [v{v}]: 版本记录写入失败 ({e})")
+            log.error("db_migration", f"版本记录写入失败 ({e})", version=v)
 
     # v1: 所有现有迁移（首次运行时执行，之后跳过）
     await run_migration(1, "初始迁移（表结构扩展 + 新表创建）", [
@@ -309,9 +312,9 @@ async def lifespan(app: FastAPI):
                     "UPDATE watchlist SET group_id = ? WHERE group_id IS NULL AND account_id = ?",
                     (group_id, aid)
                 )
-            print("数据库迁移: 「未分组」默认组已创建，未分组记录已归集")
+            log.log_event("migration_ungrouped", "「未分组」默认组已创建，未分组记录已归集")
         except Exception as e:
-            print(f"数据库迁移: 未分组归集跳过 ({e})")
+            log.error("db_migration", f"未分组归集跳过 ({e})")
 
     # 迁移旧版 LLM 配置（只需执行一次）
     if applied_v < 1:
@@ -333,9 +336,9 @@ async def lifespan(app: FastAPI):
                             "model_name": legacy.get("model", ""),
                             "enabled": 1,
                         })
-                        print("数据库迁移: 已从 config/llm.json 迁移系统级配置")
+                        log.log_event("migration_llm", "已从 config/llm.json 迁移系统级配置")
         except Exception as e:
-            print(f"数据库迁移: LLM 旧配置迁移失败 ({e})")
+            log.error("db_migration", f"LLM 旧配置迁移失败 ({e})")
 
     # 清理遗留 running 状态（每次启动执行，不纳入版本控制）
     try:
@@ -345,9 +348,9 @@ async def lifespan(app: FastAPI):
         )
         reset_count = getattr(result, 'rowcount', 0) if hasattr(result, 'rowcount') else 0
         if reset_count > 0:
-            print(f"数据库迁移: 已清理 {reset_count} 个遗留 running 状态")
+            log.log_event("migration_running_cleanup", f"已清理 {reset_count} 个遗留 running 状态", count=reset_count)
     except Exception as e:
-        print(f"数据库迁移: 清理 running 状态跳过 ({e})")
+        log.error("db_migration", f"清理 running 状态跳过 ({e})")
 
     # 恢复遗留未完成订单（每次启动执行）
     try:
@@ -357,7 +360,7 @@ async def lifespan(app: FastAPI):
         )
         cancelled_count = getattr(result, 'rowcount', 0) if hasattr(result, 'rowcount') else 0
         if cancelled_count > 0:
-            print(f"数据库迁移: 已取消 {cancelled_count} 个遗留未完成订单")
+            log.log_event("migration_order_cleanup", f"已取消 {cancelled_count} 个遗留未完成订单", count=cancelled_count)
     except Exception:
         pass
 
@@ -376,17 +379,17 @@ async def lifespan(app: FastAPI):
                 (row["account_id"],)
             )
         if positions:
-            print(f"数据库迁移: 已解冻 {len(positions)} 个账户的 T+1 持仓，pending 状态已重置为 watching")
+            log.log_event("migration_t1_thaw", f"已解冻 {len(positions)} 个账户的 T+1 持仓，pending 状态已重置为 watching", count=len(positions))
     except Exception as e:
-        print(f"数据库迁移: T+1 解冻跳过 ({e})")
+        log.error("db_migration", f"T+1 解冻跳过 ({e})")
 
-    # 扫描任务插件（每次启动执行）
+    # 扫描任务插件
     try:
         from services.tasks import scan_tasks
         scan_tasks()
-        print("数据库迁移: 任务插件扫描完成")
+        log.log_event("migration_task_scan", "任务插件扫描完成")
     except Exception as e:
-        print(f"数据库迁移: 任务插件扫描失败: {e}")
+        log.error("db_migration", f"任务插件扫描失败: {e}")
 
     # 创建内置任务（只需执行一次）
     if applied_v < 1:
@@ -412,7 +415,7 @@ async def lifespan(app: FastAPI):
                     "cron_expression": t["cron_expression"],
                     "enabled": t["enabled"],
                 })
-                print(f"数据库迁移: 内置任务 {t['module']} 已创建")
+                log.log_event("migration_builtin_task", f"内置任务 {t['module']} 已创建", module=t['module'])
 
     # v2: watchlist 复合索引 + 现价字段优化（2026-05-08）
     await run_migration(2, "watchlist 复合索引", [
@@ -424,7 +427,7 @@ async def lifespan(app: FastAPI):
         from services.common.kronos_service import load_kronos_on_startup
         load_kronos_on_startup()
     except Exception as e:
-        print(f"Kronos 预加载跳过: {e}")
+        log.error("kronos", f"Kronos 预加载跳过: {e}")
 
     # v3: Agent 协作框架 — Agent 账户表 + 审计日志表 + 确认表（2026-05-10）
     await run_migration(3, "Agent 协作框架", [
@@ -489,10 +492,16 @@ async def lifespan(app: FastAPI):
         END;"""
     ])
 
+    # v5: 信号表新增 order_type 字段（2026-05-15）
+    await run_migration(5, "trading_signals 新增 order_type", [
+        """ALTER TABLE trading_signals ADD COLUMN order_type TEXT DEFAULT 'day'""",
+        """CREATE INDEX IF NOT EXISTS idx_signals_order_type ON trading_signals(account_id, status, order_type)""",
+    ])
+
     yield
 
     # 关闭时清理
-    print("StockWinner 关闭中...")
+    log.log_event("shutdown", "StockWinner 关闭中...")
 
     # 停止交易监控
     try:
@@ -501,9 +510,9 @@ async def lifespan(app: FastAPI):
         monitor = get_trading_monitor()
         if monitor._running:
             await monitor.stop_monitoring()
-            print("交易监控已停止")
+            log.log_event("monitor_stopped", "交易监控已停止")
     except Exception as e:
-        print(f"停止监控失败: {e}")
+        log.error("shutdown", f"停止监控失败: {e}")
 
     # 清除事件循环引用
     _set_fastapi_loop(None)
@@ -515,9 +524,9 @@ async def lifespan(app: FastAPI):
     try:
         from services.common.sdk_manager import get_sdk_manager
         get_sdk_manager().disconnect()
-        print("SDK 连接已断开")
+        log.log_event("sdk_disconnected", "SDK 连接已断开")
     except Exception as e:
-        print(f"断开 SDK 连接失败: {e}")
+        log.error("shutdown", f"断开 SDK 连接失败: {e}")
 
     try:
         from services.trading.gateway import clear_gateway_cache
@@ -546,6 +555,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# 请求计时中间件（在 CORS 之后、业务中间件之前）
+from services.common.request_logging_middleware import RequestLoggingMiddleware
+app.add_middleware(RequestLoggingMiddleware)
 
 
 # ============================================================
@@ -774,7 +787,8 @@ async def agent_security_middleware(request: Request, call_next):
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
     """全局异常处理"""
-    print(f"异常：{request.method} {request.url} - {str(exc)}")
+    log = get_logger("core")
+    log.error("exception", f"{request.method} {request.url}", context={"error": str(exc)})
     return JSONResponse(
         status_code=500,
         content={"success": False, "message": "服务器内部错误"}

@@ -306,21 +306,32 @@ class TradingGateway(TradingGatewayInterface):
             if kline_db_path.exists():
                 conn = sqlite3.connect(str(kline_db_path))
                 cursor = conn.cursor()
+                # 优先查 stock_base_info（每日 SDK 同步，名称最新）
                 cursor.execute(
-                    "SELECT stock_name FROM stock_monthly_factors WHERE stock_code = ? LIMIT 1",
+                    "SELECT stock_name FROM stock_base_info WHERE stock_code = ? LIMIT 1",
                     (stock_code,)
                 )
                 row = cursor.fetchone()
                 if row and row[0]:
                     stock_name = row[0]
                 else:
+                    # 备选：stock_monthly_factors
                     cursor.execute(
-                        "SELECT DISTINCT stock_name FROM kline_data WHERE stock_code = ? LIMIT 1",
+                        "SELECT stock_name FROM stock_monthly_factors WHERE stock_code = ? LIMIT 1",
                         (stock_code,)
                     )
                     row = cursor.fetchone()
                     if row and row[0]:
                         stock_name = row[0]
+                    else:
+                        # 最后：kline_data
+                        cursor.execute(
+                            "SELECT DISTINCT stock_name FROM kline_data WHERE stock_code = ? LIMIT 1",
+                            (stock_code,)
+                        )
+                        row = cursor.fetchone()
+                        if row and row[0]:
+                            stock_name = row[0]
                 cursor.close()
                 conn.close()
         except Exception as e:

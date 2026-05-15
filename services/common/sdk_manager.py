@@ -15,8 +15,11 @@ SDK 登录管理器
 - 调用方：通过 get_sdk_manager() 获取实例，所有数据方法自动 acquire/release token
 """
 
+import time
 from typing import Optional, Dict
 import pandas as pd
+
+from services.common.structured_logger import get_logger
 
 
 class SDKManager:
@@ -146,12 +149,16 @@ class SDKManager:
 
     def get_equity_structure(self, stock_codes: list) -> pd.DataFrame:
         """获取股本结构数据（自动排队）"""
+        logger = get_logger("sdk_manager")
         info = self.get_info()
         token = self._acquire_sync("download")
         if token is None:
             return pd.DataFrame()
+        start = time.monotonic()
         try:
             result = info.get_equity_structure(stock_codes, is_local=False)
+            duration_ms = (time.monotonic() - start) * 1000
+            logger.log_sdk_call("get_equity_structure", duration_ms, "download", "success", stock_count=len(stock_codes) if stock_codes else 0)
             if isinstance(result, dict):
                 dfs = [df for df in result.values() if isinstance(df, pd.DataFrame)]
                 if dfs:
@@ -160,19 +167,24 @@ class SDKManager:
                 return result
             return pd.DataFrame()
         except Exception as e:
-            print(f"[SDK] 获取股本结构数据失败：{e}")
+            duration_ms = (time.monotonic() - start) * 1000
+            logger.log_sdk_call("get_equity_structure", duration_ms, "download", "error", error=str(e), stock_count=len(stock_codes) if stock_codes else 0)
             return pd.DataFrame()
         finally:
             self._release_sync(token)
 
     def get_income_statement(self, stock_codes: list) -> pd.DataFrame:
         """获取利润表数据（自动排队）"""
+        logger = get_logger("sdk_manager")
         info = self.get_info()
         token = self._acquire_sync("download")
         if token is None:
             return pd.DataFrame()
+        start = time.monotonic()
         try:
             result = info.get_income(stock_codes, is_local=False)
+            duration_ms = (time.monotonic() - start) * 1000
+            logger.log_sdk_call("get_income_statement", duration_ms, "download", "success", stock_count=len(stock_codes) if stock_codes else 0)
             if isinstance(result, dict):
                 dfs = [df for df in result.values() if isinstance(df, pd.DataFrame)]
                 if dfs:
@@ -181,19 +193,24 @@ class SDKManager:
                 return result
             return pd.DataFrame()
         except Exception as e:
-            print(f"[SDK] 获取利润表数据失败：{e}")
+            duration_ms = (time.monotonic() - start) * 1000
+            logger.log_sdk_call("get_income_statement", duration_ms, "download", "error", error=str(e), stock_count=len(stock_codes) if stock_codes else 0)
             return pd.DataFrame()
         finally:
             self._release_sync(token)
 
     def get_balance_sheet(self, stock_codes: list) -> pd.DataFrame:
         """获取资产负债表数据（自动排队）"""
+        logger = get_logger("sdk_manager")
         info = self.get_info()
         token = self._acquire_sync("download")
         if token is None:
             return pd.DataFrame()
+        start = time.monotonic()
         try:
             result = info.get_balance_sheet(stock_codes, is_local=False)
+            duration_ms = (time.monotonic() - start) * 1000
+            logger.log_sdk_call("get_balance_sheet", duration_ms, "download", "success", stock_count=len(stock_codes) if stock_codes else 0)
             if isinstance(result, dict):
                 dfs = [df for df in result.values() if isinstance(df, pd.DataFrame)]
                 if dfs:
@@ -202,19 +219,24 @@ class SDKManager:
                 return result
             return pd.DataFrame()
         except Exception as e:
-            print(f"[SDK] 获取资产负债表数据失败：{e}")
+            duration_ms = (time.monotonic() - start) * 1000
+            logger.log_sdk_call("get_balance_sheet", duration_ms, "download", "error", error=str(e), stock_count=len(stock_codes) if stock_codes else 0)
             return pd.DataFrame()
         finally:
             self._release_sync(token)
 
     def get_cash_flow_statement(self, stock_codes: list) -> pd.DataFrame:
         """获取现金流量表数据（自动排队）"""
+        logger = get_logger("sdk_manager")
         info = self.get_info()
         token = self._acquire_sync("download")
         if token is None:
             return pd.DataFrame()
+        start = time.monotonic()
         try:
             result = info.get_cash_flow(stock_codes, is_local=False)
+            duration_ms = (time.monotonic() - start) * 1000
+            logger.log_sdk_call("get_cash_flow_statement", duration_ms, "download", "success", stock_count=len(stock_codes) if stock_codes else 0)
             if isinstance(result, dict):
                 dfs = [df for df in result.values() if isinstance(df, pd.DataFrame)]
                 if dfs:
@@ -223,19 +245,24 @@ class SDKManager:
                 return result
             return pd.DataFrame()
         except Exception as e:
-            print(f"[SDK] 获取现金流量表数据失败：{e}")
+            duration_ms = (time.monotonic() - start) * 1000
+            logger.log_sdk_call("get_cash_flow_statement", duration_ms, "download", "error", error=str(e), stock_count=len(stock_codes) if stock_codes else 0)
             return pd.DataFrame()
         finally:
             self._release_sync(token)
 
     def get_industry_base_info(self) -> pd.DataFrame:
         """获取行业分类/行业指数基本信息（申万行业分类）（自动排队）"""
+        logger = get_logger("sdk_manager")
         info = self.get_info()
         token = self._acquire_sync("download")
         if token is None:
             return pd.DataFrame()
+        start = time.monotonic()
         try:
             result = info.get_industry_base_info(is_local=False)
+            duration_ms = (time.monotonic() - start) * 1000
+            logger.log_sdk_call("get_industry_base_info", duration_ms, "download", "success")
             if isinstance(result, dict):
                 dfs = [df for df in result.values() if isinstance(df, pd.DataFrame)]
                 if dfs:
@@ -244,41 +271,52 @@ class SDKManager:
                 return result
             return pd.DataFrame()
         except Exception as e:
-            print(f"[SDK] 获取行业分类数据失败：{e}")
+            duration_ms = (time.monotonic() - start) * 1000
+            logger.log_sdk_call("get_industry_base_info", duration_ms, "download", "error", error=str(e))
             return pd.DataFrame()
         finally:
             self._release_sync(token)
 
     def get_code_info(self, security_type: str = 'EXTRA_STOCK_A') -> pd.DataFrame:
         """获取每日最新证券信息（自动排队）"""
+        logger = get_logger("sdk_manager")
         token = self._acquire_sync("query")
         if token is None:
             return pd.DataFrame()
+        start = time.monotonic()
         try:
             base_data = self.get_base_data()
             result = base_data.get_code_info(security_type=security_type)
+            duration_ms = (time.monotonic() - start) * 1000
+            logger.log_sdk_call("get_code_info", duration_ms, "query", "success")
             if isinstance(result, pd.DataFrame):
                 return result
             return pd.DataFrame()
         except Exception as e:
-            print(f"[SDK] 获取证券信息失败：{e}")
+            duration_ms = (time.monotonic() - start) * 1000
+            logger.log_sdk_call("get_code_info", duration_ms, "query", "error", error=str(e))
             return pd.DataFrame()
         finally:
             self._release_sync(token)
 
     def get_code_list(self, security_type: str = 'EXTRA_STOCK_A') -> list:
         """获取每日最新代码表（自动排队）"""
+        logger = get_logger("sdk_manager")
         token = self._acquire_sync("query")
         if token is None:
             return []
+        start = time.monotonic()
         try:
             base_data = self.get_base_data()
             result = base_data.get_code_list(security_type=security_type)
+            duration_ms = (time.monotonic() - start) * 1000
+            logger.log_sdk_call("get_code_list", duration_ms, "query", "success")
             if isinstance(result, list):
                 return result
             return []
         except Exception as e:
-            print(f"[SDK] 获取代码列表失败：{e}")
+            duration_ms = (time.monotonic() - start) * 1000
+            logger.log_sdk_call("get_code_list", duration_ms, "query", "error", error=str(e))
             return []
         finally:
             self._release_sync(token)
@@ -295,7 +333,7 @@ class SDKManager:
             try:
                 return future.result(timeout=timeout)
             except concurrent.futures.TimeoutError:
-                print(f"[SDK] {desc} 超时（>{timeout:.0f}s），强制终止")
+                get_logger("sdk_manager").error("sdk_timeout", f"{desc} 超时", context={"timeout": timeout})
                 raise
 
     def query_kline(self, code_list: list, begin_date: int, end_date: int,
@@ -308,52 +346,60 @@ class SDKManager:
         - query 大批量（21-100 只）：60s
         - download 下载批次：每只股票 30s，最少 5 分钟
         """
+        logger = get_logger("sdk_manager")
         md = self.get_market_data()
         token = self._acquire_sync(task_type)
         if token is None:
             return {}
+        stock_count = len(code_list) if isinstance(code_list, list) else 1
+        if task_type == "query":
+            if stock_count <= 5:
+                timeout = 10.0
+            elif stock_count <= 20:
+                timeout = 20.0
+            elif stock_count <= 100:
+                timeout = 60.0
+            else:
+                timeout = 120.0
+        else:  # download
+            # 500只≈44秒，3000只单天≈264秒
+            timeout = min(stock_count * 0.2 + 30, 180.0)  # 上限3分钟
+            timeout = max(timeout, 30.0)  # 最小30s
+        start = time.monotonic()
         try:
-            count = len(code_list) if isinstance(code_list, list) else 1
-            if task_type == "query":
-                if count <= 5:
-                    timeout = 10.0
-                elif count <= 20:
-                    timeout = 20.0
-                elif count <= 100:
-                    timeout = 60.0
-                else:
-                    timeout = 120.0
-            else:  # download
-                # 500只≈44秒，3000只单天≈264秒
-                timeout = min(count * 0.2 + 30, 180.0)  # 上限3分钟
-                timeout = max(timeout, 30.0)  # 最小30s
-
             result = self._call_with_timeout(
                 md.query_kline,
                 timeout=timeout,
-                desc=f"query_kline {task_type} {count} stocks",
+                desc=f"query_kline {task_type} {stock_count} stocks",
                 code_list=code_list,
                 begin_date=begin_date,
                 end_date=end_date,
                 period=period
             )
+            duration_ms = (time.monotonic() - start) * 1000
+            logger.log_sdk_call("query_kline", duration_ms, task_type, "success", stock_count=stock_count, timeout=timeout)
             return result if isinstance(result, dict) else {}
         except Exception as e:
-            print(f"[SDK] query_kline 失败：{e}")
-            # 超时：重置 MarketData 实例
-            if isinstance(e, (TimeoutError,)):
-                print(f"[SDK] query_kline 超时，重置 MarketData 实例")
+            duration_ms = (time.monotonic() - start) * 1000
+            is_timeout = isinstance(e, (TimeoutError,))
+            if is_timeout:
+                logger.log_sdk_call("query_kline", duration_ms, task_type, "timeout", error=str(e), stock_count=stock_count, timeout=timeout)
                 SDKManager._market_data_instance = None
+            else:
+                logger.log_sdk_call("query_kline", duration_ms, task_type, "error", error=str(e), stock_count=stock_count, timeout=timeout)
             return {}
         finally:
             self._release_sync(token)
 
     def query_snapshot(self, code_list: list, begin_date: int, end_date: int) -> dict:
         """查询快照数据（自动排队）"""
+        logger = get_logger("sdk_manager")
         md = self.get_market_data()
         token = self._acquire_sync("query")
         if token is None:
             return {}
+        stock_count = len(code_list) if isinstance(code_list, list) else 1
+        start = time.monotonic()
         try:
             result = self._call_with_timeout(
                 md.query_snapshot,
@@ -363,41 +409,55 @@ class SDKManager:
                 begin_date=begin_date,
                 end_date=end_date
             )
+            duration_ms = (time.monotonic() - start) * 1000
+            logger.log_sdk_call("query_snapshot", duration_ms, "query", "success", stock_count=stock_count, timeout=8.0)
             return result if isinstance(result, dict) else {}
         except Exception as e:
-            print(f"[SDK] query_snapshot 失败：{e}")
-            if isinstance(e, (TimeoutError,)):
-                print(f"[SDK] query_snapshot 超时，重置 MarketData 实例")
+            duration_ms = (time.monotonic() - start) * 1000
+            is_timeout = isinstance(e, (TimeoutError,))
+            if is_timeout:
+                logger.log_sdk_call("query_snapshot", duration_ms, "query", "timeout", error=str(e), stock_count=stock_count, timeout=8.0)
                 SDKManager._market_data_instance = None
+            else:
+                logger.log_sdk_call("query_snapshot", duration_ms, "query", "error", error=str(e), stock_count=stock_count, timeout=8.0)
             return {}
         finally:
             self._release_sync(token)
 
     def get_industry_daily(self, code_list: list) -> Dict[str, pd.DataFrame]:
         """获取行业指数日行情数据（自动排队）"""
+        logger = get_logger("sdk_manager")
         token = self._acquire_sync("download")
         if token is None:
             return {}
+        start = time.monotonic()
         try:
             info = self.get_info()
             result = info.get_industry_daily(code_list=code_list, is_local=False)
+            duration_ms = (time.monotonic() - start) * 1000
+            logger.log_sdk_call("get_industry_daily", duration_ms, "download", "success", stock_count=len(code_list) if code_list else 0)
             if isinstance(result, dict):
                 return result
             return {}
         except Exception as e:
-            print(f"[SDK] 获取行业指数日行情失败：{e}")
+            duration_ms = (time.monotonic() - start) * 1000
+            logger.log_sdk_call("get_industry_daily", duration_ms, "download", "error", error=str(e), stock_count=len(code_list) if code_list else 0)
             return {}
         finally:
             self._release_sync(token)
 
     def get_profit_notice(self, stock_codes: list) -> pd.DataFrame:
         """获取业绩预告（自动排队）"""
+        logger = get_logger("sdk_manager")
         info = self.get_info()
         token = self._acquire_sync("download")
         if token is None:
             return pd.DataFrame()
+        start = time.monotonic()
         try:
             result = info.get_profit_notice(code_list=stock_codes, is_local=False)
+            duration_ms = (time.monotonic() - start) * 1000
+            logger.log_sdk_call("get_profit_notice", duration_ms, "download", "success", stock_count=len(stock_codes) if stock_codes else 0)
             if isinstance(result, dict):
                 dfs = [df for df in result.values() if isinstance(df, pd.DataFrame)]
                 if dfs:
@@ -406,19 +466,24 @@ class SDKManager:
                 return result
             return pd.DataFrame()
         except Exception as e:
-            print(f"[SDK] 获取业绩预告失败：{e}")
+            duration_ms = (time.monotonic() - start) * 1000
+            logger.log_sdk_call("get_profit_notice", duration_ms, "download", "error", error=str(e), stock_count=len(stock_codes) if stock_codes else 0)
             return pd.DataFrame()
         finally:
             self._release_sync(token)
 
     def get_profit_express(self, stock_codes: list) -> pd.DataFrame:
         """获取业绩快报（自动排队）"""
+        logger = get_logger("sdk_manager")
         info = self.get_info()
         token = self._acquire_sync("download")
         if token is None:
             return pd.DataFrame()
+        start = time.monotonic()
         try:
             result = info.get_profit_express(code_list=stock_codes, is_local=False)
+            duration_ms = (time.monotonic() - start) * 1000
+            logger.log_sdk_call("get_profit_express", duration_ms, "download", "success", stock_count=len(stock_codes) if stock_codes else 0)
             if isinstance(result, dict):
                 dfs = [df for df in result.values() if isinstance(df, pd.DataFrame)]
                 if dfs:
@@ -427,53 +492,68 @@ class SDKManager:
                 return result
             return pd.DataFrame()
         except Exception as e:
-            print(f"[SDK] 获取业绩快报失败：{e}")
+            duration_ms = (time.monotonic() - start) * 1000
+            logger.log_sdk_call("get_profit_express", duration_ms, "download", "error", error=str(e), stock_count=len(stock_codes) if stock_codes else 0)
             return pd.DataFrame()
         finally:
             self._release_sync(token)
 
     def get_long_hu_bang(self, stock_codes: list, begin_date: int, end_date: int) -> pd.DataFrame:
         """获取龙虎榜数据（自动排队）"""
+        logger = get_logger("sdk_manager")
         info = self.get_info()
         token = self._acquire_sync("download")
         if token is None:
             return pd.DataFrame()
+        start = time.monotonic()
         try:
             result = info.get_long_hu_bang(code_list=stock_codes, begin_date=begin_date, end_date=end_date, is_local=False)
+            duration_ms = (time.monotonic() - start) * 1000
+            logger.log_sdk_call("get_long_hu_bang", duration_ms, "download", "success", stock_count=len(stock_codes) if stock_codes else 0)
             if isinstance(result, pd.DataFrame):
                 return result
             return pd.DataFrame()
         except Exception as e:
-            print(f"[SDK] 获取龙虎榜数据失败：{e}")
+            duration_ms = (time.monotonic() - start) * 1000
+            logger.log_sdk_call("get_long_hu_bang", duration_ms, "download", "error", error=str(e), stock_count=len(stock_codes) if stock_codes else 0)
             return pd.DataFrame()
         finally:
             self._release_sync(token)
 
     def get_margin_summary(self, begin_date: int, end_date: int) -> pd.DataFrame:
         """获取融资融券汇总（自动排队，无需 stock_codes）"""
+        logger = get_logger("sdk_manager")
         info = self.get_info()
         token = self._acquire_sync("download")
         if token is None:
             return pd.DataFrame()
+        start = time.monotonic()
         try:
             result = info.get_margin_summary(begin_date=begin_date, end_date=end_date, is_local=False)
+            duration_ms = (time.monotonic() - start) * 1000
+            logger.log_sdk_call("get_margin_summary", duration_ms, "download", "success")
             if isinstance(result, pd.DataFrame):
                 return result
             return pd.DataFrame()
         except Exception as e:
-            print(f"[SDK] 获取融资融券汇总失败：{e}")
+            duration_ms = (time.monotonic() - start) * 1000
+            logger.log_sdk_call("get_margin_summary", duration_ms, "download", "error", error=str(e))
             return pd.DataFrame()
         finally:
             self._release_sync(token)
 
     def get_margin_detail(self, stock_codes: list, begin_date: int, end_date: int) -> pd.DataFrame:
         """获取融资融券明细（自动排队）"""
+        logger = get_logger("sdk_manager")
         info = self.get_info()
         token = self._acquire_sync("download")
         if token is None:
             return pd.DataFrame()
+        start = time.monotonic()
         try:
             result = info.get_margin_detail(code_list=stock_codes, begin_date=begin_date, end_date=end_date, is_local=False)
+            duration_ms = (time.monotonic() - start) * 1000
+            logger.log_sdk_call("get_margin_detail", duration_ms, "download", "success", stock_count=len(stock_codes) if stock_codes else 0)
             if isinstance(result, dict):
                 dfs = [df for df in result.values() if isinstance(df, pd.DataFrame)]
                 if dfs:
@@ -482,36 +562,46 @@ class SDKManager:
                 return result
             return pd.DataFrame()
         except Exception as e:
-            print(f"[SDK] 获取融资融券明细失败：{e}")
+            duration_ms = (time.monotonic() - start) * 1000
+            logger.log_sdk_call("get_margin_detail", duration_ms, "download", "error", error=str(e), stock_count=len(stock_codes) if stock_codes else 0)
             return pd.DataFrame()
         finally:
             self._release_sync(token)
 
     def get_block_trading(self, stock_codes: list, begin_date: int, end_date: int) -> pd.DataFrame:
         """获取大宗交易数据（自动排队）"""
+        logger = get_logger("sdk_manager")
         info = self.get_info()
         token = self._acquire_sync("download")
         if token is None:
             return pd.DataFrame()
+        start = time.monotonic()
         try:
             result = info.get_block_trading(code_list=stock_codes, begin_date=begin_date, end_date=end_date, is_local=False)
+            duration_ms = (time.monotonic() - start) * 1000
+            logger.log_sdk_call("get_block_trading", duration_ms, "download", "success", stock_count=len(stock_codes) if stock_codes else 0)
             if isinstance(result, pd.DataFrame):
                 return result
             return pd.DataFrame()
         except Exception as e:
-            print(f"[SDK] 获取大宗交易数据失败：{e}")
+            duration_ms = (time.monotonic() - start) * 1000
+            logger.log_sdk_call("get_block_trading", duration_ms, "download", "error", error=str(e), stock_count=len(stock_codes) if stock_codes else 0)
             return pd.DataFrame()
         finally:
             self._release_sync(token)
 
     def get_treasury_yield(self) -> pd.DataFrame:
         """获取国债收益率（自动排队）"""
+        logger = get_logger("sdk_manager")
         info = self.get_info()
         token = self._acquire_sync("download")
         if token is None:
             return pd.DataFrame()
+        start = time.monotonic()
         try:
             result = info.get_treasury_yield(is_local=False)
+            duration_ms = (time.monotonic() - start) * 1000
+            logger.log_sdk_call("get_treasury_yield", duration_ms, "download", "success")
             if isinstance(result, dict):
                 dfs = [df for df in result.values() if isinstance(df, pd.DataFrame)]
                 if dfs:
@@ -520,19 +610,24 @@ class SDKManager:
                 return result
             return pd.DataFrame()
         except Exception as e:
-            print(f"[SDK] 获取国债收益率失败：{e}")
+            duration_ms = (time.monotonic() - start) * 1000
+            logger.log_sdk_call("get_treasury_yield", duration_ms, "download", "error", error=str(e))
             return pd.DataFrame()
         finally:
             self._release_sync(token)
 
     def get_industry_constituent(self, index_codes: list) -> pd.DataFrame:
         """获取行业成分股（自动排队）"""
+        logger = get_logger("sdk_manager")
         info = self.get_info()
         token = self._acquire_sync("download")
         if token is None:
             return pd.DataFrame()
+        start = time.monotonic()
         try:
             result = info.get_industry_constituent(code_list=index_codes, is_local=False)
+            duration_ms = (time.monotonic() - start) * 1000
+            logger.log_sdk_call("get_industry_constituent", duration_ms, "download", "success", stock_count=len(index_codes) if index_codes else 0)
             if isinstance(result, dict):
                 dfs = [df for df in result.values() if isinstance(df, pd.DataFrame)]
                 if dfs:
@@ -541,19 +636,24 @@ class SDKManager:
                 return result
             return pd.DataFrame()
         except Exception as e:
-            print(f"[SDK] 获取行业成分股失败：{e}")
+            duration_ms = (time.monotonic() - start) * 1000
+            logger.log_sdk_call("get_industry_constituent", duration_ms, "download", "error", error=str(e), stock_count=len(index_codes) if index_codes else 0)
             return pd.DataFrame()
         finally:
             self._release_sync(token)
 
     def get_index_constituent(self, index_codes: list) -> pd.DataFrame:
         """获取指数成分股（自动排队）"""
+        logger = get_logger("sdk_manager")
         info = self.get_info()
         token = self._acquire_sync("download")
         if token is None:
             return pd.DataFrame()
+        start = time.monotonic()
         try:
             result = info.get_index_constituent(code_list=index_codes, is_local=False)
+            duration_ms = (time.monotonic() - start) * 1000
+            logger.log_sdk_call("get_index_constituent", duration_ms, "download", "success", stock_count=len(index_codes) if index_codes else 0)
             if isinstance(result, dict):
                 dfs = [df for df in result.values() if isinstance(df, pd.DataFrame)]
                 if dfs:
@@ -562,7 +662,8 @@ class SDKManager:
                 return result
             return pd.DataFrame()
         except Exception as e:
-            print(f"[SDK] 获取指数成分股失败：{e}")
+            duration_ms = (time.monotonic() - start) * 1000
+            logger.log_sdk_call("get_index_constituent", duration_ms, "download", "error", error=str(e), stock_count=len(index_codes) if index_codes else 0)
             return pd.DataFrame()
         finally:
             self._release_sync(token)

@@ -20,6 +20,7 @@ from services.trading.gateway import get_gateway, MarketData
 from services.trading.execution_service import get_trade_execution_service
 from services.trading.strategy_executor import get_strategy_executor
 from services.notifications import get_notification_service
+from services.common.structured_logger import get_logger
 
 
 class TradingMonitor:
@@ -70,6 +71,9 @@ class TradingMonitor:
         self._task = asyncio.create_task(
             self._run_monitoring_loop(account_ids, interval)
         )
+        log = get_logger("monitor")
+        log.log_event("monitor_start", f"交易监控服务已启动，账户：{', '.join(account_ids)}",
+                      account_ids=account_ids, interval=interval)
         return {"success": True, "message": f"交易监控服务已启动，账户：{', '.join(account_ids)}"}
 
     async def stop_monitoring(self):
@@ -89,25 +93,43 @@ class TradingMonitor:
         interval: int
     ):
         """交易监控循环 — 遍历所有账户"""
-        print(f"[Monitor] 启动交易监控服务 - 账户：{', '.join(account_ids)}, 间隔：{interval}s")
+        from services.trading.trading_hours import can_trade, get_next_trading_window
+
+        log = get_logger("monitor")
+        log.log_event("monitor_loop_start", "启动交易监控服务",
+                      account_ids=account_ids, interval=interval)
 
         while self._running:
             try:
-                from services.trading.trading_hours import can_trade
                 if can_trade():
                     for acct_id in account_ids:
                         if not self._running:
                             break
                         await self._run_monitoring(acct_id)
-
-                await asyncio.sleep(interval)
+                    # 交易中按 interval 轮询
+                    await asyncio.sleep(interval)
+                else:
+                    # 非交易时段：计算下一个交易窗口并休眠
+                    next_time, reason = get_next_trading_window()
+                    if next_time is None:
+                        log.log_event("monitor_no_trading", reason)
+                        await asyncio.sleep(60)  # 无交易日，每小时检查一次
+                    else:
+                        wait_seconds = (next_time - get_china_time()).total_seconds()
+                        wait_seconds = max(wait_seconds, 0)
+                        log.log_event("monitor_sleep_until", reason,
+                                      next_time=next_time.isoformat(),
+                                      wait_seconds=round(wait_seconds))
+                        # 最多等 5 分钟后检查一次是否被手动停止
+                        max_wait = min(wait_seconds, 300)
+                        await asyncio.sleep(max_wait)
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                print(f"[Monitor] 错误：{e}")
+                log.error("monitor_loop", f"监控循环错误: {e}")
                 await asyncio.sleep(interval)
 
-        print(f"[Monitor] 交易监控服务已停止")
+        log.log_event("monitor_loop_stop", "交易监控服务已停止")
 
     async def _run_monitoring(self, account_id: str):
         """执行一次交易监控"""
@@ -217,7 +239,8 @@ class TradingMonitor:
             gateway = await get_gateway()
             batch_data = await gateway.get_batch_market_data(stock_codes)
         except Exception as e:
-            print(f"[Monitor] 批量获取行情失败: {e}")
+            log = get_logger("monitor")
+            log.error("monitor", f"批量获取行情失败: {e}")
             # 降级为逐个获取
             for stock in watchlist:
                 await self._check_stock_signals(account_id, stock)
@@ -265,9 +288,9 @@ class TradingMonitor:
                     try:
                         compiled = compile(code_text, f"<strategy_{sid}>", "exec")
                         self._strategy_cache[sid] = compiled
-                        print(f"[Monitor] 策略 #{sid} 已编译缓存")
+                        get_logger("monitor").log_event("strategy_compiled", f"策略 #{sid} 已编译缓存", strategy_id=sid)
                     except Exception as e:
-                        print(f"[Monitor] 策略 #{sid} 编译失败: {e}")
+                        get_logger("monitor").error("monitor", f"策略 #{sid} 编译失败: {e}")
                         self._strategy_cache[sid] = None
 
         # === 优化 2：预加载 K 线缓存 ===
@@ -319,7 +342,7 @@ class TradingMonitor:
             gateway = await get_gateway()
             batch_data = await gateway.get_batch_market_data(stock_codes)
             if not self._sdk_healthy:
-                print(f"[Monitor] SDK/TGW 连接已恢复")
+                get_logger("monitor").log_event("sdk_recovered", "SDK/TGW 连接已恢复")
                 self._sdk_healthy = True
                 self._sdk_error_time = None
                 self._sdk_error_msg = ""
@@ -341,7 +364,7 @@ class TradingMonitor:
             pm = get_position_manager(account_id)
             count = await pm.refresh_pnl(prices)
             if count > 0:
-                print(f"[Monitor] 已刷新 {count} 只持仓盈亏")
+                get_logger("monitor").log_event("pnl_refresh", f"已刷新 {count} 只持仓盈亏", count=count)
 
     async def _update_watchlist_current_price(self, account_id: str):
         """更新 watchlist 中所有股票的 current_price 字段
@@ -368,7 +391,7 @@ class TradingMonitor:
             batch_data = await gateway.get_batch_market_data(stock_codes)
             # 成功获取后重置错误状态
             if not self._sdk_healthy:
-                print(f"[Monitor] SDK/TGW 连接已恢复")
+                get_logger("monitor").log_event("sdk_recovered", "SDK/TGW 连接已恢复")
                 self._sdk_healthy = True
                 self._sdk_error_time = None
                 self._sdk_error_msg = ""
@@ -378,7 +401,7 @@ class TradingMonitor:
             self._sdk_error_time = get_china_time().strftime("%Y-%m-%d %H:%M:%S")
             self._sdk_error_msg = str(e)
             self._consecutive_errors += 1
-            print(f"[Monitor] 批量获取行情失败，跳过现价更新: {e}")
+            get_logger("monitor").error("monitor", f"批量获取行情失败，跳过现价更新: {e}")
             return
 
         # 批量更新
@@ -393,7 +416,7 @@ class TradingMonitor:
                 "UPDATE watchlist SET current_price = ?, updated_at = ? WHERE account_id = ? AND stock_code = ?",
                 [(price, get_china_time(), aid, code) for price, aid, code in update_list],
             )
-            print(f"[Monitor] 已更新 {len(update_list)} 只 watchlist 现价")
+            get_logger("monitor").log_event("watchlist_price_update", f"已更新 {len(update_list)} 只 watchlist 现价", count=len(update_list))
 
     async def _evaluate_sell_strategy_code(
         self,
@@ -432,7 +455,8 @@ class TradingMonitor:
                 strategy_code = strategy.get("code", "")
 
         if not strategy:
-            print(f"[Monitor] 卖出策略 #{sell_strategy_id} 不存在")
+            get_logger("monitor").error("monitor", f"卖出策略 #{sell_strategy_id} 不存在",
+                                         strategy_id=sell_strategy_id)
             return {"should_sell": False, "reason": "sell_strategy_not_found"}
 
         from services.common import technical_indicators
@@ -501,7 +525,8 @@ class TradingMonitor:
         try:
             signals = engine.execute_strategy(strategy, context)
         except Exception as e:
-            print(f"[Monitor] 卖出策略 {sell_strategy_id} 执行失败 {stock_code}: {e}")
+            get_logger("monitor").error("monitor", f"卖出策略 {sell_strategy_id} 执行失败 {stock_code}: {e}",
+                                         strategy_id=sell_strategy_id, stock_code=stock_code)
             return {"should_sell": False, "reason": f"strategy_execution_error: {e}"}
 
         # 解析信号：查找卖出信号
@@ -629,7 +654,8 @@ class TradingMonitor:
                 return result
 
             # 未知策略类型，回退到 watchlist
-            print(f"[Monitor] {stock_code} 未知策略类型: {strategy_type}，回退到 watchlist")
+            get_logger("monitor").error("monitor", f"{stock_code} 未知策略类型: {strategy_type}，回退到 watchlist",
+                                         stock_code=stock_code, strategy_type=strategy_type)
 
         # === 优先级 2：关联的卖出代码策略 ===
         if screening_strategy_id:
@@ -684,12 +710,11 @@ class TradingMonitor:
 
             if market_data:
                 current_price = market_data.current_price
-                print(f"[Monitor] {stock_code} 实时价格：{current_price:.2f}")
             else:
-                print(f"[Monitor] {stock_code} 无法获取行情数据")
+                get_logger("monitor").warn("monitor", f"{stock_code} 无法获取行情数据", stock_code=stock_code)
                 return
         except Exception as e:
-            print(f"[Monitor] 获取 {stock_code} 行情数据失败：{e}")
+            get_logger("monitor").error("monitor", f"获取 {stock_code} 行情数据失败: {e}", stock_code=stock_code)
             return
 
         if current_price is None:
@@ -698,7 +723,9 @@ class TradingMonitor:
         # 检查买入条件
         if status == 'pending':
             if buy_price > 0 and abs(current_price - buy_price) / buy_price <= 0.02:
-                print(f"[Monitor] 触发买入信号：{stock_code}, 目标价：{buy_price:.2f}, 当前价：{current_price:.2f}")
+                get_logger("monitor").log_event("buy_signal",
+                    f"触发买入信号：{stock_code}, 目标价：{buy_price:.2f}, 当前价：{current_price:.2f}",
+                    stock_code=stock_code, buy_price=buy_price, current_price=current_price)
                 await self._create_pending_signal(account_id, stock, 'buy', current_price, target_quantity)
                 await self._execute_buy_signal(account_id, stock, current_price, target_quantity)
 
@@ -720,10 +747,12 @@ class TradingMonitor:
                 signal_type = "sell_stop_loss" if reason == "stop_loss" else (
                     "sell_take_profit" if reason == "take_profit" else f"sell_{reason}"
                 )
-                print(f"[Monitor] 触发卖出：{stock_code}, 原因: {reason}, "
-                      f"止损价={decision['stop_loss_price']:.2f}, "
-                      f"止盈价={decision['take_profit_price']:.2f}, "
-                      f"当前价={current_price:.2f}")
+                get_logger("monitor").log_event("sell_signal",
+                    f"触发卖出：{stock_code}, 原因: {reason}",
+                    stock_code=stock_code, reason=reason,
+                    stop_loss_price=decision.get('stop_loss_price'),
+                    take_profit_price=decision.get('take_profit_price'),
+                    current_price=current_price)
                 await self._create_pending_signal(account_id, stock, signal_type, current_price, 0)
                 await self._execute_sell_signal(
                     account_id, stock, current_price,
@@ -759,7 +788,9 @@ class TradingMonitor:
         # 检查买入条件
         if status == 'pending':
             if buy_price > 0 and abs(current_price - buy_price) / buy_price <= 0.02:
-                print(f"[Monitor] 触发买入信号：{stock_code}, 目标价：{buy_price:.2f}, 当前价：{current_price:.2f}")
+                get_logger("monitor").log_event("buy_signal",
+                    f"触发买入信号：{stock_code}, 目标价：{buy_price:.2f}, 当前价：{current_price:.2f}",
+                    stock_code=stock_code, buy_price=buy_price, current_price=current_price)
                 await self._create_pending_signal(account_id, stock, 'buy', current_price, target_quantity)
                 await self._execute_buy_signal(account_id, stock, current_price, target_quantity)
 
@@ -789,10 +820,12 @@ class TradingMonitor:
                 signal_type = "sell_stop_loss" if reason == "stop_loss" else (
                     "sell_take_profit" if reason == "take_profit" else f"sell_{reason}"
                 )
-                print(f"[Monitor] 触发卖出：{stock_code}, 原因: {reason}, "
-                      f"止损价={decision['stop_loss_price']:.2f}, "
-                      f"止盈价={decision['take_profit_price']:.2f}, "
-                      f"当前价={current_price:.2f}")
+                get_logger("monitor").log_event("sell_signal",
+                    f"触发卖出：{stock_code}, 原因: {reason}",
+                    stock_code=stock_code, reason=reason,
+                    stop_loss_price=decision.get('stop_loss_price'),
+                    take_profit_price=decision.get('take_profit_price'),
+                    current_price=current_price)
                 await self._create_pending_signal(account_id, stock, signal_type, current_price, 0)
                 await self._execute_sell_signal(
                     account_id, stock, current_price,
@@ -839,11 +872,11 @@ class TradingMonitor:
         )
 
         if result["success"]:
-            print(f"[Monitor] 买入成功：{stock_code}")
-            print(f"  数量：{result['quantity']} 股")
-            print(f"  价格：{result['price']:.2f} 元")
-            print(f"  总金额：{result['total_amount']:.2f} 元")
-            print(f"  手续费：{result['fees']['total_fee']:.2f} 元")
+            log = get_logger("monitor")
+            log.log_event("buy_success", f"买入成功：{stock_code}",
+                          stock_code=stock_code, quantity=result['quantity'],
+                          price=result['price'], total_amount=result['total_amount'],
+                          fees=result['fees']['total_fee'])
 
             # 更新 watchlist 状态为已买入
             await self._update_watchlist_status(
@@ -872,7 +905,8 @@ class TradingMonitor:
                 },
             )
         else:
-            print(f"[Monitor] 买入失败：{result['message']}")
+            get_logger("monitor").warn("monitor", f"买入失败: {result['message']}",
+                                        stock_code=stock_code, message=result['message'])
             # 信号 pending → cancelled
             await self._update_signal_status(
                 account_id, stock_code, 'cancelled', target_quantity
@@ -916,12 +950,11 @@ class TradingMonitor:
         )
 
         if result["success"]:
-            print(f"[Monitor] 卖出成功：{stock_code}")
-            print(f"  数量：{result['quantity']} 股")
-            print(f"  价格：{result['price']:.2f} 元")
-            print(f"  净得：{result['net_amount']:.2f} 元")
-            print(f"  手续费：{result['fees']['total_fee']:.2f} 元")
-            print(f"  盈亏：{result['profit_loss']:.2f} 元")
+            log = get_logger("monitor")
+            log.log_event("sell_success", f"卖出成功：{stock_code}",
+                          stock_code=stock_code, quantity=result['quantity'],
+                          price=result['price'], net_amount=result['net_amount'],
+                          fees=result['fees']['total_fee'], profit_loss=result['profit_loss'])
 
             # 如果清空持仓，更新 watchlist 状态
             await self._update_watchlist_status(
@@ -951,7 +984,8 @@ class TradingMonitor:
                 },
             )
         else:
-            print(f"[Monitor] 卖出失败：{result['message']}")
+            get_logger("monitor").warn("monitor", f"卖出失败: {result['message']}",
+                                        stock_code=stock_code, message=result['message'])
             # 信号 pending → cancelled
             await self._update_signal_status(
                 account_id, stock_code, 'cancelled', 0
@@ -984,7 +1018,7 @@ class TradingMonitor:
             gateway = await get_gateway()
             market_data = await gateway.get_batch_market_data(stock_codes)
         except Exception as e:
-            print(f"[Monitor] 批量获取行情失败: {e}")
+            get_logger("monitor").error("monitor", f"批量获取行情失败: {e}")
             return
 
         for signal in signals:
@@ -995,12 +1029,15 @@ class TradingMonitor:
 
             md = market_data.get(stock_code)
             if not md or not md.current_price:
-                print(f"[Monitor] 无法获取 {stock_code} 行情，跳过信号 {signal['id']}")
+                get_logger("monitor").warn("monitor", f"无法获取 {stock_code} 行情，跳过信号 {signal['id']}",
+                                            stock_code=stock_code, signal_id=signal['id'])
                 continue
 
             current_price = md.current_price
-            print(f"[Monitor] 执行手动 pending 信号: {stock_code} {signal_type}, "
-                  f"委托价={target_price:.2f}, 现价={current_price:.2f}, 数量={quantity}")
+            get_logger("monitor").log_event("pending_signal_execute",
+                f"执行手动 pending 信号: {stock_code} {signal_type}",
+                stock_code=stock_code, signal_type=signal_type,
+                target_price=target_price, current_price=current_price, quantity=quantity)
 
             if signal_type == 'buy':
                 await self._execute_buy_signal(
@@ -1027,7 +1064,8 @@ class TradingMonitor:
                     "id = ?",
                     (signal['id'],)
                 )
-                print(f"[Monitor] 未知信号类型 {signal_type}，取消信号 {signal['id']}")
+                get_logger("monitor").warn("monitor", f"未知信号类型 {signal_type}，取消信号",
+                                            signal_type=signal_type, signal_id=signal['id'])
 
     async def _create_pending_signal(
         self,
@@ -1055,7 +1093,9 @@ class TradingMonitor:
         }
 
         signal_id = await db.insert("trading_signals", signal_data)
-        print(f"[Monitor] 创建交易信号(pending)：{stock.get('stock_code')} - {signal_type}")
+        get_logger("monitor").log_event("signal_created",
+            f"创建交易信号(pending)：{stock.get('stock_code')} - {signal_type}",
+            stock_code=stock.get('stock_code'), signal_type=signal_type, signal_id=signal_id)
         return signal_id
 
     async def _update_signal_status(

@@ -16,8 +16,8 @@ A 股交易时段规则：
 - 收盘后需撤销全部未成交委托
 """
 
-from datetime import datetime, time as dtime
-from services.common.timezone import get_china_time
+from datetime import datetime, time as dtime, timedelta
+from services.common.timezone import get_china_time, CHINA_TZ
 from enum import Enum
 
 
@@ -199,3 +199,59 @@ def get_trading_status(dt: datetime = None) -> dict:
         "can_cancel_order": can_cancel_order(dt) and trading_day,
         "should_cancel_all": should_cancel_all_orders(dt) and trading_day,
     }
+
+
+def get_next_trading_window(dt: datetime = None) -> tuple[datetime | None, str]:
+    """计算距离下一个可交易时段的等待时间
+
+    Returns:
+        (next_trade_time, reason) — 如果当前可交易返回 (None, "trading")，
+        否则返回下一个交易时段的开始时间和原因描述。
+
+    时段规则：
+        09:15-11:30  上午交易
+        11:30-13:00  午间休市 → 等 13:00
+        13:00-15:00  下午交易
+        15:00-次日09:15 → 等下一个交易日 09:15
+    """
+    if dt is None:
+        dt = get_china_time()
+
+    if not is_today_trading_day(dt):
+        # 非交易日 → 找下一个交易日
+        next_day = dt + timedelta(days=1)
+        next_day = next_day.replace(hour=0, minute=0, second=0, microsecond=0)
+        for _ in range(7):
+            if is_today_trading_day(next_day):
+                target = next_day.replace(hour=9, minute=15, second=0, microsecond=0)
+                return target, f"等待下一个交易日 {next_day.strftime('%Y-%m-%d')} 09:15"
+            next_day += timedelta(days=1)
+        return None, "7 天内无交易日"
+
+    t = dt.time()
+
+    if dtime(9, 15) <= t < dtime(11, 30):
+        return None, "trading"  # 上午交易中
+
+    if dtime(13, 0) <= t < dtime(15, 0):
+        return None, "trading"  # 下午交易中
+
+    if dtime(11, 30) <= t < dtime(13, 0):
+        # 午间休市 → 等 13:00
+        target = dt.replace(hour=13, minute=0, second=0, microsecond=0)
+        return target, "等待下午开盘 13:00"
+
+    if t >= dtime(15, 0):
+        # 收盘后 → 等下一个交易日
+        next_day = dt + timedelta(days=1)
+        next_day = next_day.replace(hour=0, minute=0, second=0, microsecond=0)
+        for _ in range(7):
+            if is_today_trading_day(next_day):
+                target = next_day.replace(hour=9, minute=15, second=0, microsecond=0)
+                return target, f"收盘，等待 {next_day.strftime('%Y-%m-%d')} 09:15"
+            next_day += timedelta(days=1)
+        return None, "7 天内无交易日"
+
+    # t < 09:15 → 等今天 09:15
+    target = dt.replace(hour=9, minute=15, second=0, microsecond=0)
+    return target, "等待开盘 09:15"

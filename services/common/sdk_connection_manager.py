@@ -24,15 +24,16 @@ SDK 连接生命周期管理器
 """
 
 import threading
+import time
 from datetime import datetime
 from typing import Optional, Dict, Any, List
 from enum import Enum
 from dataclasses import dataclass
 import uuid
-import time
 import concurrent.futures
 
 from services.common.timezone import get_china_time
+from services.common.structured_logger import get_logger
 
 # SDK 登录参数
 import os
@@ -166,6 +167,8 @@ class SDKConnectionManager:
 
     def _sdk_login(self) -> bool:
         """发起 SDK 登录（同步阻塞，带超时保护）"""
+        logger = get_logger("sdk_connection")
+        start = time.monotonic()
         try:
             from AmazingData import login
 
@@ -182,24 +185,35 @@ class SDKConnectionManager:
             t.start()
             t.join(timeout=30.0)
 
+            elapsed_ms = (time.monotonic() - start) * 1000
+
             if t.is_alive():
-                print("[SDK] 登录超时（>30s）")
+                logger.error("sdk_login", "登录超时", context={"timeout_seconds": 30})
+                logger.log_sdk_call("login", elapsed_ms, "connect", "timeout",
+                                    error="登录超时")
                 self._set_state(ConnectionState.FAILED, "登录超时")
                 return False
 
             if error_container[0]:
-                print(f"[SDK] 登录异常：{error_container[0]}")
-                self._set_state(ConnectionState.FAILED, str(error_container[0]))
+                err_msg = str(error_container[0])
+                logger.error("sdk_login", f"登录异常: {err_msg}")
+                logger.log_sdk_call("login", elapsed_ms, "connect", "error", error=err_msg)
+                self._set_state(ConnectionState.FAILED, err_msg)
                 return False
 
             if result_container[0]:
-                print("[SDK] 登录成功")
+                logger.log_sdk_call("login", elapsed_ms, "connect", "success")
+                self._set_state(ConnectionState.CONNECTED)
                 return True
             else:
-                print("[SDK] 登录失败")
+                logger.error("sdk_login", "登录失败（返回 False）")
+                logger.log_sdk_call("login", elapsed_ms, "connect", "failure")
+                self._set_state(ConnectionState.FAILED, "登录失败")
                 return False
         except Exception as e:
-            print(f"[SDK] 登录异常：{e}")
+            elapsed_ms = (time.monotonic() - start) * 1000
+            logger.error("sdk_login", f"登录异常: {e}")
+            logger.log_sdk_call("login", elapsed_ms, "connect", "error", error=str(e))
             raise
 
     def _test_connection(self) -> bool:
@@ -229,30 +243,18 @@ class SDKConnectionManager:
     def ensure_connected(self, timeout: float = 30.0) -> bool:
         """
         确保 SDK 连接可用（同步调用，供中间层使用）
-
-        流程：
-        1. 检查当前状态
-        2. 如已连接：直接返回（不做主动探测，避免额外 SDK 调用干扰正常任务）
-        3. 如未连接：发起登录
-        4. 如连接失败：返回 False，附带错误信息
-
-        连接有效性检测延迟到实际 SDK 调用失败时再进行（在 acquire 超时后）。
-
-        Returns:
-            True: 连接可用
-            False: 连接不可用，调用 get_error_info() 获取详情
         """
+        logger = get_logger("sdk_connection")
         current_state = self.get_state()
 
         if current_state == ConnectionState.CONNECTED:
-            # 已连接：直接信任，不做主动探测
             return True
 
         # 需要连接/重连
+        is_reconnect = current_state == ConnectionState.FAILED
         with self._state_lock:
-            # 防止并发重连
             if self._state == ConnectionState.CONNECTING:
-                return False  # 正在连接中，避免阻塞
+                return False
             self._state = ConnectionState.CONNECTING
 
         try:
@@ -262,6 +264,8 @@ class SDKConnectionManager:
                     self._state = ConnectionState.CONNECTED
                     self._consecutive_failures = 0
                 self._stats["total_reconnects"] += 1
+                if is_reconnect:
+                    logger.log_event("sdk_reconnect", "SDK 连接重连成功")
                 return True
             else:
                 with self._state_lock:
@@ -294,18 +298,9 @@ class SDKConnectionManager:
     ) -> Optional[ConnectionToken]:
         """
         获取 SDK 连接令牌（同步，跨线程安全）
-
-        调用前应先调用 ensure_connected() 确保连接可用。
-        此方法只负责并发排队串行化。
-
-        Args:
-            task_type: 任务类型
-            task_id: 任务标识
-            timeout: 等待超时时间（秒）
-
-        Returns:
-            ConnectionToken: 连接令牌，超时或不可用返回 None
         """
+        logger = get_logger("sdk_connection")
+
         # 检查连接状态
         if self.get_state() != ConnectionState.CONNECTED:
             return None
@@ -332,12 +327,12 @@ class SDKConnectionManager:
             self._waiting_tasks.append(wait_info)
 
         try:
-            # threading.Lock.acquire 支持 timeout，跨线程生效
             acquired = self._serial_lock.acquire(timeout=timeout)
 
             elapsed = time.monotonic() - wait_start
-            if elapsed > self._stats["max_wait_seconds"]:
-                self._stats["max_wait_seconds"] = elapsed
+            elapsed_ms = elapsed * 1000
+            if elapsed_ms > self._stats["max_wait_seconds"]:
+                self._stats["max_wait_seconds"] = elapsed_ms
 
             if not acquired:
                 with self._state_lock:
@@ -345,6 +340,9 @@ class SDKConnectionManager:
                     if wait_info in self._waiting_tasks:
                         self._waiting_tasks.remove(wait_info)
                 self._stats["total_timeout_fails"] += 1
+                logger.log_duration("sdk_acquire_wait", elapsed_ms,
+                                    task_id=task_id, task_type=task_type.value,
+                                    status="timeout", timeout=timeout)
                 return None
 
             with self._state_lock:
@@ -359,6 +357,10 @@ class SDKConnectionManager:
             }
             self._stats["total_acquires"] += 1
 
+            logger.log_duration("sdk_acquire_wait", elapsed_ms,
+                                task_id=task_id, task_type=task_type.value,
+                                status="success")
+
             return ConnectionToken(task_id, task_type, self)
 
         except Exception:
@@ -371,16 +373,25 @@ class SDKConnectionManager:
 
     def _release_token(self, token: ConnectionToken):
         """释放连接令牌（内部方法）"""
+        logger = get_logger("sdk_connection")
+
+        acquired_at = None
         with self._state_lock:
             if self._current_holder and self._current_holder["task_id"] == token.task_id:
+                acquired_at = self._current_holder.get("acquired_at")
                 self._current_holder = None
 
         self._stats["total_releases"] += 1
 
+        if acquired_at:
+            hold_ms = (get_china_time() - acquired_at).total_seconds() * 1000
+            logger.log_duration("sdk_token_hold", hold_ms,
+                                task_id=token.task_id, task_type=token.task_type.value)
+
         try:
             self._serial_lock.release()
         except RuntimeError:
-            pass  # lock already released
+            pass
 
     def get_status(self) -> Dict[str, Any]:
         """获取连接状态"""

@@ -11,6 +11,7 @@
 
 import asyncio
 import sqlite3
+import time
 import pandas as pd
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -18,6 +19,7 @@ from typing import List, Dict, Optional
 
 from services.common.timezone import CHINA_TZ, get_china_time
 from services.common.download_progress import get_progress_tracker, DownloadStatus
+from services.common.structured_logger import get_logger
 from services.factors.factor_pipeline import calculate_technical_factors, add_signal_indicators
 
 # 数据库路径
@@ -58,11 +60,15 @@ def calculate_and_save_factors_for_dates(
     返回：
     - 成功计算的记录数
     """
+    log = get_logger("factor")
+
     conn = sqlite3.connect(str(DB_PATH), timeout=60)
     cursor = conn.cursor()
     cursor.execute("PRAGMA journal_mode=WAL")
     cursor.execute("PRAGMA busy_timeout = 60000")
     cursor.execute("PRAGMA synchronous=NORMAL")
+
+    start_time = time.monotonic()
 
     # 获取日期范围内的所有股票
     if stock_codes is None:
@@ -73,12 +79,14 @@ def calculate_and_save_factors_for_dates(
         stock_codes = [row[0] for row in cursor.fetchall()]
 
     if not stock_codes:
-        print(f"[FactorCalc] 日期范围 [{start_date}, {end_date}] 内无数据")
+        log.log_event("factor_calc_no_data", f"日期范围 [{start_date}, {end_date}] 内无数据",
+                      start_date=start_date, end_date=end_date)
         conn.close()
         return 0
 
     total_stocks = len(stock_codes)
-    print(f"[FactorCalc] 将为 {total_stocks} 只股票计算因子 ({start_date} 至 {end_date})")
+    log.log_event("factor_calc_start", f"为 {total_stocks} 只股票计算因子 ({start_date} 至 {end_date})",
+                  total_stocks=total_stocks, start_date=start_date, end_date=end_date)
 
     total_inserted = 0
     BATCH_SIZE = 50
@@ -95,7 +103,9 @@ def calculate_and_save_factors_for_dates(
             progress_pct = (processed / total_stocks) * 100 if total_stocks > 0 else 0
             batch_num = i // BATCH_SIZE + 1
             num_batches = (total_stocks + BATCH_SIZE - 1) // BATCH_SIZE
-            print(f"\n[FactorCalc] 进度：{progress_pct:.1f}% | 批次 {batch_num}/{num_batches} | 处理 {len(batch_stocks)} 只股票 ({processed}/{total_stocks})")
+            log.log_event("factor_batch_progress", f"因子计算进度 {progress_pct:.1f}%",
+                          progress_pct=round(progress_pct, 1), batch_num=batch_num, num_batches=num_batches,
+                          batch_size=len(batch_stocks), processed=processed, total_stocks=total_stocks)
 
         if tracker:
             tracker.update_sync(
@@ -168,7 +178,8 @@ def calculate_and_save_factors_for_dates(
                 df['change_pct'] = df['close'].pct_change()
 
                 if only_new_dates and i == 0 and stock_code == batch_stocks[0]:
-                    print(f"  [DEBUG] {stock_code}: calc={calc_start}~{calc_end}, K线={df['trade_date'].min()}~{df['trade_date'].max()}")
+                    log.debug("factor", f"{stock_code}: calc={calc_start}~{calc_end}, K线={df['trade_date'].min()}~{df['trade_date'].max()}",
+                              context={"stock_code": stock_code, "calc_start": calc_start, "calc_end": calc_end})
 
                 df = calculate_technical_factors(df)
                 df = add_signal_indicators(df)
@@ -205,7 +216,8 @@ def calculate_and_save_factors_for_dates(
                 insert_end = calc_end if only_new_dates else end_date
 
                 if show_progress and insert_count == 0:
-                    print(f"  [DEBUG] {stock_code}: insert范围 {insert_start} ~ {insert_end}, df日期 {df['trade_date'].min()} ~ {df['trade_date'].max()}")
+                    log.debug("factor", f"{stock_code}: insert范围 {insert_start} ~ {insert_end}, df日期 {df['trade_date'].min()} ~ {df['trade_date'].max()}",
+                              context={"stock_code": stock_code, "insert_start": insert_start, "insert_end": insert_end})
 
                 def to_python_value(val):
                     if val is None:
@@ -334,27 +346,35 @@ def calculate_and_save_factors_for_dates(
                         ))
                         insert_count += 1
                     except Exception as e:
-                        print(f"[FactorCalc] 插入 {stock_code} {trade_date} 失败：{e}")
+                        log.error("factor", f"插入 {stock_code} {trade_date} 失败: {e}",
+                                  context={"stock_code": stock_code, "trade_date": trade_date, "error": str(e)})
                         continue
 
                 if insert_count > 0:
                     total_inserted += insert_count
                     if show_progress:
-                        print(f"  {stock_code} ({stock_name}): 插入 {insert_count} 条记录")
+                        log.log_event("factor_insert", f"{stock_code} 插入 {insert_count} 条记录",
+                                      stock_code=stock_code, stock_name=stock_name, insert_count=insert_count)
 
                 if (processed % BATCH_SIZE == 0) and total_inserted > 0:
                     conn.commit()
 
             except Exception as e:
-                print(f"[FactorCalc] {stock_code} 处理失败：{e}")
+                log.error("factor", f"{stock_code} 处理失败: {e}",
+                          context={"stock_code": stock_code, "error": str(e)})
                 continue
 
     if total_inserted > 0:
         conn.commit()
 
     conn.close()
-    print(f"\n[FactorCalc] ====== 因子计算完成 ======")
-    print(f"[FactorCalc] 总计插入 {total_inserted} 条记录")
+
+    duration_ms = (time.monotonic() - start_time) * 1000
+    log.log_event("factor_calc_complete", f"因子计算完成，总计插入 {total_inserted} 条记录",
+                  total_inserted=total_inserted)
+    log.log_duration("factor_calc_total", duration_ms,
+                     total_stocks=total_stocks, total_inserted=total_inserted,
+                     start_date=start_date, end_date=end_date)
 
     if tracker:
         tracker.complete_sync()
@@ -399,11 +419,15 @@ def fill_empty_factor_values(
     Step 1: 调用 calculate_and_save_factors_for_dates 处理缺失记录
     Step 2: 更新已有记录中的空值字段
     """
-    print(f"\n[FillEmpty] ====== 开始填充因子数据 ======")
-    print(f"[FillEmpty] 日期范围：{start_date} ~ {end_date}")
+    log = get_logger("factor")
+
+    start_time = time.monotonic()
+
+    log.log_event("fill_empty_start", f"开始填充因子数据，日期范围：{start_date} ~ {end_date}",
+                  start_date=start_date, end_date=end_date)
 
     # Step 1: 处理缺失记录
-    print("\n[FillEmpty] Step 1: 检查缺失因子记录...")
+    log.log_event("fill_empty_step1", "Step 1: 检查缺失因子记录...")
 
     conn_check = sqlite3.connect(str(DB_PATH), timeout=60)
     cursor_check = conn_check.cursor()
@@ -433,7 +457,8 @@ def fill_empty_factor_values(
 
     missing_count = 0
     if missing_stock_codes:
-        print(f"[FillEmpty] 发现 {len(missing_stock_codes)} 只股票有缺失因子记录")
+        log.log_event("fill_empty_missing_found", f"发现 {len(missing_stock_codes)} 只股票有缺失因子记录",
+                      missing_count=len(missing_stock_codes))
         missing_count = calculate_and_save_factors_for_dates(
             start_date=start_date,
             end_date=end_date,
@@ -443,12 +468,13 @@ def fill_empty_factor_values(
             tracker=tracker
         )
     else:
-        print("[FillEmpty] 无缺失因子记录，跳过Step 1")
+        log.log_event("fill_empty_no_missing", "无缺失因子记录，跳过Step 1")
 
-    print(f"[FillEmpty] Step 1 完成: 插入 {missing_count} 条缺失记录")
+    log.log_event("fill_empty_step1_done", f"Step 1 完成: 插入 {missing_count} 条缺失记录",
+                  missing_count=missing_count)
 
     # Step 2: 更新空值记录
-    print("\n[FillEmpty] Step 2: 更新空值记录...")
+    log.log_event("fill_empty_step2", "Step 2: 更新空值记录...")
 
     conn = sqlite3.connect(str(DB_PATH), timeout=60)
     cursor = conn.cursor()
@@ -456,8 +482,27 @@ def fill_empty_factor_values(
     cursor.execute("PRAGMA busy_timeout = 60000")
     cursor.execute("PRAGMA synchronous=NORMAL")
 
-    KEY_FACTOR_FIELDS = ['ma5', 'ema12', 'kdj_k', 'rsi_14', 'boll_upper', 'atr_14']
-    null_condition = " OR ".join([f"{f} IS NULL" for f in KEY_FACTOR_FIELDS])
+    # 检测所有因子字段的空值（与 INSERT 语句中的字段保持一致）
+    ALL_FACTOR_FIELDS = [
+        'ma5', 'ma10', 'ma20', 'ma60', 'ema12', 'ema26',
+        'kdj_k', 'kdj_d', 'kdj_j', 'dif', 'dea', 'macd',
+        'rsi_14', 'cci_20', 'adx', 'atr_14',
+        'boll_upper', 'boll_middle', 'boll_lower',
+        'hv_20', 'obv', 'volume_ratio',
+        'change_5d', 'change_10d', 'change_20d',
+        'bias_5', 'bias_10', 'bias_20',
+        'amplitude_5', 'amplitude_10', 'amplitude_20',
+        'change_std_5', 'change_std_10', 'change_std_20',
+        'amount_std_5', 'amount_std_10', 'amount_std_20',
+        'momentum_10d', 'momentum_20d',
+        'golden_cross', 'death_cross',
+        'limit_up_count_10d', 'limit_up_count_20d', 'limit_up_count_30d',
+        'consecutive_limit_up',
+        'large_gain_5d_count', 'large_loss_5d_count',
+        'close_to_high_250d', 'close_to_low_250d',
+        'gap_up_ratio', 'next_period_change', 'is_traded'
+    ]
+    null_condition = " OR ".join([f"{f} IS NULL" for f in ALL_FACTOR_FIELDS])
 
     if stock_codes is None:
         cursor.execute(f"""
@@ -468,11 +513,15 @@ def fill_empty_factor_values(
         stock_codes = [row[0] for row in cursor.fetchall()]
 
     total_stocks = len(stock_codes)
-    print(f"[FillEmpty] 需处理空值：{total_stocks} 只股票")
+    log.log_event("fill_empty_stocks", f"需处理空值：{total_stocks} 只股票",
+                  total_stocks=total_stocks)
 
     if total_stocks == 0:
         conn.close()
-        print("[FillEmpty] 无需处理的空值因子")
+        log.log_event("fill_empty_nothing", "无需处理的空值因子")
+        duration_ms = (time.monotonic() - start_time) * 1000
+        log.log_duration("fill_empty_total", duration_ms,
+                         missing_count=missing_count, total_updated=0, total=missing_count)
         return missing_count
 
     total_updated = 0
@@ -484,7 +533,9 @@ def fill_empty_factor_values(
 
         if show_progress:
             progress_pct = (processed / total_stocks) * 100
-            print(f"\n[FillEmpty] 进度：{progress_pct:.1f}% | 处理 {len(batch_stocks)} 只股票 ({processed}/{total_stocks})")
+            log.log_event("fill_empty_progress", f"填充进度 {progress_pct:.1f}%",
+                          progress_pct=round(progress_pct, 1), batch_size=len(batch_stocks),
+                          processed=processed, total_stocks=total_stocks)
 
         for stock_code in batch_stocks:
             try:
@@ -564,13 +615,15 @@ def fill_empty_factor_values(
                 if update_count > 0:
                     total_updated += update_count
                     if show_progress:
-                        print(f"  {stock_code}: 更新 {update_count} 条空值记录")
+                        log.log_event("fill_empty_update", f"{stock_code} 更新 {update_count} 条空值记录",
+                                      stock_code=stock_code, update_count=update_count)
 
                 if processed % BATCH_SIZE == 0:
                     conn.commit()
 
             except Exception as e:
-                print(f"[FillEmpty] {stock_code} 处理失败：{e}")
+                log.error("factor", f"{stock_code} 处理失败: {e}",
+                          context={"stock_code": stock_code, "error": str(e)})
                 continue
 
     conn.commit()
@@ -579,10 +632,13 @@ def fill_empty_factor_values(
     if tracker:
         tracker.complete_sync()
 
-    print(f"\n[FillEmpty] ====== 填充完成 ======")
-    print(f"[FillEmpty] 缺失记录: {missing_count} 条")
-    print(f"[FillEmpty] 空值更新: {total_updated} 条")
-    print(f"[FillEmpty] 总计: {missing_count + total_updated} 条")
+    duration_ms = (time.monotonic() - start_time) * 1000
+    total = missing_count + total_updated
+    log.log_event("fill_empty_complete", f"填充完成，缺失记录: {missing_count} 条，空值更新: {total_updated} 条，总计: {total} 条",
+                  missing_count=missing_count, total_updated=total_updated, total=total)
+    log.log_duration("fill_empty_total", duration_ms,
+                     missing_count=missing_count, total_updated=total_updated, total=total,
+                     start_date=start_date, end_date=end_date)
 
     return missing_count + total_updated
 
@@ -618,8 +674,12 @@ def smart_update_factors(
             return float(val)
         return val
 
-    print(f"\n[SmartUpdate] ====== 开始智能因子更新 ======")
-    print(f"[SmartUpdate] 日期范围：{start_date} ~ {end_date}")
+    log = get_logger("factor")
+
+    start_time = time.monotonic()
+
+    log.log_event("smart_update_start", f"开始智能因子更新，日期范围：{start_date} ~ {end_date}",
+                  start_date=start_date, end_date=end_date)
 
     conn = sqlite3.connect(str(DB_PATH), timeout=60)
     cursor = conn.cursor()
@@ -628,7 +688,7 @@ def smart_update_factors(
     cursor.execute("PRAGMA synchronous=NORMAL")
 
     # ========== Step 1: 批量检测缺失/空值日期 ==========
-    print("\n[SmartUpdate] Step 1: 批量检测缺失/空值日期...")
+    log.log_event("smart_update_step1", "Step 1: 批量检测缺失/空值日期...")
 
     if stock_codes is None:
         cursor.execute("""
@@ -649,8 +709,27 @@ def smart_update_factors(
 
     missing_records = cursor.fetchall()
 
-    KEY_FACTOR_FIELDS = ['ma5', 'ema12', 'kdj_k', 'rsi_14', 'boll_upper', 'atr_14']
-    null_condition = " OR ".join([f"{f} IS NULL" for f in KEY_FACTOR_FIELDS])
+    # 检测所有因子字段的空值（与 INSERT 语句中的字段保持一致）
+    ALL_FACTOR_FIELDS = [
+        'ma5', 'ma10', 'ma20', 'ma60', 'ema12', 'ema26',
+        'kdj_k', 'kdj_d', 'kdj_j', 'dif', 'dea', 'macd',
+        'rsi_14', 'cci_20', 'adx', 'atr_14',
+        'boll_upper', 'boll_middle', 'boll_lower',
+        'hv_20', 'obv', 'volume_ratio',
+        'change_5d', 'change_10d', 'change_20d',
+        'bias_5', 'bias_10', 'bias_20',
+        'amplitude_5', 'amplitude_10', 'amplitude_20',
+        'change_std_5', 'change_std_10', 'change_std_20',
+        'amount_std_5', 'amount_std_10', 'amount_std_20',
+        'momentum_10d', 'momentum_20d',
+        'golden_cross', 'death_cross',
+        'limit_up_count_10d', 'limit_up_count_20d', 'limit_up_count_30d',
+        'consecutive_limit_up',
+        'large_gain_5d_count', 'large_loss_5d_count',
+        'close_to_high_250d', 'close_to_low_250d',
+        'gap_up_ratio', 'next_period_change', 'is_traded'
+    ]
+    null_condition = " OR ".join([f"{f} IS NULL" for f in ALL_FACTOR_FIELDS])
 
     if stock_codes is None:
         cursor.execute(f"""
@@ -686,16 +765,18 @@ def smart_update_factors(
     all_stocks = set(missing_by_stock.keys()) | set(null_by_stock.keys())
 
     total_stocks = len(all_stocks)
-    print(f"[SmartUpdate] 发现 {len(missing_records)} 条缺失记录，{len(null_records)} 条空值记录")
-    print(f"[SmartUpdate] 涉及 {total_stocks} 只股票需要处理")
+    log.log_event("smart_update_discovery", f"发现 {len(missing_records)} 条缺失记录，{len(null_records)} 条空值记录，涉及 {total_stocks} 只股票",
+                  missing_records=len(missing_records), null_records=len(null_records), total_stocks=total_stocks)
 
     if total_stocks == 0:
         conn.close()
-        print("[SmartUpdate] 无需处理，直接返回")
+        log.log_event("smart_update_nothing", "无需处理，直接返回")
+        duration_ms = (time.monotonic() - start_time) * 1000
+        log.log_duration("smart_update_total", duration_ms, inserted=0, updated=0, skipped=0)
         return {'inserted': 0, 'updated': 0, 'skipped': 0}
 
     # ========== Step 2: 计算因子 ==========
-    print("\n[SmartUpdate] Step 2: 计算因子...")
+    log.log_event("smart_update_step2", "Step 2: 计算因子...")
 
     total_inserted = 0
     total_updated = 0
@@ -712,7 +793,9 @@ def smart_update_factors(
 
         if show_progress:
             progress_pct = (processed / total_stocks) * 100
-            print(f"\n[SmartUpdate] 进度：{progress_pct:.1f}% | 处理 {len(batch_stocks)} 只股票 ({processed}/{total_stocks})")
+            log.log_event("smart_update_progress", f"智能更新进度 {progress_pct:.1f}%",
+                          progress_pct=round(progress_pct, 1), batch_size=len(batch_stocks),
+                          processed=processed, total_stocks=total_stocks)
 
         if tracker:
             tracker.update_sync(processed=processed, message=f"计算因子：批次 {batch_idx//BATCH_SIZE + 1}")
@@ -889,7 +972,8 @@ def smart_update_factors(
                         ))
                         total_inserted += 1
                     except Exception as e:
-                        print(f"[SmartUpdate] INSERT {stock_code} {trade_date} 失败：{e}")
+                        log.error("factor", f"INSERT {stock_code} {trade_date} 失败: {e}",
+                                  context={"stock_code": stock_code, "trade_date": trade_date, "error": str(e)})
                         continue
 
                 # 处理空值记录（UPDATE）
@@ -936,14 +1020,16 @@ def smart_update_factors(
                             """, update_values)
                             total_updated += 1
                         except Exception as e:
-                            print(f"[SmartUpdate] UPDATE {stock_code} {trade_date} 失败：{e}")
+                            log.error("factor", f"UPDATE {stock_code} {trade_date} 失败: {e}",
+                                      context={"stock_code": stock_code, "trade_date": trade_date, "error": str(e)})
                             continue
 
                 if processed % BATCH_SIZE == 0:
                     conn.commit()
 
             except Exception as e:
-                print(f"[SmartUpdate] {stock_code} 处理失败：{e}")
+                log.error("factor", f"{stock_code} 处理失败: {e}",
+                          context={"stock_code": stock_code, "error": str(e)})
                 continue
 
     conn.commit()
@@ -958,9 +1044,12 @@ def smart_update_factors(
         'skipped': 0
     }
 
-    print(f"\n[SmartUpdate] ====== 智能因子更新完成 ======")
-    print(f"[SmartUpdate] 新增记录: {total_inserted} 条")
-    print(f"[SmartUpdate] 更新空值: {total_updated} 条")
-    print(f"[SmartUpdate] 总计处理: {total_inserted + total_updated} 条")
+    duration_ms = (time.monotonic() - start_time) * 1000
+    total = total_inserted + total_updated
+    log.log_event("smart_update_complete", f"智能因子更新完成，新增 {total_inserted} 条，更新 {total_updated} 条，总计 {total} 条",
+                  inserted=total_inserted, updated=total_updated, total=total)
+    log.log_duration("smart_update_total", duration_ms,
+                     inserted=total_inserted, updated=total_updated, skipped=0,
+                     start_date=start_date, end_date=end_date)
 
     return result

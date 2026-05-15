@@ -28,40 +28,23 @@ def setup_logger(
     """
     设置并返回 logger
 
+    注意：structured_logger 已接管日志输出，此函数仅用于兼容旧代码。
+    新代码请使用 from services.common.structured_logger import get_logger
+
     Args:
         name: logger 名称（通常使用 __name__）
         level: 日志级别
-        log_to_file: 是否记录到文件
-        log_to_console: 是否输出到控制台
+        log_to_file: 是否记录到文件（已废弃）
+        log_to_console: 是否输出到控制台（已废弃）
 
     Returns:
         配置好的 Logger 对象
     """
     logger = logging.getLogger(name)
-    logger.setLevel(level)
-
-    # 避免重复添加 handler
-    if logger.handlers:
-        return logger
-
-    formatter = logging.Formatter(LOG_FORMAT, datefmt=LOG_DATE_FORMAT)
-
-    # 控制台 handler
-    if log_to_console:
-        console_handler = logging.StreamHandler(sys.stdout)
-        console_handler.setLevel(level)
-        console_handler.setFormatter(formatter)
-        logger.addHandler(console_handler)
-
-    # 文件 handler
-    if log_to_file:
-        LOG_DIR.mkdir(exist_ok=True)
-        log_file = LOG_DIR / f"{name.replace('.', '_')}.log"
-        file_handler = logging.FileHandler(log_file, encoding='utf-8')
-        file_handler.setLevel(level)
-        file_handler.setFormatter(formatter)
-        logger.addHandler(file_handler)
-
+    # 不再添加 handler，由 structured_logger 统一处理
+    if not logger.handlers:
+        logger.setLevel(level)
+        logger.propagate = True  # 传播到 StockWinner 根 logger
     return logger
 
 

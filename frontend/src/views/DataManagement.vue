@@ -538,7 +538,11 @@ async function calculateDailyFactors() {
 async function fillDailyEmpty() {
   dailyFillLoading.value = true
   try {
-    const res = await fetch('/api/v1/ui/factors/daily/fill-empty', { method: 'POST' })
+    const res = await fetch('/api/v1/ui/factors/daily/fill-empty', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ lookback_days: 365 })
+    })
     const data = await res.json()
     ElMessage.success(data.message || '日频因子补算空值任务已启动')
     loadTasksStatus()

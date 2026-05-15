@@ -531,6 +531,7 @@ async def submit_manual_order(
         "price": price,
         "target_quantity": quantity,
         "status": "pending",
+        "order_type": order_type,
         "created_at": format_china_time(),
         "executed_at": None,
     })
