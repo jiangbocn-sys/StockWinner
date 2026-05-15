@@ -336,8 +336,11 @@ async function searchStocks(query, cb) {
 
 // 用户从搜索结果中选中一只股票
 async function onStockSelect(item) {
+  isSelecting = true
   orderForm.value.stock_code = normalizeStockCode(item.stock_code)
   await lookupAndCalculate()
+  // 延迟重置，避免 watch 再次触发
+  setTimeout(() => { isSelecting = false }, 100)
 }
 
 // 清空代码输入
@@ -380,15 +383,14 @@ async function lookupAndCalculate() {
     })
     const data = await resp.json()
     if (data.success) {
+      console.log('[quote] API response:', JSON.stringify({ stock_code: data.stock_code, stock_name: data.stock_name, current_price: data.current_price }))
       quoteInfo.value = {
         current_price: data.current_price,
         bid1: data.bid1,
         ask1: data.ask1,
       }
-      // 直接覆盖股票名称
-      if (data.stock_name) {
-        orderForm.value.stock_name = data.stock_name
-      }
+      // 直接覆盖股票名称（包括空值，避免残留旧名称）
+      orderForm.value.stock_name = data.stock_name || '-'
       // 每次获取行情后自动用现价填充委托价格
       if (data.current_price && data.current_price > 0) {
         orderForm.value.price = data.current_price
@@ -401,6 +403,7 @@ async function lookupAndCalculate() {
       positionQty.value = data.position_quantity || 0
       availableQty.value = data.available_quantity || 0
     } else {
+      console.error('[quote] API returned success=false:', data)
       quoteInfo.value = null
       maxBuyQty.value = 0
       positionQty.value = 0
@@ -508,6 +511,22 @@ async function submitOrder() {
     submitting.value = false
   }
 }
+
+// 监听股票代码变化，用户手动输入 6 位数字代码后自动查询行情
+let isSelecting = false // 防止 onStockSelect 触发 watch 时重复查询
+watch(() => orderForm.value.stock_code, (newCode, oldCode) => {
+  // 选中搜索结果时跳过，由 onStockSelect 处理
+  if (isSelecting) return
+  const trimmed = newCode?.trim()
+  if (trimmed && /^6\d{5}$/.test(trimmed) || /^0\d{5}$/.test(trimmed) || /^3\d{5}$/.test(trimmed)) {
+    const normalized = normalizeStockCode(trimmed)
+    orderForm.value.stock_code = normalized
+    lookupAndCalculate()
+  } else if (newCode && newCode.includes('.')) {
+    // 已含 . 后缀的完整代码（从其他来源粘贴）
+    lookupAndCalculate()
+  }
+})
 
 // 监听交易方向变化，重置数量
 watch(() => orderForm.value.trade_type, () => {
