@@ -17,6 +17,7 @@ EVENT_COLOR_MAP = {
     "task_completed": "blue",      # 任务完成
     "task_failed": "red",          # 任务失败
     "trade_failed": "red",         # 交易失败
+    "order_rejected": "red",       # 券商拒绝
     "post_market_analysis": "purple",  # 盘后分析
 }
 
@@ -27,6 +28,7 @@ EVENT_TITLE_MAP = {
     "task_completed": "任务完成",
     "task_failed": "任务失败",
     "trade_failed": "交易失败",
+    "order_rejected": "委托被拒",
     "post_market_analysis": "盘后分析",
 }
 
@@ -81,6 +83,7 @@ class NotificationService:
         event_flag_map = {
             "trade_executed": "notify_on_trade",
             "trade_failed": "notify_on_trade",
+            "order_rejected": "notify_on_trade",
             "signal_triggered": "notify_on_signal",
             "task_completed": "notify_on_task",
             "task_failed": "notify_on_task",
@@ -150,6 +153,18 @@ class NotificationService:
                 f"**操作类型：** 交易失败",
                 f"**股票代码：** {payload.get('stock_code', '-')}",
                 f"**失败原因：** {payload.get('reason', '-')}",
+            ]
+            return "\n".join(lines)
+
+        elif event_type == "order_rejected":
+            trade_type = "买入" if payload.get("trade_type") == "buy" else "卖出"
+            lines = [
+                f"**操作类型：** {trade_type}委托被拒",
+                f"**股票代码：** {payload.get('stock_code', '-')}",
+                f"**股票名称：** {payload.get('stock_name', '-')}",
+                f"**委托价格：** {payload.get('price', '-')}",
+                f"**委托数量：** {payload.get('quantity', '-')}",
+                f"**拒绝原因：** {payload.get('reason', '-')}",
             ]
             return "\n".join(lines)
 

@@ -925,14 +925,17 @@ class TradingMonitor:
                 account_id, stock_code, 'cancelled', target_quantity
             )
 
-            # 发送失败通知
+            # 发送券商拒绝通知
             notification = get_notification_service()
             await notification.emit(
-                event_type="trade_failed",
+                event_type="order_rejected",
                 account_id=account_id,
                 payload={
+                    "trade_type": "buy",
                     "stock_code": stock_code,
                     "stock_name": stock_name,
+                    "price": f"{current_price:.2f}",
+                    "quantity": target_quantity,
                     "reason": result['message'],
                 },
             )
@@ -1002,6 +1005,21 @@ class TradingMonitor:
             # 信号 pending → cancelled
             await self._update_signal_status(
                 account_id, stock_code, 'cancelled', 0
+            )
+
+            # 发送券商拒绝通知
+            notification = get_notification_service()
+            await notification.emit(
+                event_type="order_rejected",
+                account_id=account_id,
+                payload={
+                    "trade_type": "sell",
+                    "stock_code": stock_code,
+                    "stock_name": stock_name,
+                    "price": f"{current_price:.2f}",
+                    "quantity": target_quantity,
+                    "reason": result['message'],
+                },
             )
 
     async def _scan_pending_signals(self, account_id: str):
