@@ -25,10 +25,6 @@
           <el-icon><Search /></el-icon>
           <span>选股监控</span>
         </el-menu-item>
-        <el-menu-item index="/signals">
-          <el-icon><Bell /></el-icon>
-          <span>交易信号</span>
-        </el-menu-item>
         <el-menu-item index="/trades">
           <el-icon><Money /></el-icon>
           <span>交易监控</span>

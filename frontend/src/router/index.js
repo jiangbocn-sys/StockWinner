@@ -54,12 +54,6 @@ const routes = [
     meta: { title: '选股监控' }
   },
   {
-    path: '/signals',
-    name: 'Signals',
-    component: () => import('../views/Signals.vue'),
-    meta: { title: '交易信号' }
-  },
-  {
     path: '/performance',
     name: 'Performance',
     component: () => import('../views/StrategyPerformance.vue'),
