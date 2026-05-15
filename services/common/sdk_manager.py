@@ -403,23 +403,23 @@ class SDKManager:
         try:
             result = self._call_with_timeout(
                 md.query_snapshot,
-                timeout=8.0,
+                timeout=30.0,
                 desc=f"query_snapshot {code_list}",
                 code_list=code_list,
                 begin_date=begin_date,
                 end_date=end_date
             )
             duration_ms = (time.monotonic() - start) * 1000
-            logger.log_sdk_call("query_snapshot", duration_ms, "query", "success", stock_count=stock_count, timeout=8.0)
+            logger.log_sdk_call("query_snapshot", duration_ms, "query", "success", stock_count=stock_count, timeout=30.0)
             return result if isinstance(result, dict) else {}
         except Exception as e:
             duration_ms = (time.monotonic() - start) * 1000
             is_timeout = isinstance(e, (TimeoutError,))
             if is_timeout:
-                logger.log_sdk_call("query_snapshot", duration_ms, "query", "timeout", error=str(e), stock_count=stock_count, timeout=8.0)
+                logger.log_sdk_call("query_snapshot", duration_ms, "query", "timeout", error=str(e), stock_count=stock_count, timeout=30.0)
                 SDKManager._market_data_instance = None
             else:
-                logger.log_sdk_call("query_snapshot", duration_ms, "query", "error", error=str(e), stock_count=stock_count, timeout=8.0)
+                logger.log_sdk_call("query_snapshot", duration_ms, "query", "error", error=str(e), stock_count=stock_count, timeout=30.0)
             return {}
         finally:
             self._release_sync(token)

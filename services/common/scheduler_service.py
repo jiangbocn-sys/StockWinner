@@ -1316,31 +1316,38 @@ class SchedulerService:
                         sdk_mgr = get_sdk_manager()
                         if sdk_mgr.connect():
                             today_int = int(get_china_time().strftime('%Y%m%d'))
-                            result = sdk_mgr.query_snapshot(
-                                code_list=stock_codes,
-                                begin_date=today_int,
-                                end_date=today_int
-                            )
-                            if result and isinstance(result, dict):
-                                for date_key in result:
-                                    inner = result[date_key]
-                                    for code, tick_df in inner.items():
-                                        if tick_df is None or not hasattr(tick_df, 'empty') or tick_df.empty:
-                                            continue
-                                        # 过滤有成交的 tick
-                                        trade_ticks = tick_df[tick_df['volume'] > 0]
-                                        if trade_ticks.empty:
-                                            continue
-                                        # 聚合为当日 OHLCV
-                                        _pre_fetched_realtime_quotes[code] = {
-                                            'open': float(trade_ticks.iloc[0]['open']),
-                                            'high': float(trade_ticks['high'].max()),
-                                            'low': float(trade_ticks['low'].min()),
-                                            'close': float(trade_ticks.iloc[-1]['last']),
-                                            'volume': float(trade_ticks.iloc[-1]['volume']),
-                                            'amount': float(trade_ticks.iloc[-1]['amount']),
-                                        }
-                                logger.info(f"预取实时行情成功: {len(_pre_fetched_realtime_quotes)}/{len(stock_codes)} 只股票")
+                            # 分批查询，每批 10 只，避免超时
+                            batch_size = 10
+                            for i in range(0, len(stock_codes), batch_size):
+                                batch_codes = stock_codes[i:i + batch_size]
+                                try:
+                                    result = sdk_mgr.query_snapshot(
+                                        code_list=batch_codes,
+                                        begin_date=today_int,
+                                        end_date=today_int
+                                    )
+                                    if result and isinstance(result, dict):
+                                        for date_key in result:
+                                            inner = result[date_key]
+                                            for code, tick_df in inner.items():
+                                                if tick_df is None or not hasattr(tick_df, 'empty') or tick_df.empty:
+                                                    continue
+                                                # 过滤有成交的 tick
+                                                trade_ticks = tick_df[tick_df['volume'] > 0]
+                                                if trade_ticks.empty:
+                                                    continue
+                                                # 聚合为当日 OHLCV
+                                                _pre_fetched_realtime_quotes[code] = {
+                                                    'open': float(trade_ticks.iloc[0]['open']),
+                                                    'high': float(trade_ticks['high'].max()),
+                                                    'low': float(trade_ticks['low'].min()),
+                                                    'close': float(trade_ticks.iloc[-1]['last']),
+                                                    'volume': float(trade_ticks.iloc[-1]['volume']),
+                                                    'amount': float(trade_ticks.iloc[-1]['amount']),
+                                                }
+                                except Exception as batch_e:
+                                    logger.warning(f"预取批次 {i//batch_size + 1} 失败: {batch_e}")
+                            logger.info(f"预取实时行情成功: {len(_pre_fetched_realtime_quotes)}/{len(stock_codes)} 只股票")
                         else:
                             logger.warning("SDK 未登录，跳过实时行情预取")
                 except Exception as e:
@@ -1387,7 +1394,6 @@ class SchedulerService:
                     """本地历史 + 当日实时行情拼接（仅当日走 TGW）"""
                     from services.data.local_data_service import get_local_data_service, is_trading_hours
                     lds = get_local_data_service()
-                    # 检查实时行情是否可用
                     realtime_quotes = {}
                     for code in stock_codes:
                         if code in _pre_fetched_realtime_quotes:
