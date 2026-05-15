@@ -367,18 +367,24 @@ async def get_manual_order_quote(
             account = await execution.get_account_info()
             available_cash = account.get("available_cash", 0.0) if account else 0.0
             fees_cfg = await execution._get_fee_config()
-            cash_reserve_pct = account.get("cash_reserve_pct", 0.20) if account else 0.20
             max_single_pct = account.get("max_single_position_pct", 0.15) if account else 0.15
             fee_rate = fees_cfg["commission_rate"] + fees_cfg["transfer_fee"]
             price = market_data.current_price
 
-            # 资金上限（全部可用资金，不含单只仓位限制）
+            # 总资产 = 持仓市值 + 可用资金
+            positions = await db.fetchall(
+                "SELECT SUM(market_value) as total_mv FROM stock_positions WHERE account_id = ?",
+                (account_id,)
+            )
+            current_mv = positions[0]["total_mv"] if positions and positions[0]["total_mv"] else 0
+            total_assets = current_mv + available_cash
+
+            # 资金上限（全部可用资金）
             fund_limit = int((available_cash - fees_cfg["min_commission"]) / (price * (1 + fee_rate)))
             fund_limit = (fund_limit // 100) * 100
 
-            # 单只仓位上限（风控限制）
-            usable_cash = available_cash * (1 - cash_reserve_pct)
-            risk_limit = int(usable_cash * max_single_pct / price) if price > 0 and max_single_pct > 0 else 0
+            # 单只仓位上限（基于总资产）
+            risk_limit = int(total_assets * max_single_pct / price) if price > 0 and max_single_pct > 0 else 0
             risk_limit = (risk_limit // 100) * 100
 
             result["max_buy_quantity"] = risk_limit  # 策略允许的最大可买
@@ -512,11 +518,19 @@ async def submit_manual_order(
                 "success": False,
                 "message": f"买入金额 {total_amount:.2f} 元超过账户可用资金 {account_available_cash:.2f} 元，请减少数量或降低价格",
             }
-        # 15% 仓位限制提示（非硬性拦截，因为执行层会再次检查）
-        if total_amount > account_available_cash * 0.15:
+        # 单只仓位限制：不超过总资产的 max_single_position_pct（默认 15%）
+        # 获取持仓市值计算总资产
+        positions = await db.fetchall(
+            "SELECT SUM(market_value) as total_mv FROM stock_positions WHERE account_id = ?",
+            (account_id,)
+        )
+        current_mv = positions[0]["total_mv"] if positions and positions[0]["total_mv"] else 0
+        total_assets = current_mv + account_available_cash
+        max_single_pct = account.get("max_single_position_pct", 0.15)
+        if total_assets > 0 and total_amount > total_assets * max_single_pct:
             return {
                 "success": False,
-                "message": f"单笔仓位限制：该金额（{total_amount:.2f} 元）超过可用资金的 15%（{account_available_cash * 0.15:.2f} 元），请减少数量",
+                "message": f"单笔仓位限制：该金额（{total_amount:.2f} 元）超过总资产的 {int(max_single_pct*100)}%（{total_assets * max_single_pct:.2f} 元），请减少数量",
             }
 
     from services.common.stock_code import normalize_stock_code
