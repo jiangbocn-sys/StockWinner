@@ -537,6 +537,23 @@ async def submit_manual_order(
 
     from services.common.timezone import format_china_time
 
+    # 卖出持仓预检（防止无持仓的股票被卖出委托）
+    if trade_type == "sell":
+        position = await db.fetchone(
+            "SELECT available_quantity FROM stock_positions WHERE account_id = ? AND stock_code = ? AND quantity > 0",
+            (account_id, normalized_code)
+        )
+        if not position:
+            return {
+                "success": False,
+                "message": f"该账户未持有 {normalized_code}，无法提交卖出委托",
+            }
+        if position["available_quantity"] < quantity:
+            return {
+                "success": False,
+                "message": f"可卖数量不足（持仓可卖 {position['available_quantity']} 股，委托 {quantity} 股）",
+            }
+
     # 创建 trading_signals 记录，由监控程序扫描执行
     signal_id = await db.insert("trading_signals", {
         "account_id": account_id,

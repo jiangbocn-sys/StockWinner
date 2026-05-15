@@ -46,12 +46,21 @@
             <el-form :model="orderForm" label-width="80px" label-position="top">
               <!-- 证券代码 -->
               <el-form-item label="证券代码">
-                <el-input
+                <el-autocomplete
                   v-model="orderForm.stock_code"
-                  placeholder="如 600000 或 600000.SH"
-                  @blur="onCodeBlur"
-                  @keyup.enter="onCodeEnter"
-                />
+                  :fetch-suggestions="searchStocks"
+                  placeholder="输入代码/名称/拼音，如 600000、NJJL、浦发"
+                  :debounce="300"
+                  value-key="stock_code"
+                  @select="onStockSelect"
+                  @clear="onCodeClear"
+                  clearable
+                >
+                  <template #default="{ item }">
+                    <span style="font-weight: 500; min-width: 90px">{{ item.stock_code }}</span>
+                    <span style="color: #909399; margin-left: 8px">{{ item.stock_name }}</span>
+                  </template>
+                </el-autocomplete>
               </el-form-item>
 
               <!-- 股票名称 -->
@@ -291,21 +300,77 @@ function normalizeStockCode(code) {
   return `${code}.BJ`
 }
 
+// 重置行情和名称信息
+function resetQuoteInfo() {
+  quoteInfo.value = null
+  orderForm.value.stock_name = ''
+  orderForm.value.price = 0
+  maxBuyQty.value = 0
+  fundLimitQty.value = 0
+  positionQty.value = 0
+  availableQty.value = 0
+}
+
+// 智能搜索股票（支持代码/名称/拼音首字母）
+async function searchStocks(query, cb) {
+  if (!query || query.trim().length === 0) {
+    cb([])
+    return
+  }
+  try {
+    const resp = await fetch(`/api/v1/ui/stocks/search?q=${encodeURIComponent(query.trim())}&limit=15`)
+    const data = await resp.json()
+    if (data.success && data.stocks) {
+      cb(data.stocks.map(s => ({
+        stock_code: s.stock_code,
+        stock_name: s.stock_name,
+        value: s.stock_code, // el-autocomplete 显示值
+      })))
+    } else {
+      cb([])
+    }
+  } catch {
+    cb([])
+  }
+}
+
+// 用户从搜索结果中选中一只股票
+async function onStockSelect(item) {
+  orderForm.value.stock_code = normalizeStockCode(item.stock_code)
+  await lookupAndCalculate()
+}
+
+// 清空代码输入
+function onCodeClear() {
+  orderForm.value.stock_code = ''
+  resetQuoteInfo()
+}
+
 function onCodeBlur() {
   const raw = orderForm.value.stock_code
-  orderForm.value.stock_code = normalizeStockCode(raw)
-  // 代码变化后重新计算
-  lookupAndCalculate()
+  const normalized = normalizeStockCode(raw)
+  orderForm.value.stock_code = normalized
+  // 只有规范化后是合法代码格式（含 .）才重新查询
+  if (normalized && normalized.includes('.')) {
+    lookupAndCalculate()
+  }
 }
 
 async function onCodeEnter() {
-  orderForm.value.stock_code = normalizeStockCode(orderForm.value.stock_code)
-  await lookupAndCalculate()
+  const raw = orderForm.value.stock_code
+  const normalized = normalizeStockCode(raw)
+  orderForm.value.stock_code = normalized
+  if (normalized && normalized.includes('.')) {
+    await lookupAndCalculate()
+  }
 }
 
 async function lookupAndCalculate() {
   const code = orderForm.value.stock_code
   if (!code || !code.includes('.')) return
+
+  // 先清除之前的行情信息，防止旧数据残留
+  resetQuoteInfo()
 
   try {
     const resp = await fetch(`/api/v1/ui/${currentAccountId.value}/manual-order/quote`, {
@@ -320,7 +385,8 @@ async function lookupAndCalculate() {
         bid1: data.bid1,
         ask1: data.ask1,
       }
-      if (!orderForm.value.stock_name && data.stock_name) {
+      // 直接覆盖股票名称
+      if (data.stock_name) {
         orderForm.value.stock_name = data.stock_name
       }
       // 每次获取行情后自动用现价填充委托价格
