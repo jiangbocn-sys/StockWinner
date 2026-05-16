@@ -32,6 +32,7 @@ async def create_backtest_run(
         "initial_capital": 1000000,
         "stock_pool": ["600000.SH", ...],  // 可选，不传则从 markets 或全市场
         "markets": ["SH", "SZ"],  // 可选
+        "group_ids": [1, 2],  // 可选，候选组ID列表（优先级高于 markets）
         "stop_loss_pct": 0.05,  // 可选
         "take_profit_pct": 0.15,  // 可选
         "trailing_stop_pct": 0.03,  // 可选
@@ -61,7 +62,21 @@ async def create_backtest_run(
     initial_capital = float(body.get("initial_capital", 1000000))
     stock_pool = body.get("stock_pool")
     markets = body.get("markets")
+    group_ids = body.get("group_ids")
     config = body.get("config", {})
+
+    # 如果指定了候选组，解析为股票代码
+    if group_ids:
+        placeholders = ",".join(["?"] * len(group_ids))
+        rows = await db.fetchall(
+            f"SELECT DISTINCT stock_code FROM watchlist WHERE account_id = ? AND group_id IN ({placeholders})",
+            [account_id] + group_ids
+        )
+        stock_pool = [r["stock_code"] for r in rows]
+        if not stock_pool:
+            raise HTTPException(status_code=400, detail="所选候选组中无股票数据")
+        # 存入 config 以便 rerun 时恢复
+        config["group_ids"] = group_ids
 
     # 如果指定了 strategy_id，从数据库加载策略配置
     strategy_config = config.copy()
@@ -362,6 +377,15 @@ async def check_data_completeness(
     start_date = body.get("start_date")
     end_date = body.get("end_date")
     stock_pool = body.get("stock_pool")
+    group_ids = body.get("group_ids")
+
+    if not stock_pool and group_ids:
+        placeholders = ",".join(["?"] * len(group_ids))
+        rows = await db.fetchall(
+            f"SELECT DISTINCT stock_code FROM watchlist WHERE account_id = ? AND group_id IN ({placeholders})",
+            [account_id] + group_ids
+        )
+        stock_pool = [r["stock_code"] for r in rows]
 
     if not stock_pool:
         markets = body.get("markets")

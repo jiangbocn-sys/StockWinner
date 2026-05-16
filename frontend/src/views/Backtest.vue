@@ -68,6 +68,15 @@
               </el-form-item>
             </el-col>
             <el-col :span="8">
+              <el-form-item label="股票池">
+                <el-tooltip content="选择候选组作为回测股票池，优先级高于市场选择" placement="top">
+                  <el-select v-model="form.group_ids" multiple placeholder="使用市场选择" style="width: 100%" clearable filterable>
+                    <el-option v-for="g in candidateGroups" :key="g.id" :label="`${g.name} (${g.stock_count}只)`" :value="g.id" />
+                  </el-select>
+                </el-tooltip>
+              </el-form-item>
+            </el-col>
+            <el-col :span="8">
               <el-form-item label="止损比例 (%)">
                 <el-tooltip content="买入价下跌超过该比例时触发止损。例如填 5 表示亏损 5% 时卖出" placement="top">
                   <el-input-number v-model="form.stop_loss_pct" :min="0" :max="50" :step="1" :precision="1" style="width: 100%" />
@@ -312,12 +321,15 @@ const form = ref({
   end_date: '2025-12-31',
   initial_capital: 1000000,
   markets: [],
+  group_ids: [],
   stop_loss_pct: 5,
   take_profit_pct: 15,
   trailing_stop_pct: null,
   commission_rate: 0.0003,
   slippage_pct: 0,
 })
+
+const candidateGroups = ref([])
 
 const strategies = ref([])
 const history = ref([])
@@ -366,6 +378,17 @@ const loadStrategies = async () => {
   }
 }
 
+// 加载候选组列表
+const loadCandidateGroups = async () => {
+  try {
+    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/candidate-groups`)
+    const data = await res.json()
+    candidateGroups.value = data.groups || []
+  } catch (e) {
+    console.error('加载候选组失败:', e)
+  }
+}
+
 // 加载回测历史
 const loadHistory = async (silent = false) => {
   if (!silent) loadingHistory.value = true
@@ -402,6 +425,7 @@ const handleStartBacktest = async () => {
       commission_rate: form.value.commission_rate,
       slippage_pct: form.value.slippage_pct / 100,
       markets: form.value.markets.length > 0 ? form.value.markets : null,
+      group_ids: form.value.group_ids.length > 0 ? form.value.group_ids : null,
       config: {},
     }
 
@@ -441,6 +465,7 @@ const rerunBacktest = async (row) => {
       commission_rate: row.commission_rate || 0.0003,
       slippage_pct: row.slippage_pct || 0,
       markets: row.markets || null,
+      group_ids: row.config?.group_ids || null,
       config: row.config || {},
     }
 
@@ -469,6 +494,7 @@ const handleCheckData = async () => {
       start_date: form.value.start_date,
       end_date: form.value.end_date,
       markets: form.value.markets.length > 0 ? form.value.markets : null,
+      group_ids: form.value.group_ids.length > 0 ? form.value.group_ids : null,
     }
 
     const res = await fetch(`/api/v1/ui/${currentAccountId.value}/backtest/check-data`, {
@@ -603,6 +629,7 @@ let statusTimer = null
 
 onMounted(() => {
   loadStrategies()
+  loadCandidateGroups()
   loadHistory()
   // 自动轮询运行中的回测任务状态（静默刷新）
   statusTimer = setInterval(async () => {
