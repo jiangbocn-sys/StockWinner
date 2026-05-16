@@ -233,7 +233,7 @@ class SimulatedTradingEngine:
         self, code: str, price: float, pos: Position,
         date: str, prev_close: float
     ) -> bool:
-        """移动止盈检查：必须曾经盈利（最高价 > 成本价）才触发"""
+        """移动止盈：最高价须先超过成本价 × (1 + 阈值) 才生效"""
         if self.trailing_stop_pct is None:
             return False
 
@@ -241,8 +241,9 @@ class SimulatedTradingEngine:
         if price > pos.highest_price:
             pos.highest_price = price
 
-        # 最高价从未超过成本价，说明还没盈利过，不触发移动止盈
-        if pos.highest_price <= pos.avg_cost:
+        # 最高价须先超过成本价一定比例（有足够浮盈）才启用移动止盈
+        trigger_price = pos.avg_cost * (1 + self.trailing_stop_pct)
+        if pos.highest_price < trigger_price:
             return False
 
         # 从最高点回撤超过阈值则卖出
