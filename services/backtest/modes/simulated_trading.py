@@ -233,17 +233,20 @@ class SimulatedTradingEngine:
         self, code: str, price: float, pos: Position,
         date: str, prev_close: float
     ) -> bool:
-        """移动止盈检查"""
+        """移动止盈检查：必须曾经盈利（最高价 > 成本价）才触发"""
         if self.trailing_stop_pct is None:
             return False
 
-        # 从最高点回撤超过阈值则卖出
-        highest = pos.highest_price
-        if highest <= 0:
-            highest = price
-            pos.highest_price = highest
+        # 先更新当日最高价
+        if price > pos.highest_price:
+            pos.highest_price = price
 
-        drawdown = (highest - price) / highest
+        # 最高价从未超过成本价，说明还没盈利过，不触发移动止盈
+        if pos.highest_price <= pos.avg_cost:
+            return False
+
+        # 从最高点回撤超过阈值则卖出
+        drawdown = (pos.highest_price - price) / pos.highest_price
         if drawdown >= self.trailing_stop_pct:
             self.execution.sell(code, price, date, reason="移动止盈", prev_close=prev_close)
             return True
