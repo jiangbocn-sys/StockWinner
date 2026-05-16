@@ -90,13 +90,23 @@
                 </el-tooltip>
               </el-form-item>
             </el-col>
-          </el-row>
-
-          <el-row :gutter="20">
             <el-col :span="8">
               <el-form-item label="移动止盈 (%)">
                 <el-tooltip content="持仓期间，从最高点回撤超过该比例时触发卖出。例如填 3 表示从最高点回撤 3% 时止盈" placement="top">
                   <el-input-number v-model="form.trailing_stop_pct" :min="0" :max="50" :step="0.5" :precision="1" style="width: 100%" placeholder="可选" />
+                </el-tooltip>
+              </el-form-item>
+            </el-col>
+          </el-row>
+
+          <el-row :gutter="20">
+            <el-col :span="8">
+              <el-form-item label="止盈止损成交价">
+                <el-tooltip content="收盘价模式：触发后按当日收盘价成交；触发价模式：当日价格覆盖止盈/止损位即按触发价成交（更贴近实盘）" placement="top">
+                  <el-select v-model="form.stop_execution_price" style="width: 100%">
+                    <el-option label="收盘价" value="close" />
+                    <el-option label="触发价" value="trigger" />
+                  </el-select>
                 </el-tooltip>
               </el-form-item>
             </el-col>
@@ -130,14 +140,20 @@
         <template #header>
           <div class="card-header">
             <span>回测历史</span>
-            <el-button size="small" @click="loadHistory">
-              <el-icon><Refresh /></el-icon>
-              刷新
-            </el-button>
+            <div>
+              <el-button v-if="selectedRuns.length >= 2" size="small" type="success" @click="handleCompare">
+                对比 ({{ selectedRuns.length }})
+              </el-button>
+              <el-button size="small" @click="loadHistory">
+                <el-icon><Refresh /></el-icon>
+                刷新
+              </el-button>
+            </div>
           </div>
         </template>
 
-        <el-table :data="history" v-loading="loadingHistory" stripe>
+        <el-table :data="history" v-loading="loadingHistory" stripe @selection-change="handleSelectionChange">
+          <el-table-column type="selection" width="40" :selectable="(row) => row.status === 'completed'" />
           <el-table-column prop="name" label="回测名称" min-width="100" show-overflow-tooltip />
           <el-table-column prop="mode" label="模式" width="120">
             <template #default="{ row }">
@@ -212,6 +228,46 @@
 
       <!-- 回测详情对话框 -->
       <el-dialog v-model="detailVisible" :title="`回测详情 - ${currentRun?.name}`" width="90%" top="5vh">
+        <!-- 回测参数 -->
+        <el-card style="margin-bottom: 16px">
+          <template #header><span>回测参数</span></template>
+          <el-descriptions :column="4" border size="small">
+            <el-descriptions-item label="回测模式">
+              {{ currentRun.mode === 'simulated' ? '撮合模拟盘' : '收益率累积' }}
+            </el-descriptions-item>
+            <el-descriptions-item label="策略">
+              <span v-if="currentRun.strategy_id">ID {{ currentRun.strategy_id }}</span>
+              <span v-else class="text-muted">手动配置</span>
+            </el-descriptions-item>
+            <el-descriptions-item label="日期范围">{{ currentRun.start_date }} ~ {{ currentRun.end_date }}</el-descriptions-item>
+            <el-descriptions-item label="初始资金">{{ formatMoney(currentRun.initial_capital) }}</el-descriptions-item>
+            <el-descriptions-item label="股票池">
+              <span v-if="currentRun.group_ids && currentRun.group_ids.length > 0">候选组 {{ currentRun.group_ids.join(', ') }}</span>
+              <span v-else-if="currentRun.markets && currentRun.markets.length > 0">{{ currentRun.markets.join(', ') }}</span>
+              <span v-else-if="currentRun.stock_pool && currentRun.stock_pool.length > 0">{{ currentRun.stock_pool.length }} 只</span>
+              <span v-else class="text-muted">全市场</span>
+            </el-descriptions-item>
+            <el-descriptions-item label="止损 / 止盈">
+              {{ formatPct(currentRun.stop_loss_pct) }} / {{ formatPct(currentRun.take_profit_pct) }}
+            </el-descriptions-item>
+            <el-descriptions-item label="移动止盈">
+              <span v-if="currentRun.trailing_stop_pct">{{ formatPct(currentRun.trailing_stop_pct) }}</span>
+              <span v-else class="text-muted">未设置</span>
+            </el-descriptions-item>
+            <el-descriptions-item label="止盈止损成交价">
+              {{ currentRun.stop_execution_price === 'trigger' ? '触发价' : '收盘价' }}
+            </el-descriptions-item>
+            <el-descriptions-item label="滑点">{{ formatPct(currentRun.slippage_pct) }}</el-descriptions-item>
+            <el-descriptions-item label="手续费率">{{ formatPct(currentRun.commission_rate) }}</el-descriptions-item>
+            <el-descriptions-item label="最低佣金">¥{{ currentRun.min_commission || 5.0 }}</el-descriptions-item>
+            <el-descriptions-item label="印花税">{{ formatPct(currentRun.stamp_tax) }}</el-descriptions-item>
+            <el-descriptions-item label="过户费">{{ formatPct(currentRun.transfer_fee) }}</el-descriptions-item>
+            <el-descriptions-item label="最大总仓位">{{ formatPct(currentRun.max_total_position_pct) }}</el-descriptions-item>
+            <el-descriptions-item label="单股最大仓位">{{ formatPct(currentRun.max_single_position_pct) }}</el-descriptions-item>
+            <el-descriptions-item label="现金预留">{{ formatPct(currentRun.cash_reserve_pct) }}</el-descriptions-item>
+          </el-descriptions>
+        </el-card>
+
         <!-- 绩效指标 -->
         <el-row :gutter="16" style="margin-bottom: 20px">
           <el-col :span="4" v-for="item in metricCards" :key="item.label">
@@ -245,6 +301,12 @@
             </el-table-column>
             <el-table-column label="卖出价格" width="90">
               <template #default="{ row }">{{ row.sell_price?.toFixed(2) || '-' }}</template>
+            </el-table-column>
+            <el-table-column label="买入佣金" width="90">
+              <template #default="{ row }">{{ row.buy_commission?.toFixed(2) || '-' }}</template>
+            </el-table-column>
+            <el-table-column label="卖出费用" width="90">
+              <template #default="{ row }">{{ row.sell_commission?.toFixed(2) || '-' }}</template>
             </el-table-column>
             <el-table-column label="盈亏(%)" width="100">
               <template #default="{ row }">
@@ -291,6 +353,25 @@
           <el-button @click="dataCheckVisible = false">关闭</el-button>
         </template>
       </el-dialog>
+
+      <!-- 回测对比对话框 -->
+      <el-dialog v-model="compareVisible" title="回测对比" width="90%" top="5vh" @close="destroyCompareChart">
+        <!-- 指标对比表 -->
+        <el-table :data="compareMetrics" stripe style="margin-bottom: 20px">
+          <el-table-column prop="label" label="指标" width="120" fixed />
+          <el-table-column v-for="run in compareRuns" :key="run.id" :label="run.name" min-width="120" show-overflow-tooltip>
+            <template #default="{ row }">
+              <span :class="row[`best_${run.id}`] ? 'text-green' : ''">{{ row[`run_${run.id}`] }}</span>
+            </template>
+          </el-table-column>
+        </el-table>
+
+        <!-- 净值曲线对比 -->
+        <el-card>
+          <template #header><span>净值曲线对比</span></template>
+          <div ref="compareChartRef" style="width: 100%; height: 450px"></div>
+        </el-card>
+      </el-dialog>
     </div>
   </div>
 </template>
@@ -319,7 +400,8 @@ const form = ref({
   stop_loss_pct: 5,
   take_profit_pct: 15,
   trailing_stop_pct: null,
-  commission_rate: 0.0003,
+  stop_execution_price: 'close',
+  commission_rate: 0.0001,
   slippage_pct: 0,
 })
 
@@ -341,6 +423,15 @@ let navChart = null
 // 数据完整性检查
 const dataCheckVisible = ref(false)
 const dataCheckReport = ref(null)
+
+// 回测对比
+const selectedRuns = ref([])
+const compareVisible = ref(false)
+const compareRuns = ref([])
+const compareNavData = ref({})
+const compareMetrics = ref([])
+const compareChartRef = ref(null)
+let compareChart = null
 
 // 指标卡片
 const metricCards = computed(() => {
@@ -416,6 +507,7 @@ const handleStartBacktest = async () => {
       stop_loss_pct: form.value.stop_loss_pct / 100,
       take_profit_pct: form.value.take_profit_pct / 100,
       trailing_stop_pct: form.value.trailing_stop_pct ? form.value.trailing_stop_pct / 100 : null,
+      stop_execution_price: form.value.stop_execution_price,
       commission_rate: form.value.commission_rate,
       slippage_pct: form.value.slippage_pct / 100,
       markets: form.value.markets.length > 0 ? form.value.markets : null,
@@ -456,7 +548,8 @@ const rerunBacktest = async (row) => {
       stop_loss_pct: row.stop_loss_pct || 0.05,
       take_profit_pct: row.take_profit_pct || 0.15,
       trailing_stop_pct: row.trailing_stop_pct,
-      commission_rate: row.commission_rate || 0.0003,
+      stop_execution_price: row.config?.stop_execution_price || 'close',
+      commission_rate: row.commission_rate || 0.0001,
       slippage_pct: row.slippage_pct || 0,
       markets: row.markets || null,
       group_ids: row.config?.group_ids || null,
@@ -513,6 +606,15 @@ const handleCheckData = async () => {
 const viewDetail = async (run) => {
   currentRun.value = run
   detailVisible.value = true
+
+  // 加载回测详情（获取完整参数）
+  try {
+    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/backtest/runs/${run.id}`)
+    const data = await res.json()
+    currentRun.value = data.run
+  } catch (e) {
+    console.error('加载回测详情失败:', e)
+  }
 
   // 加载交易记录
   try {
@@ -617,6 +719,130 @@ const deleteRun = async (runId) => {
 const formatMoney = (val) => {
   if (!val) return '-'
   return Number(val).toLocaleString('zh-CN', { minimumFractionDigits: 0, maximumFractionDigits: 0 })
+}
+
+// 格式化百分比
+const formatPct = (val) => {
+  if (val == null) return '-'
+  const n = Number(val)
+  if (n === 0) return '0'
+  return (n * 100).toFixed(2) + '%'
+}
+
+// 选中变化
+const handleSelectionChange = (selection) => {
+  selectedRuns.value = selection
+}
+
+// 对比回测
+const handleCompare = async () => {
+  compareRuns.value = [...selectedRuns.value]
+  compareVisible.value = true
+  compareNavData.value = {}
+
+  // 并发加载各回测净值
+  const promises = compareRuns.value.map(async (run) => {
+    try {
+      const res = await fetch(`/api/v1/ui/${currentAccountId.value}/backtest/runs/${run.id}/nav`)
+      const data = await res.json()
+      compareNavData.value[run.id] = data.nav || []
+    } catch (e) {
+      console.error('加载净值失败:', e)
+      compareNavData.value[run.id] = []
+    }
+  })
+  await Promise.all(promises)
+
+  // 构建指标对比表
+  buildCompareMetrics()
+
+  // 渲染对比图
+  await nextTick()
+  renderCompareChart()
+}
+
+const buildCompareMetrics = () => {
+  const fields = [
+    { key: 'total_return', label: '总收益率', fmt: (v) => (v != null ? v.toFixed(2) + '%' : '-'), lower: false },
+    { key: 'annualized_return', label: '年化收益率', fmt: (v) => (v != null ? v.toFixed(2) + '%' : '-'), lower: false },
+    { key: 'max_drawdown', label: '最大回撤', fmt: (v) => (v != null ? v.toFixed(2) + '%' : '-'), lower: true },
+    { key: 'sharpe_ratio', label: '夏普比率', fmt: (v) => (v != null ? v.toFixed(2) : '-'), lower: false },
+    { key: 'calmar_ratio', label: '卡玛比率', fmt: (v) => (v != null ? v.toFixed(2) : '-'), lower: false },
+    { key: 'win_rate', label: '胜率', fmt: (v) => (v != null ? v.toFixed(2) + '%' : '-'), lower: false },
+    { key: 'profit_factor', label: '盈亏比', fmt: (v) => (v != null ? v.toFixed(2) : '-'), lower: false },
+    { key: 'total_trades', label: '交易次数', fmt: (v) => (v != null ? v : '-'), lower: false },
+    { key: 'avg_holding_days', label: '平均持仓', fmt: (v) => (v != null ? v.toFixed(1) + '天' : '-'), lower: false },
+    { key: 'best_trade', label: '最佳交易', fmt: (v) => (v != null ? v.toFixed(2) + '%' : '-'), lower: false },
+    { key: 'worst_trade', label: '最差交易', fmt: (v) => (v != null ? v.toFixed(2) + '%' : '-'), lower: false },
+    { key: 'final_nav', label: '最终净值', fmt: (v) => (v != null ? v.toFixed(4) : '-'), lower: false },
+  ]
+
+  const runs = compareRuns.value
+  compareMetrics.value = fields.map((f) => {
+    const row = { label: f.label }
+    const values = []
+    runs.forEach((run) => {
+      const r = run.result_summary || {}
+      const v = r[f.key]
+      row[`run_${run.id}`] = f.fmt(v)
+      values.push({ id: run.id, v })
+    })
+    // 标记最优值
+    const validValues = values.filter((x) => x.v != null && typeof x.v === 'number')
+    if (validValues.length > 0) {
+      const best = f.lower
+        ? Math.min(...validValues.map((x) => x.v))
+        : Math.max(...validValues.map((x) => x.v))
+      validValues.forEach((x) => {
+        if (x.v === best) row[`best_${x.id}`] = true
+      })
+    }
+    return row
+  })
+}
+
+const renderCompareChart = () => {
+  if (!compareChartRef.value) return
+
+  if (compareChart) {
+    compareChart.dispose()
+  }
+  compareChart = echarts.init(compareChartRef.value)
+
+  const colors = ['#409EFF', '#67C23A', '#E6A23C', '#F56C6C', '#909399', '#722ED1', '#13C2C2', '#EB2F96']
+  const series = compareRuns.value.map((run, idx) => {
+    const nav = compareNavData.value[run.id] || []
+    return {
+      name: run.name,
+      type: 'line',
+      data: nav.map((d) => d.nav),
+      smooth: true,
+      lineStyle: { width: 2 },
+      itemStyle: { color: colors[idx % colors.length] },
+      showSymbol: false,
+    }
+  })
+
+  const dates = compareRuns.value.length > 0
+    ? (compareNavData.value[compareRuns.value[0].id] || []).map((d) => d.trade_date)
+    : []
+
+  compareChart.setOption({
+    tooltip: { trigger: 'axis' },
+    legend: { data: compareRuns.value.map((r) => r.name), top: 0 },
+    grid: { left: '3%', right: '4%', bottom: '3%', containLabel: true },
+    xAxis: { type: 'category', data: dates, axisLabel: { rotate: 45 } },
+    yAxis: { type: 'value', name: '净值' },
+    series,
+    dataZoom: [{ type: 'inside' }, { type: 'slider' }],
+  })
+}
+
+const destroyCompareChart = () => {
+  if (compareChart) {
+    compareChart.dispose()
+    compareChart = null
+  }
 }
 
 let statusTimer = null

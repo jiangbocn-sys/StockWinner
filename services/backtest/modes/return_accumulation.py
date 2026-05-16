@@ -100,6 +100,9 @@ class ReturnAccumulationEngine:
         # 5. 构建 NAV 序列
         self._build_nav_series(trade_dates)
 
+        # 5.5 回测结束，清仓所有未卖出的持仓（按最后一天收盘价）
+        self._liquidate_remaining(trade_dates)
+
         # 6. 计算绩效指标
         result = PerformanceMetrics.compute(
             nav_series=self.nav_series,
@@ -244,6 +247,54 @@ class ReturnAccumulationEngine:
                             "holding_days": holding_days,
                         })
                         pending_buy = None
+
+    def _liquidate_remaining(self, trade_dates: List[str]):
+        """回测结束，清仓所有未配对买入信号（按最后一天收盘价）"""
+        if not trade_dates:
+            return
+
+        last_date = trade_dates[-1]
+        prices = self._get_daily_prices(last_date)
+
+        # 找出所有未配对的买入信号（在 _pair_signals 中 pending_buy 被重置为 None 的已配对）
+        # 重新扫描信号找出未配对的 buy
+        from collections import defaultdict
+        by_stock = defaultdict(list)
+        for s in self.signals:
+            by_stock[s["stock_code"]].append(s)
+
+        for code, stock_signals in by_stock.items():
+            stock_signals.sort(key=lambda x: x["date"])
+            pending_buy = None
+            for sig in stock_signals:
+                if sig["signal_type"] == "buy" and pending_buy is None:
+                    pending_buy = sig
+                elif sig["signal_type"] == "sell" and pending_buy is not None:
+                    pending_buy = None  # 配对成功，清空
+                # 止盈止损也会清空 pending_buy
+
+            # 如果还有未配对的买入信号，按最后一天收盘价清仓
+            if pending_buy is not None:
+                sell_price = prices.get(code, pending_buy["price"])
+                buy_price = pending_buy["price"]
+                pnl = sell_price - buy_price
+                pnl_pct = pnl / buy_price if buy_price > 0 else 0
+                holding_days = self._days_between(pending_buy["date"], last_date)
+                self.trades.append({
+                    "stock_code": code,
+                    "stock_name": pending_buy.get("stock_name", code),
+                    "trade_type": "sell",
+                    "date": last_date,
+                    "price": sell_price,
+                    "quantity": 100,
+                    "commission": 0,
+                    "pnl": pnl,
+                    "pnl_pct": pnl_pct,
+                    "reason": "回测清仓",
+                    "buy_date": pending_buy["date"],
+                    "buy_price": buy_price,
+                    "holding_days": holding_days,
+                })
 
     def _build_nav_series(self, trade_dates: List[str]):
         """构建 NAV 序列"""

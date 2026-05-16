@@ -39,6 +39,7 @@ class SimulatedTradingEngine:
         stop_loss_pct: Optional[float] = None,
         take_profit_pct: Optional[float] = None,
         trailing_stop_pct: Optional[float] = None,
+        stop_execution_price: str = "close",
     ):
         self.strategy_config = strategy_config
         self.initial_capital = initial_capital
@@ -48,6 +49,7 @@ class SimulatedTradingEngine:
         self.stop_loss_pct = stop_loss_pct
         self.take_profit_pct = take_profit_pct
         self.trailing_stop_pct = trailing_stop_pct
+        self.stop_execution_price = stop_execution_price  # "close" | "trigger"
 
         # 策略类型检测
         self.is_code_strategy = strategy_config.get("strategy_type") == "python"
@@ -135,7 +137,17 @@ class SimulatedTradingEngine:
             if progress_callback:
                 progress_callback(i + 1, total_days, trade_date)
 
-        # 4. 计算绩效指标
+        # 4. 回测结束，清仓所有持仓（按最后一天收盘价卖出）
+        last_date = trade_dates[-1]
+        ohlc_last = self._get_daily_ohlc(last_date)
+        for code, pos in list(self.execution.positions.items()):
+            close_price = ohlc_last.get(code, {}).get("close", pos.avg_cost)
+            prev_close = self._get_prev_close(code, last_date)
+            self.execution.sell(code, close_price, last_date, reason="回测清仓", prev_close=prev_close)
+        # 同步清仓交易记录
+        self._sync_trades()
+
+        # 5. 计算绩效指标
         result = PerformanceMetrics.compute(
             nav_series=self.nav_series,
             trades=self.trades,
@@ -153,15 +165,17 @@ class SimulatedTradingEngine:
 
     def _step(self, trade_date: str):
         """单个交易日的处理流程"""
-        # 1. 获取当日收盘价（用于市值计算和信号判断）
-        prices = self._get_daily_prices(trade_date)
-        if not prices:
-            # 无数据，仅记录净值
+        # 1. 获取当日 OHLC 数据（止盈止损用 high/low，其他用 close）
+        ohlc_data = self._get_daily_ohlc(trade_date)
+        if not ohlc_data:
             self._record_nav(trade_date)
             return
 
+        # 为了方便后续方法复用，提取 close 字典
+        prices = {code: d["close"] for code, d in ohlc_data.items()}
+
         # 2. 检查持仓卖出信号
-        self._check_sell_signals(trade_date, prices)
+        self._check_sell_signals(trade_date, prices, ohlc_data)
 
         # 3. 执行选股买入信号（优化：仓位已满且无卖出时跳过扫描）
         self._check_buy_signals(trade_date, prices)
@@ -173,21 +187,28 @@ class SimulatedTradingEngine:
         # 5. 记录当日净值
         self._record_nav(trade_date, prices)
 
-    def _get_daily_prices(self, trade_date: str) -> Dict[str, float]:
-        """获取指定交易日所有股票的收盘价"""
+    def _get_daily_ohlc(self, trade_date: str) -> Dict[str, Dict[str, float]]:
+        """获取指定交易日所有股票的 OHLC 数据"""
         km = self.km
         conn = km._conn()
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT stock_code, close FROM kline_data WHERE trade_date = ?",
+            "SELECT stock_code, open, high, low, close FROM kline_data WHERE trade_date = ?",
             (trade_date,)
         )
-        prices = {row[0]: float(row[1]) for row in cursor.fetchall() if row[1]}
-        return prices
+        result = {}
+        for row in cursor.fetchall():
+            if row[4]:  # close
+                result[row[0]] = {
+                    "open": float(row[1]) if row[1] else float(row[4]),
+                    "high": float(row[2]) if row[2] else float(row[4]),
+                    "low": float(row[3]) if row[3] else float(row[4]),
+                    "close": float(row[4]),
+                }
+        return result
 
-    def _check_sell_signals(self, trade_date: str, prices: Dict[str, float]):
+    def _check_sell_signals(self, trade_date: str, prices: Dict[str, float], ohlc_data: Dict[str, Dict[str, float]]):
         """检查持仓的卖出信号"""
-        # 复制当前持仓列表（因为 sell 会修改 positions）
         codes_to_check = list(self.execution.positions.keys())
 
         for code in codes_to_check:
@@ -196,14 +217,15 @@ class SimulatedTradingEngine:
 
             pos = self.execution.positions[code]
             price = prices.get(code, pos.avg_cost)
+            ohlc = ohlc_data.get(code, {})
             prev_close = self._get_prev_close(code, trade_date)
 
             # Priority 1: 固定止盈止损
-            if self._check_fixed_stop(code, price, pos, trade_date, prev_close):
+            if self._check_fixed_stop(code, price, pos, trade_date, prev_close, ohlc):
                 continue  # 已卖出
 
             # Priority 2: 移动止盈
-            if self._check_trailing_stop(code, price, pos, trade_date, prev_close):
+            if self._check_trailing_stop(code, price, pos, trade_date, prev_close, ohlc):
                 continue
 
             # Priority 3: 策略代码型卖出信号
@@ -212,18 +234,34 @@ class SimulatedTradingEngine:
 
     def _check_fixed_stop(
         self, code: str, price: float, pos: Position,
-        date: str, prev_close: float
+        date: str, prev_close: float, ohlc: Optional[Dict] = None
     ) -> bool:
         """固定止盈止损检查"""
         if self.stop_loss_pct is not None:
             stop_price = pos.avg_cost * (1 - self.stop_loss_pct)
-            if price <= stop_price:
+            # 检查是否触发止损
+            if ohlc and self.stop_execution_price == "trigger":
+                low = ohlc.get("low", price)
+                if low <= stop_price:
+                    # 按触发价成交（止损价 + 滑点）
+                    fill_price = stop_price
+                    self.execution.sell(code, fill_price, date, reason="止损", prev_close=prev_close)
+                    return True
+            elif price <= stop_price:
                 self.execution.sell(code, price, date, reason="止损", prev_close=prev_close)
                 return True
 
         if self.take_profit_pct is not None:
             take_price = pos.avg_cost * (1 + self.take_profit_pct)
-            if price >= take_price:
+            # 检查是否触发止盈
+            if ohlc and self.stop_execution_price == "trigger":
+                high = ohlc.get("high", price)
+                if high >= take_price:
+                    # 按触发价成交（止盈价 + 滑点）
+                    fill_price = take_price
+                    self.execution.sell(code, fill_price, date, reason="止盈", prev_close=prev_close)
+                    return True
+            elif price >= take_price:
                 self.execution.sell(code, price, date, reason="止盈", prev_close=prev_close)
                 return True
 
@@ -231,14 +269,18 @@ class SimulatedTradingEngine:
 
     def _check_trailing_stop(
         self, code: str, price: float, pos: Position,
-        date: str, prev_close: float
+        date: str, prev_close: float, ohlc: Optional[Dict] = None
     ) -> bool:
         """移动止盈：最高价须先超过成本价 × (1 + 阈值) 才生效"""
         if self.trailing_stop_pct is None:
             return False
 
-        # 先更新当日最高价
-        if price > pos.highest_price:
+        # 更新当日最高价（用 OHLC 的 high 如果可用）
+        if ohlc:
+            day_high = ohlc.get("high", price)
+            if day_high > pos.highest_price:
+                pos.highest_price = day_high
+        elif price > pos.highest_price:
             pos.highest_price = price
 
         # 最高价须先超过成本价一定比例（有足够浮盈）才启用移动止盈
@@ -247,9 +289,15 @@ class SimulatedTradingEngine:
             return False
 
         # 从最高点回撤超过阈值则卖出
-        drawdown = (pos.highest_price - price) / pos.highest_price
-        if drawdown >= self.trailing_stop_pct:
-            self.execution.sell(code, price, date, reason="移动止盈", prev_close=prev_close)
+        trigger_price = pos.highest_price * (1 - self.trailing_stop_pct)
+        fill_price = trigger_price if ohlc and self.stop_execution_price == "trigger" else price
+        if ohlc:
+            low = ohlc.get("low", price)
+            if low <= trigger_price:
+                self.execution.sell(code, fill_price, date, reason="移动止盈", prev_close=prev_close)
+                return True
+        elif drawdown >= self.trailing_stop_pct:
+            self.execution.sell(code, fill_price, date, reason="移动止盈", prev_close=prev_close)
             return True
 
         return False
@@ -595,12 +643,8 @@ class SimulatedTradingEngine:
 
     def _sync_trades(self):
         """将撮合引擎的新增 Trade 记录同步为字典格式"""
-        # 只同步卖出交易记录（买入记录的信息已包含在卖出记录中）
         start_idx = self._synced_trade_count
         for trade in self.execution.trades[start_idx:]:
-            if trade.trade_type != "sell":
-                continue
-
             trade_dict = {
                 "stock_code": trade.stock_code,
                 "stock_name": self._stock_name_map.get(trade.stock_code, trade.stock_name or trade.stock_code),

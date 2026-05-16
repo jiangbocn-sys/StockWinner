@@ -64,7 +64,8 @@ class DataGapReport:
 class DataCompletenessChecker:
     """回测数据完整性检查器"""
 
-    MIN_TRADING_DAYS = 60  # 最少交易日要求
+    # 指标预热所需最少交易日（回测开始前的历史数据）
+    INDICATOR_WARMUP_DAYS = 60
 
     def __init__(self):
         self.db = get_db_manager()
@@ -125,7 +126,11 @@ class DataCompletenessChecker:
             count = info.get("count", 0)
             coverage_ratio = count / total_trading_days if total_trading_days > 0 else 0
 
-            if coverage_ratio < 0.5 or count < self.MIN_TRADING_DAYS:
+            # 覆盖不足分两种情况：
+            # 1. 覆盖率 < 50% → 数据缺口严重，阻止
+            # 2. 覆盖率 50%~95% → 有缺失但可继续
+            # 3. 覆盖率 >= 95% → 数据完整
+            if coverage_ratio < 0.5:
                 report.blocking_gaps.append(DataGap(
                     stock_code=code,
                     severity="BLOCKING",
@@ -133,7 +138,11 @@ class DataCompletenessChecker:
                     missing_dates=total_trading_days - count,
                     total_required=total_trading_days,
                 ))
-            elif coverage_ratio < 0.95:
+            elif coverage_ratio >= 0.95:
+                # 数据完整（>=95%），不限制最短回测天数
+                report.stocks_with_full_coverage += 1
+            else:
+                # 50%~95% 覆盖，有缺失但可继续
                 report.warning_gaps.append(DataGap(
                     stock_code=code,
                     severity="WARNING",
@@ -141,8 +150,11 @@ class DataCompletenessChecker:
                     missing_dates=total_trading_days - count,
                     total_required=total_trading_days,
                 ))
-            else:
-                report.stocks_with_full_coverage += 1
+
+        # 检查指标预热：回测开始前是否有足够的历史数据计算 MA60 等指标
+        await self._check_indicator_warmup(
+            stock_codes, start_date, end_date, report
+        )
 
         # 计算整体覆盖率
         total_required = len(stock_codes) * total_trading_days
@@ -158,6 +170,47 @@ class DataCompletenessChecker:
             )
 
         return report
+
+    async def _check_indicator_warmup(
+        self,
+        stock_codes: List[str],
+        start_date: str,
+        end_date: str,
+        report: DataGapReport,
+    ):
+        """检查每只股票在回测开始前的历史数据是否足够指标预热"""
+        batches = self._split_batches(stock_codes)
+        earliest_dates = {}
+
+        for batch in batches:
+            dates = self.km.get_stocks_earliest_dates_batch(batch)
+            earliest_dates.update(dates)
+
+        # 获取从最早到 start_date 之间的交易日数
+        for code in stock_codes:
+            if code not in earliest_dates:
+                continue  # 已在 BLOCKING 中处理（无数据）
+
+            earliest = earliest_dates[code]
+            if earliest >= start_date:
+                # 数据从回测期间才开始，无预热数据
+                report.warning_gaps.append(DataGap(
+                    stock_code=code,
+                    severity="WARNING",
+                    reason=f"回测开始前无历史数据，MA60 等指标可能不准确",
+                ))
+                continue
+
+            # 计算 start_date 之前有多少交易日
+            pre_trade_dates = self.km.get_all_trade_dates(earliest, start_date)
+            pre_days = len(pre_trade_dates) - 1  # 减去 start_date 本身
+
+            if pre_days < self.INDICATOR_WARMUP_DAYS:
+                report.warning_gaps.append(DataGap(
+                    stock_code=code,
+                    severity="WARNING",
+                    reason=f"回测开始前仅 {pre_days} 个交易日历史数据，MA60 等指标可能不准确（建议 ≥{self.INDICATOR_WARMUP_DAYS} 天）",
+                ))
 
     async def _check_factors(
         self,

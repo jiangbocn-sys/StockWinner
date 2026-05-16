@@ -36,7 +36,8 @@ async def create_backtest_run(
         "stop_loss_pct": 0.05,  // 可选
         "take_profit_pct": 0.15,  // 可选
         "trailing_stop_pct": 0.03,  // 可选
-        "commission_rate": 0.0003,
+        "stop_execution_price": "close",  // close | trigger
+        "commission_rate": 0.0001,
         "stamp_tax": 0.0005,
         "slippage_pct": 0.0,
         "max_total_position_pct": 0.80,
@@ -104,6 +105,7 @@ async def create_backtest_run(
 
     # 合并 body 中的止盈止损
     for key in ("stop_loss_pct", "take_profit_pct", "trailing_stop_pct",
+                "stop_execution_price",
                 "commission_rate", "min_commission", "stamp_tax", "transfer_fee",
                 "max_total_position_pct", "max_single_position_pct", "cash_reserve_pct"):
         if key in body:
@@ -122,13 +124,26 @@ async def create_backtest_run(
         config=config,
     )
 
-    # 保存止盈止损等参数（用于重试）
-    for key in ("stop_loss_pct", "take_profit_pct", "trailing_stop_pct"):
+    # 保存回测参数（用于详情展示和重试）
+    for key in ("stop_loss_pct", "take_profit_pct", "trailing_stop_pct",
+                "stop_execution_price", "slippage_pct",
+                "commission_rate", "min_commission", "stamp_tax", "transfer_fee",
+                "max_total_position_pct", "max_single_position_pct", "cash_reserve_pct"):
         if key in body:
             await db.execute(
                 f"UPDATE backtest_runs SET {key} = ? WHERE id = ?",
                 (body[key], run_id)
             )
+    # markets / group_ids / stock_pool 存为 JSON
+    if markets is not None:
+        await db.execute("UPDATE backtest_runs SET markets = ? WHERE id = ?",
+                         (json.dumps(markets), run_id))
+    if group_ids is not None:
+        await db.execute("UPDATE backtest_runs SET group_ids = ? WHERE id = ?",
+                         (json.dumps(group_ids), run_id))
+    if stock_pool is not None:
+        await db.execute("UPDATE backtest_runs SET stock_pool = ? WHERE id = ?",
+                         (json.dumps(stock_pool), run_id))
 
     # 在线程池中异步执行回测（避免阻塞事件循环）
     import asyncio
@@ -139,7 +154,7 @@ async def create_backtest_run(
         with ThreadPoolExecutor(max_workers=1) as executor:
             try:
                 fee_config = FeeConfig(
-                    commission_rate=strategy_config.get("commission_rate", 0.0003),
+                    commission_rate=strategy_config.get("commission_rate", 0.0001),
                     min_commission=strategy_config.get("min_commission", 5.0),
                     stamp_tax=strategy_config.get("stamp_tax", 0.0005),
                     transfer_fee=strategy_config.get("transfer_fee", 0.00002),
@@ -212,7 +227,7 @@ async def list_backtest_runs(
     for run in runs:
         r = dict(run)
         # 解析 JSON 字段
-        for json_key in ("config", "data_gap_report", "result_summary"):
+        for json_key in ("config", "data_gap_report", "result_summary", "markets", "group_ids", "stock_pool"):
             if r.get(json_key):
                 try:
                     r[json_key] = json.loads(r[json_key])
@@ -238,7 +253,7 @@ async def get_backtest_run(
         raise HTTPException(status_code=404, detail="回测任务不存在")
 
     r = dict(run)
-    for json_key in ("config", "data_gap_report", "result_summary"):
+    for json_key in ("config", "data_gap_report", "result_summary", "markets", "group_ids", "stock_pool"):
         if r.get(json_key):
             try:
                 r[json_key] = json.loads(r[json_key])

@@ -90,6 +90,7 @@ async def get_agent_spec():
             "monitoring": "交易信号监控、通知推送（飞书 Webhook）",
             "scheduling": "APScheduler 定时任务（K线下载、因子计算、选股任务、盘后分析）",
             "notifications": "通知历史查询、通知配置管理",
+            "backtest": "策略回测（撮合模拟盘/收益率累积），支持止盈止损、移动止盈、候选组股票池、数据完整性检查、回测对比",
         },
 
         # ================================================================
@@ -161,6 +162,23 @@ async def get_agent_spec():
                 "key_columns": ["stock_code", "report_date", "pe_ttm", "pb", "ps_ttm", "roe", "roa", "gross_margin", "net_margin", "revenue_growth", "net_profit_growth"],
                 "query": "SELECT * FROM stock_monthly_factors WHERE stock_code = ? ORDER BY report_date DESC LIMIT 1",
             },
+            "backtest_runs": {
+                "description": "回测任务记录",
+                "key_columns": ["id", "account_id", "name", "strategy_id", "mode", "start_date", "end_date", "initial_capital", "config", "status", "progress", "result_summary", "data_gap_report", "error_message", "created_at", "completed_at", "current_trade_date"],
+                "note": "mode: 'simulated'=撮合模拟盘, 'return_accumulation'=收益率累积; status: pending/running/completed/failed; result_summary 为 JSON（含 total_return, annualized_return, max_drawdown, sharpe_ratio, win_rate 等）",
+            },
+            "backtest_trades": {
+                "description": "回测交易记录",
+                "key_columns": ["id", "backtest_run_id", "stock_code", "stock_name", "buy_date", "buy_price", "buy_quantity", "buy_commission", "sell_date", "sell_price", "sell_commission", "sell_reason", "pnl", "pnl_pct", "holding_days"],
+            },
+            "backtest_daily_nav": {
+                "description": "回测每日净值",
+                "key_columns": ["backtest_run_id", "trade_date", "nav", "total_value", "cash", "positions_value", "position_count", "drawdown", "max_drawdown", "daily_return"],
+            },
+            "backtest_daily_positions": {
+                "description": "回测每日持仓快照",
+                "key_columns": ["backtest_run_id", "trade_date", "stock_code", "stock_name", "quantity", "avg_cost", "close_price", "market_value", "unrealized_pnl"],
+            },
             "notification_history": {
                 "description": "通知发送历史",
                 "key_columns": ["account_id", "channel", "event_type", "title", "status", "created_at"],
@@ -216,6 +234,20 @@ async def get_agent_spec():
                     {"method": "GET", "path": "/api/v1/agent/query/data/block-trading?stock_code=600000.SH&start_date=20250101&end_date=20250512", "desc": "大宗交易（日期必填 YYYYMMDD）"},
                     {"method": "GET", "path": "/api/v1/agent/query/data/treasury-yield", "desc": "国债收益率曲线"},
                 ],
+            },
+            "backtest_endpoints": {
+                "description": "回测相关操作，strategist 及以上角色可用",
+                "endpoints": [
+                    {"method": "POST", "path": "/api/v1/ui/{account_id}/backtest/runs", "desc": "创建并执行回测任务", "body": '{"name":"回测名称","mode":"simulated","start_date":"2024-01-01","end_date":"2024-12-31","initial_capital":1000000,"stop_loss_pct":0.05,"take_profit_pct":0.15,"trailing_stop_pct":0.03,"stop_execution_price":"close","commission_rate":0.0001,"slippage_pct":0,"markets":["SH","SZ"],"group_ids":[1,2],"config":{}}'},
+                    {"method": "GET", "path": "/api/v1/ui/{account_id}/backtest/runs?limit=50&status=", "desc": "回测任务列表（status可选：pending/running/completed/failed）"},
+                    {"method": "GET", "path": "/api/v1/ui/{account_id}/backtest/runs/{run_id}", "desc": "回测任务详情（含 result_summary 绩效指标）"},
+                    {"method": "GET", "path": "/api/v1/ui/{account_id}/backtest/runs/{run_id}/trades", "desc": "回测交易记录（可加 ?stock_code=xxx 过滤）"},
+                    {"method": "GET", "path": "/api/v1/ui/{account_id}/backtest/runs/{run_id}/nav", "desc": "回测每日净值序列（用于绘制净值曲线）"},
+                    {"method": "GET", "path": "/api/v1/ui/{account_id}/backtest/runs/{run_id}/positions", "desc": "回测每日持仓快照（可加 ?trade_date=xxx 过滤）"},
+                    {"method": "DELETE", "path": "/api/v1/ui/{account_id}/backtest/runs/{run_id}", "desc": "删除回测任务及关联数据"},
+                    {"method": "POST", "path": "/api/v1/ui/{account_id}/backtest/check-data", "desc": "数据完整性检查（不执行回测）", "body": '{"start_date":"2024-01-01","end_date":"2024-12-31","group_ids":[1,2]}'},
+                ],
+                "note": "回测API在UI路由下，Agent需通过 /api/v1/ui/ 路径调用（不经过 /api/v1/agent/ 鉴权中间件），但受 account_id 账户范围限制。stop_execution_price: 'close'=收盘价成交, 'trigger'=触发价成交",
             },
             "submit_endpoints": {
                 "description": "策略创建，strategist 及以上角色可用",

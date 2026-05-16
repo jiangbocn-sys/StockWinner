@@ -211,6 +211,33 @@ class KlineManager:
             results.setdefault(row[0], []).append(row[1])
         return results
 
+    def get_stocks_earliest_dates_batch(
+        self, stock_codes: List[str]
+    ) -> Dict[str, str]:
+        """
+        批量获取每只股票在数据库中的最早交易日期。
+
+        Returns:
+            {stock_code: 'YYYY-MM-DD'}
+        """
+        if not stock_codes:
+            return {}
+
+        conn = self._conn()
+        cursor = conn.cursor()
+        placeholders = ','.join(['?' for _ in stock_codes])
+        cursor.execute(f'''
+            SELECT stock_code, MIN(trade_date)
+            FROM kline_data
+            WHERE stock_code IN ({placeholders})
+            GROUP BY stock_code
+        ''', stock_codes)
+
+        results = {}
+        for row in cursor.fetchall():
+            results[row[0]] = row[1]
+        return results
+
     def get_stock_date_range(self, stock_code: str) -> Tuple[Optional[str], Optional[str]]:
         """获取某只股票的日期范围（最新日期，最早日期）"""
         conn = self._conn()

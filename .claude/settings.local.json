@@ -83,7 +83,10 @@
       "Bash(find /home/bobo/StockWinner -name *.py -exec grep -l 'CREATE TABLE' {})",
       "Bash(2)",
       "Bash(find /home/bobo/StockWinner -name *.py -exec grep -l stock_base_info {})",
-      "Bash(find /home/bobo/StockWinner -name *.py -exec grep -l \"stock_daily_factors\\\\|stock_monthly_factors\\\\|weekly_kline\" {})"
+      "Bash(find /home/bobo/StockWinner -name *.py -exec grep -l \"stock_daily_factors\\\\|stock_monthly_factors\\\\|weekly_kline\" {})",
+      "Bash(grep -rn 'CREATE TABLE' /home/bobo/StockWinner/services --include=*.py)",
+      "Bash(grep -rn temp_candidates /home/bobo/StockWinner --include=*.py)",
+      "Bash(grep -rn temp_candidates /home/bobo/StockWinner --include=*.py -A 5 -B 5)"
     ]
   }
 }

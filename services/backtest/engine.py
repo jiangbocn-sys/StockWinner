@@ -137,9 +137,16 @@ class BacktestEngine:
             if not stock_pool:
                 stock_pool = self._resolve_stock_pool(strategy_config)
 
-            # 4. 数据完整性检查
+            # 4. 数据完整性检查（股票池超过 1000 只时做采样检查，避免阻塞）
+            max_check_stocks = 1000
+            if len(stock_pool) > max_check_stocks:
+                import random
+                check_pool = random.sample(stock_pool, max_check_stocks)
+            else:
+                check_pool = stock_pool
+
             gap_report = await self._check_data_completeness(
-                stock_pool, start_date, end_date
+                check_pool, start_date, end_date
             )
             if not gap_report.can_proceed:
                 await self._mark_failed(run_id, "数据完整性检查未通过", gap_report)
@@ -183,7 +190,7 @@ class BacktestEngine:
 
         # 从 strategy_config 读取费率配置
         fee = fee_config or FeeConfig(
-            commission_rate=strategy_config.get("commission_rate", 0.0003),
+            commission_rate=strategy_config.get("commission_rate", 0.0001),
             min_commission=strategy_config.get("min_commission", 5.0),
             stamp_tax=strategy_config.get("stamp_tax", 0.0005),
             transfer_fee=strategy_config.get("transfer_fee", 0.00002),
@@ -215,6 +222,7 @@ class BacktestEngine:
             stop_loss_pct=stop_loss_pct,
             take_profit_pct=take_profit_pct,
             trailing_stop_pct=trailing_stop_pct,
+            stop_execution_price=strategy_config.get("stop_execution_price", "close"),
         )
 
         # 进度回调（同步版本，直接执行 DB 更新）
@@ -424,7 +432,8 @@ class BacktestEngine:
             all_stocks = km.get_all_stocks()
             return [c for c in all_stocks if c.split(".")[-1] in markets]
 
-        # 3. 默认：数据库中所有股票
+        # 3. 默认：数据库中所有股票（排除 BJ 北交所和 SI 指数）
         from services.factors.kline_manager import get_kline_manager
         km = get_kline_manager()
-        return km.get_all_stocks()
+        all_stocks = km.get_all_stocks()
+        return [c for c in all_stocks if c.split(".")[-1] in ("SH", "SZ")]

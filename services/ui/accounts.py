@@ -233,6 +233,67 @@ async def delete_account(account_id: str = Path(..., description="账户 ID")):
     return {"success": True, "message": "账户已删除"}
 
 
+@router.get("/api/v1/ui/accounts/{account_id}/position-strategy")
+async def get_position_strategy(account_id: str = Path(..., description="账户 ID")):
+    """获取持仓策略参数"""
+    db = get_db_manager()
+
+    existing = await db.fetchone(
+        "SELECT 1 FROM accounts WHERE account_id = ?",
+        (account_id,)
+    )
+    if not existing:
+        raise HTTPException(status_code=404, detail="账户不存在")
+
+    acc = await db.fetchone(
+        "SELECT max_total_position_pct, max_single_position_pct, cash_reserve_pct FROM accounts WHERE account_id = ?",
+        (account_id,)
+    )
+
+    return {
+        "success": True,
+        "data": {
+            "max_total_position_pct": float(acc.get("max_total_position_pct", 0.80)),
+            "max_single_position_pct": float(acc.get("max_single_position_pct", 0.15)),
+            "cash_reserve_pct": float(acc.get("cash_reserve_pct", 0.20)),
+        }
+    }
+
+
+@router.put("/api/v1/ui/accounts/{account_id}/position-strategy")
+async def update_position_strategy(
+    account_id: str = Path(..., description="账户 ID"),
+    body: dict = Body(...),
+):
+    """更新持仓策略参数"""
+    db = get_db_manager()
+
+    existing = await db.fetchone(
+        "SELECT 1 FROM accounts WHERE account_id = ?",
+        (account_id,)
+    )
+    if not existing:
+        raise HTTPException(status_code=404, detail="账户不存在")
+
+    await db.execute(
+        """UPDATE accounts
+           SET max_total_position_pct = ?,
+               max_single_position_pct = ?,
+               cash_reserve_pct = ?,
+               updated_at = ?
+           WHERE account_id = ?""",
+        (
+            float(body.get("max_total_position_pct", 0.80)),
+            float(body.get("max_single_position_pct", 0.15)),
+            float(body.get("cash_reserve_pct", 0.20)),
+            get_china_time().isoformat(),
+            account_id,
+        )
+    )
+
+    return {"success": True, "message": "持仓策略已更新"}
+
+
 @router.get("/api/v1/ui/accounts/statistics")
 async def get_statistics():
     """获取账户统计信息"""
