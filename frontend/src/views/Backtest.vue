@@ -138,7 +138,7 @@
         </template>
 
         <el-table :data="history" v-loading="loadingHistory" stripe>
-          <el-table-column prop="name" label="回测名称" width="140" show-overflow-tooltip />
+          <el-table-column prop="name" label="回测名称" min-width="100" show-overflow-tooltip />
           <el-table-column prop="mode" label="模式" width="120">
             <template #default="{ row }">
               {{ row.mode === 'simulated' ? '撮合模拟盘' : '收益率累积' }}
@@ -188,29 +188,23 @@
           </el-table-column>
           <el-table-column label="状态" width="160">
             <template #default="{ row }">
-              <el-tooltip v-if="row.status === 'failed' && row.error_message" :content="row.error_message" placement="top">
+              <el-tag v-if="row.status === 'completed'" type="success" size="small">完成</el-tag>
+              <el-tag v-else-if="row.status === 'running'" type="warning" size="small">运行中 {{ row.progress }}%</el-tag>
+              <el-tooltip v-else-if="row.status === 'failed' && row.error_message" :content="row.error_message" placement="top">
                 <el-tag type="danger" size="small">失败</el-tag>
               </el-tooltip>
-              <el-tag v-else-if="row.status === 'completed'" type="success" size="small">完成</el-tag>
-              <el-tag v-else-if="row.status === 'running'" type="warning" size="small">
-                运行中 {{ row.progress }}%
-              </el-tag>
-              <div v-if="row.status === 'running' && row.current_trade_date" class="backtest-date">
-                回测至 {{ row.current_trade_date }}
-              </div>
               <el-tag v-else-if="row.status === 'failed'" type="danger" size="small">失败</el-tag>
               <el-tag v-else type="info" size="small">{{ row.status }}</el-tag>
+              <div v-if="row.status === 'running' && row.current_trade_date" class="backtest-date">回测至 {{ row.current_trade_date }}</div>
             </template>
           </el-table-column>
-          <el-table-column label="操作" width="160" fixed="right">
+          <el-table-column label="操作" width="220" fixed="right">
             <template #default="{ row }">
-              <el-button size="small" type="primary" @click="viewDetail(row)" :disabled="row.status !== 'completed'">
-                详情
-              </el-button>
-              <el-button v-if="row.status === 'failed'" size="small" type="warning" @click="rerunBacktest(row)">
-                重试
-              </el-button>
-              <el-button size="small" type="danger" @click="deleteRun(row.id)">删除</el-button>
+              <div class="action-buttons">
+                <el-button size="small" type="primary" @click="viewDetail(row)" :disabled="row.status !== 'completed'">详情</el-button>
+                <el-button v-if="row.status === 'failed'" size="small" type="warning" @click="rerunBacktest(row)">重试</el-button>
+                <el-button size="small" type="danger" @click="deleteRun(row.id)">删除</el-button>
+              </div>
             </template>
           </el-table-column>
         </el-table>
@@ -706,6 +700,12 @@ onBeforeUnmount(() => {
   font-size: 11px;
   color: #e6a23c;
   margin-top: 2px;
+}
+
+.action-buttons {
+  display: flex;
+  gap: 4px;
+  flex-wrap: nowrap;
 }
 
 :deep(.el-table) {
