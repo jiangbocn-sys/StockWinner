@@ -40,6 +40,7 @@ import os
 _SDK_USERNAME = os.environ.get("SDK_USERNAME", "")
 _SDK_PASSWORD = os.environ.get("SDK_PASSWORD", "")
 _SDK_HOST = os.environ.get("SDK_HOST", "")
+_SDK_HOST_BACKUP = os.environ.get("SDK_HOST_BACKUP", "")
 _SDK_PORT = int(os.environ.get("SDK_PORT", "8600"))
 
 
@@ -166,55 +167,75 @@ class SDKConnectionManager:
                 self._last_error_time = get_china_time().strftime("%Y-%m-%d %H:%M:%S")
 
     def _sdk_login(self) -> bool:
-        """发起 SDK 登录（同步阻塞，带超时保护）"""
+        """发起 SDK 登录（同步阻塞，带超时保护）
+
+        先尝试主 IP，失败后自动尝试备 IP
+        """
         logger = get_logger("sdk_connection")
-        start = time.monotonic()
-        try:
-            from AmazingData import login
 
-            result_container: List[Optional[bool]] = [None]
-            error_container: List[Optional[Exception]] = [None]
+        # 构建候选主机列表
+        hosts = [_SDK_HOST] if _SDK_HOST else []
+        if _SDK_HOST_BACKUP and _SDK_HOST_BACKUP not in hosts:
+            hosts.append(_SDK_HOST_BACKUP)
 
-            def _do_login():
-                try:
-                    result_container[0] = login(_SDK_USERNAME, _SDK_PASSWORD, _SDK_HOST, _SDK_PORT)
-                except Exception as e:
-                    error_container[0] = e
+        if not hosts:
+            logger.error("sdk_login", "无可用 SDK 主机地址")
+            self._set_state(ConnectionState.FAILED, "未配置 SDK 主机地址")
+            return False
 
-            t = threading.Thread(target=_do_login, daemon=True)
-            t.start()
-            t.join(timeout=30.0)
+        for host in hosts:
+            start = time.monotonic()
+            try:
+                from AmazingData import login
 
-            elapsed_ms = (time.monotonic() - start) * 1000
+                result_container: List[Optional[bool]] = [None]
+                error_container: List[Optional[Exception]] = [None]
 
-            if t.is_alive():
-                logger.error("sdk_login", "登录超时", context={"timeout_seconds": 30})
-                logger.log_sdk_call("login", elapsed_ms, "connect", "timeout",
-                                    error="登录超时")
-                self._set_state(ConnectionState.FAILED, "登录超时")
-                return False
+                def _do_login():
+                    try:
+                        result_container[0] = login(_SDK_USERNAME, _SDK_PASSWORD, host, _SDK_PORT)
+                    except Exception as e:
+                        error_container[0] = e
 
-            if error_container[0]:
-                err_msg = str(error_container[0])
-                logger.error("sdk_login", f"登录异常: {err_msg}")
-                logger.log_sdk_call("login", elapsed_ms, "connect", "error", error=err_msg)
-                self._set_state(ConnectionState.FAILED, err_msg)
-                return False
+                t = threading.Thread(target=_do_login, daemon=True)
+                t.start()
+                t.join(timeout=30.0)
 
-            if result_container[0]:
-                logger.log_sdk_call("login", elapsed_ms, "connect", "success")
-                self._set_state(ConnectionState.CONNECTED)
-                return True
-            else:
-                logger.error("sdk_login", "登录失败（返回 False）")
-                logger.log_sdk_call("login", elapsed_ms, "connect", "failure")
-                self._set_state(ConnectionState.FAILED, "登录失败")
-                return False
-        except Exception as e:
-            elapsed_ms = (time.monotonic() - start) * 1000
-            logger.error("sdk_login", f"登录异常: {e}")
-            logger.log_sdk_call("login", elapsed_ms, "connect", "error", error=str(e))
-            raise
+                elapsed_ms = (time.monotonic() - start) * 1000
+
+                if t.is_alive():
+                    logger.warn("sdk_login", f"{host}:{_SDK_PORT} 登录超时")
+                    logger.log_sdk_call("login", elapsed_ms, "connect", "timeout",
+                                        host=host, error="登录超时")
+                    continue
+
+                if error_container[0]:
+                    err_msg = str(error_container[0])
+                    logger.warn("sdk_login", f"{host}:{_SDK_PORT} 登录异常: {err_msg}")
+                    logger.log_sdk_call("login", elapsed_ms, "connect", "error",
+                                        host=host, error=err_msg)
+                    continue
+
+                if result_container[0]:
+                    logger.log_sdk_call("login", elapsed_ms, "connect", "success", host=host)
+                    logger.log_event("sdk_login_success", f"SDK 登录成功 @ {host}:{_SDK_PORT}")
+                    self._set_state(ConnectionState.CONNECTED)
+                    return True
+                else:
+                    logger.warn("sdk_login", f"{host}:{_SDK_PORT} 登录失败（返回 False）")
+                    logger.log_sdk_call("login", elapsed_ms, "connect", "failure", host=host)
+                    continue
+            except Exception as e:
+                elapsed_ms = (time.monotonic() - start) * 1000
+                logger.error("sdk_login", f"登录异常: {e}")
+                logger.log_sdk_call("login", elapsed_ms, "connect", "error", host=host, error=str(e))
+                raise
+
+        # 所有主机都失败
+        all_hosts = ", ".join(hosts)
+        logger.error("sdk_login", f"所有主机均登录失败: {all_hosts}")
+        self._set_state(ConnectionState.FAILED, f"无法连接 SDK 主机: {all_hosts}")
+        return False
 
     def _test_connection(self) -> bool:
         """

@@ -20,6 +20,7 @@ from services.common.database import get_db_manager, reset_db_manager
 from services.common.account_manager import get_account_manager, reset_account_manager
 from services.common.structured_logger import get_logger
 from services.ui import dashboard, accounts, positions, trades, strategies, screening, monitoring, market_data, data_explorer, position_rules, factors, scheduler, notifications, trading_strategies, strategy_performance, data_service
+from services.backtest.api import router as backtest_router
 from services.strategy.api import router as strategy_v2_router
 from services.account_management.api import router as account_management_router
 from services.auth.api import router as auth_router
@@ -30,7 +31,7 @@ from services._version import VERSION, set_start_time
 _server_start_time = None
 
 # 数据库迁移版本号 —— 每次新增迁移时递增
-MIGRATION_VERSION = 5
+MIGRATION_VERSION = 6
 
 
 @asynccontextmanager
@@ -507,6 +508,86 @@ async def lifespan(app: FastAPI):
         """CREATE INDEX IF NOT EXISTS idx_signals_order_type ON trading_signals(account_id, status, order_type)""",
     ])
 
+    # v6: 回测系统（2026-05-16）
+    await run_migration(6, "回测系统四张新表", [
+        """CREATE TABLE IF NOT EXISTS backtest_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            account_id TEXT NOT NULL,
+            strategy_id INTEGER,
+            name TEXT NOT NULL,
+            mode TEXT NOT NULL DEFAULT 'simulated',
+            start_date TEXT NOT NULL,
+            end_date TEXT NOT NULL,
+            initial_capital REAL NOT NULL DEFAULT 1000000,
+            commission_rate REAL NOT NULL DEFAULT 0.0003,
+            stamp_tax REAL NOT NULL DEFAULT 0.0005,
+            transfer_fee REAL NOT NULL DEFAULT 0.00002,
+            min_commission REAL NOT NULL DEFAULT 5.0,
+            slippage_pct REAL NOT NULL DEFAULT 0.0,
+            max_total_position_pct REAL DEFAULT 0.80,
+            max_single_position_pct REAL DEFAULT 0.15,
+            cash_reserve_pct REAL DEFAULT 0.10,
+            config TEXT DEFAULT '{}',
+            status TEXT NOT NULL DEFAULT 'pending',
+            progress REAL DEFAULT 0,
+            error_message TEXT,
+            data_gap_report TEXT,
+            result_summary TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            started_at TIMESTAMP,
+            completed_at TIMESTAMP
+        )""",
+        """CREATE INDEX IF NOT EXISTS idx_backtest_runs_account ON backtest_runs(account_id)""",
+        """CREATE INDEX IF NOT EXISTS idx_backtest_runs_status ON backtest_runs(status)""",
+        """CREATE TABLE IF NOT EXISTS backtest_trades (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            backtest_run_id INTEGER NOT NULL,
+            stock_code TEXT NOT NULL,
+            stock_name TEXT,
+            buy_date TEXT NOT NULL,
+            buy_price REAL NOT NULL,
+            buy_quantity INTEGER NOT NULL,
+            buy_commission REAL NOT NULL,
+            sell_date TEXT,
+            sell_price REAL,
+            sell_commission REAL,
+            sell_reason TEXT,
+            pnl REAL,
+            pnl_pct REAL,
+            holding_days INTEGER,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )""",
+        """CREATE INDEX IF NOT EXISTS idx_backtest_trades_run ON backtest_trades(backtest_run_id)""",
+        """CREATE INDEX IF NOT EXISTS idx_backtest_trades_stock ON backtest_trades(backtest_run_id, stock_code)""",
+        """CREATE TABLE IF NOT EXISTS backtest_daily_nav (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            backtest_run_id INTEGER NOT NULL,
+            trade_date TEXT NOT NULL,
+            nav REAL NOT NULL,
+            total_value REAL NOT NULL,
+            cash REAL NOT NULL,
+            positions_value REAL NOT NULL,
+            position_count INTEGER DEFAULT 0,
+            drawdown REAL DEFAULT 0,
+            max_drawdown REAL DEFAULT 0,
+            daily_return REAL DEFAULT 0
+        )""",
+        """CREATE UNIQUE INDEX IF NOT EXISTS idx_backtest_daily_nav_run_date ON backtest_daily_nav(backtest_run_id, trade_date)""",
+        """CREATE TABLE IF NOT EXISTS backtest_daily_positions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            backtest_run_id INTEGER NOT NULL,
+            trade_date TEXT NOT NULL,
+            stock_code TEXT NOT NULL,
+            stock_name TEXT,
+            quantity INTEGER NOT NULL,
+            avg_cost REAL NOT NULL,
+            close_price REAL NOT NULL,
+            market_value REAL NOT NULL,
+            unrealized_pnl REAL DEFAULT 0
+        )""",
+        """CREATE INDEX IF NOT EXISTS idx_backtest_daily_positions_run ON backtest_daily_positions(backtest_run_id, trade_date)""",
+    ])
+
     yield
 
     # 关闭时清理
@@ -826,6 +907,7 @@ app.include_router(llm_router)  # LLM 配置路由
 app.include_router(notifications.router)  # 通知 API 路由
 app.include_router(strategy_performance.router)  # 策略效能评估 API 路由
 app.include_router(data_service.router)  # 扩展数据服务 API（指数/行业/财报/龙虎榜/两融等）
+app.include_router(backtest_router)  # 回测系统 API 路由
 
 # Agent API 路由（独立路径，不影响 UI）
 register_agent_routers(app)

@@ -81,12 +81,19 @@ async def download_weekly_kline_data(
         print("[WeeklyKline] 错误：无股票数据")
         return False
 
-    # 获取股票名称映射
+    # 获取股票名称映射（优先 stock_base_info，名称最准确）
     conn = get_sync_connection("kline", path=DB_PATH)
     cursor = conn.cursor()
+    # 优先查 stock_base_info（每日 SDK 同步，名称最新）
+    cursor.execute("SELECT stock_code, stock_name FROM stock_base_info")
+    base_rows = cursor.fetchall()
+    stock_names = {row[0]: row[1] or '' for row in base_rows}
+    # 补充：stock_base_info 没有的，从 kline_data 取
     cursor.execute("SELECT DISTINCT stock_code, stock_name FROM kline_data")
-    stock_rows = cursor.fetchall()
-    stock_names = {row[0]: row[1] or '' for row in stock_rows}
+    kline_rows = cursor.fetchall()
+    for row in kline_rows:
+        if row[0] not in stock_names and row[1]:
+            stock_names[row[0]] = row[1]
 
     stock_list = []
     for code in all_stocks:
@@ -106,33 +113,36 @@ async def download_weekly_kline_data(
         print("[WeeklyKline] 错误：过滤后无股票数据")
         return False
 
-    # 获取每只股票已有周K线的最新日期
+    # 获取每只股票已有周K线的最新日期和最早日期
     latest_map = km.get_weekly_latest()
+    earliest_map = km.get_weekly_earliest()
 
-    # 过滤掉已有数据超过 cutoff 的股票
-    for s in stock_list:
-        code = s['stock_code']
-        latest = latest_map.get(code)
-        if latest and latest > cutoff_date:
-            del latest_map[code]
+    # 使用 cutoff_date 作为下载截止日期
+    end_dt = last_complete_week
+    cutoff_10y = (end_dt - timedelta(days=years * 365)).strftime('%Y-%m-%d')
 
-    # 分组：有历史数据 vs 无历史数据
+    # 分类：无数据 → 初始下载；有数据但不足10年 → 初始下载（回溯补全）；有数据且足10年 → 增量更新
     needs_update = []
     needs_initial = []
     for s in stock_list:
         code = s['stock_code']
-        if code in latest_map:
-            needs_update.append(s)
-        else:
+        latest = latest_map.get(code)
+        earliest = earliest_map.get(code)
+
+        # 已有数据超过 cutoff，跳过
+        if latest and latest > cutoff_date:
+            continue
+
+        # 无数据，或最早日期晚于 cutoff_10y（不足10年覆盖），需要初始下载
+        if not earliest or earliest > cutoff_10y:
             needs_initial.append(s)
+        else:
+            needs_update.append(s)
 
     total_stocks = len(stock_list)
     print(f"[WeeklyKline] 共 {total_stocks} 只股票")
+    print(f"[WeeklyKline]   需全量下载（无数据或不足{years}年）: {len(needs_initial)} 只")
     print(f"[WeeklyKline]   需增量更新: {len(needs_update)} 只")
-    print(f"[WeeklyKline]   需初始下载: {len(needs_initial)} 只")
-
-    # 使用 cutoff_date 作为下载截止日期
-    end_dt = last_complete_week
 
     # 先处理初始下载
     if needs_initial:
@@ -209,7 +219,7 @@ async def _download_batch(
                 period="week",
                 start_date=str(start_date_int),
                 end_date=str(end_date_int),
-                limit=years * 52
+                limit=years * 52 + 200  # 额外缓冲，避免日历对齐损失
             )
 
             for code, data in kline_data.items():
@@ -264,15 +274,27 @@ async def _download_incremental(
         except Exception:
             pass
 
-        # 批量获取该批所有股票的周K线
+        # 批量获取该批所有股票的周K线（仅查询最新日期之后 + 90天缓冲）
         batch_codes = [s['stock_code'] for s in batch]
+        # 找到该批最早的起始日期
+        earliest_latest = None
+        for s in batch:
+            latest = latest_map.get(s['stock_code'])
+            if latest:
+                if earliest_latest is None or latest < earliest_latest:
+                    earliest_latest = latest
+        # 从最早起始日期前 90 天开始查（覆盖可能的周历偏移）
+        if earliest_latest:
+            start_from = (datetime.strptime(earliest_latest, '%Y-%m-%d') - timedelta(days=90)).strftime('%Y%m%d')
+        else:
+            start_from = str(end_date_int - 9000)
         try:
             kline_data = await gateway.get_batch_kline_data(
                 stock_codes=batch_codes,
                 period="week",
-                start_date=str(end_date_int - 36500),  # 最多回取10年
+                start_date=start_from,
                 end_date=str(end_date_int),
-                limit=520  # 最多10年
+                limit=200  # 增量通常只需几周，200条足够
             )
 
             for s in batch:

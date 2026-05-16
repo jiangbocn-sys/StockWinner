@@ -37,6 +37,10 @@
           <el-icon><Setting /></el-icon>
           <span>策略管理</span>
         </el-menu-item>
+        <el-menu-item index="/backtest">
+          <el-icon><TrendCharts /></el-icon>
+          <span>策略回测</span>
+        </el-menu-item>
         <el-menu-item index="/performance">
           <el-icon><DataBoard /></el-icon>
           <span>策略效能</span>

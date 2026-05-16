@@ -77,7 +77,13 @@
       "Bash(pkill -9 -f \"uvicorn services.main\")",
       "Bash(./start_backend.sh start:*)",
       "Bash(kill -9 1310470)",
-      "Bash(grep -rn \"query_kline\\\\|realtime_quote\\\\|realtime\\\\|position.*price\" /home/bobo/StockWinner/services/ui/ --include=*.py)"
+      "Bash(grep -rn \"query_kline\\\\|realtime_quote\\\\|realtime\\\\|position.*price\" /home/bobo/StockWinner/services/ui/ --include=*.py)",
+      "Bash(grep -n trading-signals services/main.py services/ui/*.py)",
+      "Bash(find /home/bobo/StockWinner -type f -name *.py)",
+      "Bash(find /home/bobo/StockWinner -name *.py -exec grep -l 'CREATE TABLE' {})",
+      "Bash(2)",
+      "Bash(find /home/bobo/StockWinner -name *.py -exec grep -l stock_base_info {})",
+      "Bash(find /home/bobo/StockWinner -name *.py -exec grep -l \"stock_daily_factors\\\\|stock_monthly_factors\\\\|weekly_kline\" {})"
     ]
   }
 }

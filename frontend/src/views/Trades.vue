@@ -169,28 +169,28 @@
                 </template>
 
                 <el-table :data="trades" stripe style="width: 100%">
-                  <el-table-column prop="trade_time" label="时间" min-width="170" />
-                  <el-table-column prop="stock_code" label="代码" width="90" />
-                  <el-table-column prop="stock_name" label="名称" width="100" />
-                  <el-table-column prop="trade_type" label="操作" width="80">
+                  <el-table-column prop="trade_time" label="时间" min-width="160" max-width="180" />
+                  <el-table-column prop="stock_code" label="代码" min-width="90" max-width="110" />
+                  <el-table-column prop="stock_name" label="名称" min-width="100" max-width="150" show-overflow-tooltip />
+                  <el-table-column prop="trade_type" label="操作" width="75">
                     <template #default="{ row }">
                       <el-tag :type="row.trade_type === 'buy' ? 'danger' : 'success'">
                         {{ row.trade_type === 'buy' ? '买入' : '卖出' }}
                       </el-tag>
                     </template>
                   </el-table-column>
-                  <el-table-column prop="quantity" label="数量" width="90" align="right" />
-                  <el-table-column prop="price" label="价格" width="90" align="right">
+                  <el-table-column prop="quantity" label="数量" min-width="80" max-width="100" align="right" />
+                  <el-table-column prop="price" label="价格" min-width="90" max-width="110" align="right">
                     <template #default="{ row }">¥{{ formatNumber(row.price) }}</template>
                   </el-table-column>
-                  <el-table-column prop="amount" label="金额" width="110" align="right">
+                  <el-table-column prop="amount" label="金额" min-width="110" max-width="140" align="right">
                     <template #default="{ row }">¥{{ formatNumber(row.amount) }}</template>
                   </el-table-column>
-                  <el-table-column prop="commission" label="手续费" width="90" align="right">
+                  <el-table-column prop="commission" label="手续费" min-width="90" max-width="120" align="right">
                     <template #default="{ row }">¥{{ formatNumber(row.commission) }}</template>
                   </el-table-column>
-                  <el-table-column prop="trigger_source" label="触发来源" width="100" />
-                  <el-table-column prop="status" label="状态" width="80">
+                  <el-table-column prop="trigger_source" label="触发来源" min-width="90" max-width="130" show-overflow-tooltip />
+                  <el-table-column prop="status" label="状态" width="75">
                     <template #default="{ row }">
                       <el-tag :type="row.status === 'completed' ? 'success' : 'warning'" size="small">
                         {{ row.status === 'completed' ? '成功' : row.status }}
@@ -250,6 +250,8 @@
           </el-card>
         </el-tab-pane>
       </el-tabs>
+        </div><!-- right-panel -->
+      </div><!-- split-container -->
     </el-main>
 
   </div>
@@ -259,6 +261,7 @@
 import { ref, reactive, onMounted, computed, watch } from 'vue'
 import { useAccountStore } from '../stores/account'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { Refresh } from '@element-plus/icons-vue'
 import NavBar from '../components/NavBar.vue'
 
 const accountStore = useAccountStore()

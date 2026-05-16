@@ -93,6 +93,11 @@ class StrategyGenerator:
    - revenue_growth_yoy_min: 营收同比增长下限（百分比）
    - sw_level1: 申万一级行业（如"电子"、"计算机"）
 
+3. markets: 市场范围（可选，股票代码后缀列表）
+   - 默认不限制，包含所有市场（SH+SZ+BJ）
+   - 例如: ["SH", "SZ"] 表示只筛选沪深股票，剔除北交所
+   - 例如: ["SH"] 表示只筛选沪市股票
+
 2. buy_conditions: 买点信号条件（技术指标）
    - 使用穿越信号或比较表达式
 
@@ -130,6 +135,13 @@ class StrategyGenerator:
 
 五、行业条件：
 - "电子行业" → sw_level1: "电子"
+
+六、市场筛选条件：
+- "剔除北交所" 或 "排除北交所" → markets: ["SH", "SZ"]
+- "只要沪深" 或 "沪深A股" → markets: ["SH", "SZ"]
+- "只要沪市" 或 "上证" → markets: ["SH"]
+- "只要深市" 或 "深证" → markets: ["SZ"]
+- 不限制市场 → 不设置 markets 字段
 
 二、MACD金叉/死叉 → 使用专用条件名：
 - "MACD金叉" → "DIF_CROSS_UP_DEA"
@@ -288,10 +300,12 @@ class StrategyGenerator:
 
         # 设置认证头
         auth_header = preset.get("auth_header", "Authorization")
-        auth_prefix = preset.get("auth_prefix", "")
+        auth_prefix = preset.get("auth_prefix", None)
         if auth_header == "x-api-key":
             headers["x-api-key"] = self.api_key
         else:
+            if auth_prefix is None:
+                auth_prefix = "Bearer "
             headers[auth_header] = f"{auth_prefix}{self.api_key}"
 
         # Anthropic 需要额外的版本头

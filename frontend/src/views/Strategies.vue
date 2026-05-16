@@ -140,9 +140,12 @@
                 </template>
               </el-table-column>
               <el-table-column prop="created_at" label="创建时间" width="160" />
-              <el-table-column label="操作" width="240">
+              <el-table-column label="操作" width="320">
                 <template #default="{ row }">
-                  <el-button type="primary" size="small" @click="viewScreeningStrategy(row)">
+                  <el-button type="primary" size="small" @click="editScreeningStrategy(row)">
+                    编辑
+                  </el-button>
+                  <el-button type="info" size="small" @click="viewScreeningStrategy(row)">
                     详情
                   </el-button>
                   <el-button
@@ -266,12 +269,12 @@
           </el-tabs>
         </el-tab-pane>
 
-        <!-- 交易策略 -->
-        <el-tab-pane label="交易策略" name="trading">
+        <!-- 个股策略 -->
+        <el-tab-pane label="个股策略" name="trading">
           <el-card>
             <template #header>
               <div class="card-header">
-                <span>股票交易策略</span>
+                <span>个股交易策略</span>
                 <el-space>
                   <el-input
                     v-model="searchStockCode"
@@ -337,6 +340,58 @@
               </el-table-column>
             </el-table>
             <el-empty v-if="!loadingTrading && tradingStrategies.length === 0" description="暂无交易策略" />
+          </el-card>
+        </el-tab-pane>
+
+        <!-- 告警策略 -->
+        <el-tab-pane label="告警策略" name="alert">
+          <el-card>
+            <template #header>
+              <div class="card-header">
+                <span>告警策略</span>
+                <el-space>
+                  <el-button type="primary" size="small" @click="showAlertStrategyDialog">
+                    <el-icon><Plus /></el-icon>
+                    新建告警策略
+                  </el-button>
+                  <el-button size="small" @click="loadAlertStrategies">
+                    <el-icon><Refresh /></el-icon>
+                    刷新
+                  </el-button>
+                </el-space>
+              </div>
+            </template>
+
+            <el-table :data="alertStrategyList" stripe style="width: 100%">
+              <el-table-column prop="name" label="策略名称" width="150" />
+              <el-table-column label="策略类型" width="120">
+                <template #default="{ row }">
+                  {{ formatAlertStrategyType(row.strategy_type) }}
+                </template>
+              </el-table-column>
+              <el-table-column label="方向" width="70">
+                <template #default="{ row }">
+                  <el-tag :type="row.action === 'buy' ? 'danger' : 'success'" size="small">
+                    {{ row.action === 'buy' ? '买入' : '卖出' }}
+                  </el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column label="状态" width="70">
+                <template #default="{ row }">
+                  <el-tag :type="row.enabled ? 'success' : 'info'" size="small">
+                    {{ row.enabled ? '启用' : '停用' }}
+                  </el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column prop="cooldown_seconds" label="冷却(秒)" width="90" />
+              <el-table-column label="操作" width="120">
+                <template #default="{ row }">
+                  <el-button size="small" @click="editAlertStrategy(row)">编辑</el-button>
+                  <el-button size="small" type="danger" @click="deleteAlertStrategy(row.id)">删除</el-button>
+                </template>
+              </el-table-column>
+            </el-table>
+            <el-empty v-if="!loadingAlertStrategies && alertStrategyList.length === 0" description="暂无告警策略" />
           </el-card>
         </el-tab-pane>
       </el-tabs>
@@ -449,6 +504,9 @@
           <el-form-item label="股票代码">
             <el-input :value="editingTrading.stock_code" disabled />
           </el-form-item>
+          <el-form-item label="股票名称">
+            <el-input v-model="editingTrading.stock_name" placeholder="股票名称" />
+          </el-form-item>
           <el-form-item label="建仓价">
             <el-input-number v-model="editingTrading.entry_price" :min="0" :precision="2" />
           </el-form-item>
@@ -505,6 +563,122 @@
             <el-icon v-if="!generating"><MagicStick /></el-icon>
             {{ generating ? '正在生成...' : '生成策略' }}
           </el-button>
+        </template>
+      </el-dialog>
+
+      <!-- 编辑选股策略对话框 -->
+      <el-dialog v-model="showEditScreeningDialog" title="编辑选股策略" width="650px">
+        <el-form :model="editingScreening" label-width="120px">
+          <el-form-item label="策略名称" required>
+            <el-input v-model="editingScreening.name" placeholder="策略名称" />
+          </el-form-item>
+          <el-form-item label="策略描述">
+            <el-input v-model="editingScreening.description" type="textarea" :rows="2" placeholder="策略描述" />
+          </el-form-item>
+
+          <el-divider>筛选条件（基本面）</el-divider>
+          <el-row :gutter="16">
+            <el-col :span="12">
+              <el-form-item label="总市值上限(亿)">
+                <el-input-number v-model="editingScreening.filters.total_market_cap_max" :min="0" :precision="0" :controls="false" style="width:100%" />
+              </el-form-item>
+            </el-col>
+            <el-col :span="12">
+              <el-form-item label="总市值下限(亿)">
+                <el-input-number v-model="editingScreening.filters.total_market_cap_min" :min="0" :precision="0" :controls="false" style="width:100%" />
+              </el-form-item>
+            </el-col>
+          </el-row>
+          <el-row :gutter="16">
+            <el-col :span="12">
+              <el-form-item label="流通市值上限(亿)">
+                <el-input-number v-model="editingScreening.filters.circ_market_cap_max" :min="0" :precision="0" :controls="false" style="width:100%" />
+              </el-form-item>
+            </el-col>
+            <el-col :span="12">
+              <el-form-item label="流通市值下限(亿)">
+                <el-input-number v-model="editingScreening.filters.circ_market_cap_min" :min="0" :precision="0" :controls="false" style="width:100%" />
+              </el-form-item>
+            </el-col>
+          </el-row>
+          <el-row :gutter="16">
+            <el-col :span="12">
+              <el-form-item label="PE上限(倍)">
+                <el-input-number v-model="editingScreening.filters.pe_ttm_max" :min="0" :precision="1" :controls="false" style="width:100%" />
+              </el-form-item>
+            </el-col>
+            <el-col :span="12">
+              <el-form-item label="PB上限(倍)">
+                <el-input-number v-model="editingScreening.filters.pb_max" :min="0" :precision="2" :controls="false" style="width:100%" />
+              </el-form-item>
+            </el-col>
+          </el-row>
+          <el-row :gutter="16">
+            <el-col :span="12">
+              <el-form-item label="ROE下限(%)">
+                <el-input-number v-model="editingScreening.filters.roe_min" :min="0" :precision="1" :controls="false" style="width:100%" />
+              </el-form-item>
+            </el-col>
+            <el-col :span="12">
+              <el-form-item label="毛利率下限(%)">
+                <el-input-number v-model="editingScreening.filters.gross_margin_min" :min="0" :precision="1" :controls="false" style="width:100%" />
+              </el-form-item>
+            </el-col>
+          </el-row>
+          <el-row :gutter="16">
+            <el-col :span="12">
+              <el-form-item label="营收增长下限(%)">
+                <el-input-number v-model="editingScreening.filters.revenue_growth_yoy_min" :min="0" :precision="1" :controls="false" style="width:100%" />
+              </el-form-item>
+            </el-col>
+            <el-col :span="12">
+              <el-form-item label="申万一级行业">
+                <el-input v-model="editingScreening.filters.sw_level1" placeholder="如：电子" />
+              </el-form-item>
+            </el-col>
+          </el-row>
+
+          <el-divider>市场范围</el-divider>
+          <el-form-item label="允许市场">
+            <el-checkbox-group v-model="editingScreening.markets">
+              <el-checkbox value="SH">沪市</el-checkbox>
+              <el-checkbox value="SZ">深市</el-checkbox>
+              <el-checkbox value="BJ">北交所</el-checkbox>
+            </el-checkbox-group>
+            <div class="hint" style="margin-left:120px">默认全选，取消勾选即可排除对应市场</div>
+          </el-form-item>
+
+          <el-divider>买入条件（技术信号）</el-divider>
+          <el-form-item label="买入条件">
+            <el-select
+              v-model="editingScreening.buyConditions"
+              multiple
+              filterable
+              allow-create
+              default-first-option
+              placeholder="选择或输入技术信号"
+              style="width:100%"
+            >
+              <el-option label="MACD金叉 (DIF_CROSS_UP_DEA)" value="DIF_CROSS_UP_DEA" />
+              <el-option label="MACD死叉 (DIF_CROSS_DOWN_DEA)" value="DIF_CROSS_DOWN_DEA" />
+              <el-option label="MA5上穿MA10" value="MA5_CROSS_UP_MA10" />
+              <el-option label="MA5下穿MA10" value="MA5_CROSS_DOWN_MA10" />
+              <el-option label="量比>1.5" value="VOLUME_RATIO > 1.5" />
+              <el-option label="量比>2" value="VOLUME_RATIO > 2" />
+              <el-option label="量比>3" value="VOLUME_RATIO > 3" />
+              <el-option label="RSI超卖(<30)" value="RSI < 30" />
+              <el-option label="RSI超买(>70)" value="RSI > 70" />
+              <el-option label="价格>MA5" value="PRICE > MA5" />
+              <el-option label="价格<MA5" value="PRICE < MA5" />
+              <el-option label="MACD>0" value="MACD > 0" />
+              <el-option label="MACD<0" value="MACD < 0" />
+            </el-select>
+            <div class="hint" style="margin-left:120px">可下拉选择，也可手动输入自定义条件</div>
+          </el-form-item>
+        </el-form>
+        <template #footer>
+          <el-button @click="showEditScreeningDialog = false">取消</el-button>
+          <el-button type="primary" @click="saveEditScreening" :loading="savingEditScreening">保存</el-button>
         </template>
       </el-dialog>
 
@@ -727,6 +901,103 @@
           <el-button type="primary" @click="showTestRunResultDialog = false; showTestRunDialog = true" :disabled="testRunning">重新运行</el-button>
         </template>
       </el-dialog>
+
+      <!-- 告警策略创建/编辑对话框 -->
+      <el-dialog v-model="alertStrategyDialogVisible" :title="alertStrategyDialogTitle" width="900px">
+        <el-table :data="alertStrategyList" stripe style="width: 100%" max-height="250">
+          <el-table-column prop="name" label="策略名称" width="150" />
+          <el-table-column label="策略类型" width="120">
+            <template #default="{ row }">{{ formatAlertStrategyType(row.strategy_type) }}</template>
+          </el-table-column>
+          <el-table-column label="方向" width="70">
+            <template #default="{ row }">
+              <el-tag :type="row.action === 'buy' ? 'danger' : 'success'" size="small">{{ row.action === 'buy' ? '买入' : '卖出' }}</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="状态" width="70">
+            <template #default="{ row }">
+              <el-tag :type="row.enabled ? 'success' : 'info'" size="small">{{ row.enabled ? '启用' : '停用' }}</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column prop="cooldown_seconds" label="冷却(秒)" width="90" />
+          <el-table-column label="操作" width="120">
+            <template #default="{ row }">
+              <el-button size="small" @click="editAlertStrategy(row)">编辑</el-button>
+              <el-button size="small" type="danger" @click="deleteAlertStrategy(row.id)">删除</el-button>
+            </template>
+          </el-table-column>
+        </el-table>
+
+        <el-divider />
+        <el-form :model="alertStrategyForm" label-width="100px">
+          <el-form-item label="策略名称"><el-input v-model="alertStrategyForm.name" placeholder="如：突破买入监测" /></el-form-item>
+          <el-form-item label="策略类型">
+            <el-select v-model="alertStrategyForm.strategy_type" placeholder="选择策略类型">
+              <el-option label="价格监测" value="price_monitor" />
+              <el-option label="涨跌幅监测" value="change_pct_monitor" />
+              <el-option label="交易量监测" value="volume_monitor" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="操作方向">
+            <el-radio-group v-model="alertStrategyForm.action">
+              <el-radio label="buy">买入</el-radio>
+              <el-radio label="sell">卖出</el-radio>
+            </el-radio-group>
+          </el-form-item>
+          <el-form-item label="目标股票">
+            <el-radio-group v-model="alertStrategyForm.target_mode">
+              <el-radio label="all">全部 watchlist</el-radio>
+              <el-radio label="specific">指定代码</el-radio>
+            </el-radio-group>
+          </el-form-item>
+          <el-form-item v-if="alertStrategyForm.target_mode === 'specific'" label="股票代码">
+            <el-input v-model="alertStrategyForm.target_stocks_str" placeholder="多个代码用逗号分隔" />
+          </el-form-item>
+          <el-form-item label="冷却时间"><el-input-number v-model="alertStrategyForm.cooldown_seconds" :min="60" :max="3600" /> 秒</el-form-item>
+
+          <template v-if="alertStrategyForm.strategy_type === 'price_monitor'">
+            <el-form-item label="价格方向">
+              <el-select v-model="alertStrategyForm.condition_direction">
+                <el-option label="突破（高于）" value="above" />
+                <el-option label="跌破（低于）" value="below" />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="目标价格">
+              <el-input-number v-model="alertStrategyForm.condition_target_price" :precision="2" :min="0" />
+            </el-form-item>
+          </template>
+
+          <template v-if="alertStrategyForm.strategy_type === 'change_pct_monitor'">
+            <el-form-item label="涨跌方向">
+              <el-select v-model="alertStrategyForm.condition_direction">
+                <el-option label="上涨超过" value="up" />
+                <el-option label="下跌超过" value="down" />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="阈值(%)">
+              <el-input-number v-model="alertStrategyForm.condition_threshold" :precision="2" :min="0" :max="20" />
+            </el-form-item>
+          </template>
+
+          <template v-if="alertStrategyForm.strategy_type === 'volume_monitor'">
+            <el-form-item label="监测模式">
+              <el-select v-model="alertStrategyForm.condition_mode">
+                <el-option label="量比模式" value="ratio" />
+                <el-option label="绝对量模式" value="absolute" />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="阈值">
+              <el-input-number v-model="alertStrategyForm.condition_threshold" :precision="2" :min="0" />
+            </el-form-item>
+          </template>
+
+          <el-form-item label="启用"><el-switch v-model="alertStrategyForm.enabled" :active-value="1" :inactive-value="0" /></el-form-item>
+        </el-form>
+        <template #footer>
+          <el-button @click="alertStrategyDialogVisible = false">取消</el-button>
+          <el-button type="primary" @click="saveAlertStrategy">保存</el-button>
+        </template>
+      </el-dialog>
     </el-main>
   </div>
 </template>
@@ -776,6 +1047,12 @@ const loadingScreening = ref(false)
 const showCreateScreeningDialog = ref(false)
 const showScreeningDetailDialog = ref(false)
 const selectedScreening = ref(null)
+const showEditScreeningDialog = ref(false)
+const savingEditScreening = ref(false)
+const editingScreening = reactive({
+  id: null, name: '', description: '',
+  filters: {}, markets: [], buyConditions: []
+})
 const showCreateCodeDialog = ref(false)
 const editingCodeId = ref(null)
 const validatingCode = ref(false)
@@ -858,6 +1135,159 @@ const filteredTradingStrategies = computed(() => {
   )
 })
 
+// 告警策略 CRUD
+const alertStrategyDialogVisible = ref(false)
+const alertStrategyList = ref([])
+const loadingAlertStrategies = ref(false)
+const alertStrategyForm = reactive({
+  id: null,
+  name: '',
+  strategy_type: 'price_monitor',
+  action: 'buy',
+  target_mode: 'all',
+  target_stocks_str: '',
+  cooldown_seconds: 300,
+  condition_direction: 'above',
+  condition_target_price: 0,
+  condition_threshold: 0,
+  condition_mode: 'ratio',
+  enabled: 1,
+})
+
+const alertStrategyDialogTitle = computed(() => alertStrategyForm.id ? '编辑告警策略' : '新建告警策略')
+
+const showAlertStrategyDialog = async () => {
+  alertStrategyForm.id = null
+  alertStrategyForm.name = ''
+  alertStrategyForm.strategy_type = 'price_monitor'
+  alertStrategyForm.action = 'buy'
+  alertStrategyForm.target_mode = 'all'
+  alertStrategyForm.target_stocks_str = ''
+  alertStrategyForm.cooldown_seconds = 300
+  alertStrategyForm.condition_direction = 'above'
+  alertStrategyForm.condition_target_price = 0
+  alertStrategyForm.condition_threshold = 0
+  alertStrategyForm.condition_mode = 'ratio'
+  alertStrategyForm.enabled = 1
+  await loadAlertStrategies()
+  alertStrategyDialogVisible.value = true
+}
+
+const saveAlertStrategy = async () => {
+  if (!alertStrategyForm.name) {
+    ElMessage.warning('请输入策略名称')
+    return
+  }
+
+  let conditions = []
+  if (alertStrategyForm.strategy_type === 'price_monitor') {
+    conditions = [{ type: 'price', direction: alertStrategyForm.condition_direction, target_price: alertStrategyForm.condition_target_price }]
+  } else if (alertStrategyForm.strategy_type === 'change_pct_monitor') {
+    conditions = [{ type: 'change_pct', direction: alertStrategyForm.condition_direction, threshold: alertStrategyForm.condition_threshold }]
+  } else if (alertStrategyForm.strategy_type === 'volume_monitor') {
+    conditions = [{ type: 'volume', mode: alertStrategyForm.condition_mode, threshold: alertStrategyForm.condition_threshold }]
+  }
+
+  const target_stocks = alertStrategyForm.target_mode === 'specific'
+    ? alertStrategyForm.target_stocks_str.split(',').map(s => s.trim()).filter(s => s)
+    : null
+
+  const payload = {
+    name: alertStrategyForm.name,
+    strategy_type: alertStrategyForm.strategy_type,
+    conditions: JSON.stringify(conditions),
+    action: alertStrategyForm.action,
+    target_stocks: target_stocks ? JSON.stringify(target_stocks) : null,
+    cooldown_seconds: alertStrategyForm.cooldown_seconds,
+    enabled: alertStrategyForm.enabled,
+  }
+
+  try {
+    const url = alertStrategyForm.id
+      ? `/api/v1/ui/${currentAccountId.value}/trading-strategies/${alertStrategyForm.id}`
+      : `/api/v1/ui/${currentAccountId.value}/trading-strategies`
+    const method = alertStrategyForm.id ? 'PUT' : 'POST'
+    const resp = await fetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })
+    const data = await resp.json()
+    if (data.success) {
+      ElMessage.success(alertStrategyForm.id ? '策略已更新' : '策略已创建')
+      alertStrategyDialogVisible.value = false
+      loadAlertStrategies()
+    } else {
+      ElMessage.error(data.message || '保存失败')
+    }
+  } catch (error) {
+    ElMessage.error('保存失败: ' + error.message)
+  }
+}
+
+const loadAlertStrategies = async () => {
+  loadingAlertStrategies.value = true
+  try {
+    const resp = await fetch(`/api/v1/ui/${currentAccountId.value}/trading-strategies`)
+    const data = await resp.json()
+    alertStrategyList.value = data.strategies || []
+  } catch (error) {
+    console.error('加载告警策略列表失败:', error)
+  } finally {
+    loadingAlertStrategies.value = false
+  }
+}
+
+const formatAlertStrategyType = (type) => {
+  const map = { price_monitor: '价格监测', change_pct_monitor: '涨跌幅监测', volume_monitor: '交易量监测' }
+  return map[type] || type
+}
+
+const editAlertStrategy = (row) => {
+  alertStrategyForm.id = row.id
+  alertStrategyForm.name = row.name
+  alertStrategyForm.strategy_type = row.strategy_type
+  alertStrategyForm.action = row.action
+  alertStrategyForm.target_mode = row.target_stocks ? 'specific' : 'all'
+  try {
+    const stocks = JSON.parse(row.target_stocks || 'null')
+    alertStrategyForm.target_stocks_str = Array.isArray(stocks) ? stocks.join(',') : ''
+  } catch {
+    alertStrategyForm.target_stocks_str = ''
+  }
+  alertStrategyForm.cooldown_seconds = row.cooldown_seconds || 300
+  alertStrategyForm.enabled = row.enabled
+  try {
+    const conditions = JSON.parse(row.conditions || '[]')
+    const cond = conditions[0] || {}
+    if (cond.type === 'price') {
+      alertStrategyForm.condition_direction = cond.direction || 'above'
+      alertStrategyForm.condition_target_price = cond.target_price || 0
+    } else if (cond.type === 'change_pct') {
+      alertStrategyForm.condition_direction = cond.direction || 'up'
+      alertStrategyForm.condition_threshold = cond.threshold || 0
+    } else if (cond.type === 'volume') {
+      alertStrategyForm.condition_mode = cond.mode || 'ratio'
+      alertStrategyForm.condition_threshold = cond.threshold || 0
+    }
+  } catch {}
+  alertStrategyDialogVisible.value = true
+}
+
+const deleteAlertStrategy = async (id) => {
+  try {
+    await ElMessageBox.confirm('确定删除该策略？', '确认删除', { type: 'warning' })
+    const resp = await fetch(`/api/v1/ui/${currentAccountId.value}/trading-strategies/${id}`, { method: 'DELETE' })
+    const data = await resp.json()
+    if (data.success) {
+      ElMessage.success('策略已删除')
+      loadAlertStrategies()
+    } else {
+      ElMessage.error(data.message || '删除失败')
+    }
+  } catch (error) {
+    if (error !== 'cancel') {
+      ElMessage.error('删除失败: ' + error.message)
+    }
+  }
+}
+
 // 加载所有数据
 const loadAllData = async () => {
   await loadPositionStrategy()
@@ -865,6 +1295,7 @@ const loadAllData = async () => {
   await loadScreeningStrategies()
   await loadCodeStrategies()
   await loadTradingStrategies()
+  await loadAlertStrategies()
   await loadCandidateGroups()
 }
 
@@ -1331,6 +1762,88 @@ const viewScreeningStrategy = (row) => {
   showScreeningDetailDialog.value = true
 }
 
+// 编辑选股策略（名称/描述/条件）
+const editScreeningStrategy = (row) => {
+  editingScreening.id = row.id
+  editingScreening.name = row.name
+  editingScreening.description = row.description || ''
+
+  // 解析配置
+  const cfg = parseConfig(row.config) || {}
+  const filters = cfg.stock_filters || {}
+
+  // 提取字段条件到表单
+  editingScreening.filters = { ...filters }
+
+  // 市场范围
+  const markets = cfg.markets || ['SH', 'SZ', 'BJ']
+  editingScreening.markets = markets
+
+  // 买入条件（字符串数组）
+  const buyConds = cfg.buy_conditions || []
+  editingScreening.buyConditions = Array.isArray(buyConds)
+    ? buyConds.map(c => typeof c === 'string' ? c : JSON.stringify(c))
+    : []
+
+  showEditScreeningDialog.value = true
+}
+
+// 保存编辑后的选股策略
+const saveEditScreening = async () => {
+  if (!editingScreening.name) {
+    ElMessage.warning('策略名称不能为空')
+    return
+  }
+
+  // 重建 stock_filters（从表单值中过滤出非空的）
+  const stockFilters = {}
+  for (const [key, val] of Object.entries(editingScreening.filters)) {
+    if (val !== null && val !== undefined && val !== '') {
+      stockFilters[key] = val
+    }
+  }
+  // 如果有任何筛选条件，包装为逻辑组
+  const stockFiltersNode = Object.keys(stockFilters).length > 0
+    ? { logic: 'AND', conditions: Object.entries(stockFilters).map(([field, value]) => ({ field, value })) }
+    : {}
+
+  // 市场范围：如果三个全选，不设置 markets 字段（默认全市场）
+  const allMarkets = ['SH', 'SZ', 'BJ']
+  const markets = editingScreening.markets.length === 3 ? undefined : editingScreening.markets
+
+  // 构建 config
+  const config = {
+    stock_filters: stockFiltersNode,
+    buy_conditions: editingScreening.buyConditions,
+  }
+  if (markets) config.markets = markets
+
+  savingEditScreening.value = true
+  try {
+    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/strategies/${editingScreening.id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: editingScreening.name,
+        description: editingScreening.description,
+        config
+      })
+    })
+    const data = await res.json()
+    if (data.success) {
+      ElMessage.success('策略已更新')
+      showEditScreeningDialog.value = false
+      await loadScreeningStrategies()
+    } else {
+      ElMessage.error(data.detail || '更新失败')
+    }
+  } catch (error) {
+    ElMessage.error('更新失败：' + error.message)
+  } finally {
+    savingEditScreening.value = false
+  }
+}
+
 // 激活/停用选股策略
 const toggleScreeningStrategy = async (row) => {
   try {
@@ -1361,6 +1874,10 @@ const deleteScreeningStrategy = async (row) => {
     if (data.success) {
       ElMessage.success('策略已删除')
       await loadScreeningStrategies()
+      // 代码型策略同时刷新代码策略列表
+      if (row.strategy_type === 'code' || row.code_scope !== undefined) {
+        await loadCodeStrategies()
+      }
     }
   } catch (error) {
     if (error !== 'cancel') {

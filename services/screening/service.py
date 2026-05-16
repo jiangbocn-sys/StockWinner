@@ -26,6 +26,20 @@ from .condition_parser import get_condition_parser, normalize_conditions
 KLINE_DB = Path(__file__).parent.parent.parent / "data" / "kline.db"
 
 
+import sqlite3
+
+def _load_stock_names() -> Dict[str, str]:
+    """从 kline.db 的 stock_base_info 表批量加载股票名称"""
+    try:
+        conn = sqlite3.connect(str(KLINE_DB), timeout=30)
+        cursor = conn.cursor()
+        cursor.execute("SELECT stock_code, stock_name FROM stock_base_info")
+        names = {row[0]: row[1].strip() for row in cursor.fetchall()}
+        conn.close()
+        return names
+    except Exception:
+        return {}
+
 class ScreeningService:
     """选股服务"""
 
@@ -305,6 +319,12 @@ class ScreeningService:
         stock_codes = factor_df.index.tolist()
         print(f"[Screening] 从数据库获取到 {len(stock_codes)} 只股票的因子数据")
 
+        # 5.0 市场过滤
+        markets = config.get("markets")
+        if markets:
+            stock_codes = [c for c in stock_codes if c.split(".")[-1] in markets]
+            print(f"[Screening] 市场过滤后剩余 {len(stock_codes)} 只股票（允许市场: {markets}）")
+
         # 5.1 市值过滤（在因子筛选之前）
         # 支持新旧两种格式：
         # 新格式：{"logic": "AND", "conditions": [{"field": "total_market_cap_max", "value": 50}]}
@@ -397,6 +417,7 @@ class ScreeningService:
         self._progress["current_phase"] = "scanning"
 
         matched_count = 0
+        stock_name_map = _load_stock_names()
         for stock_code in stock_codes:
             # 更新进度
             self._progress["processed"] += 1
@@ -465,7 +486,7 @@ class ScreeningService:
                 current_price = indicators.get('price', indicators.get('PRICE', 0))
                 candidates.append({
                     "stock_code": stock_code,
-                    "stock_name": stock_code,
+                    "stock_name": stock_name_map.get(stock_code, stock_code),
                     "reason": parser.format_condition(buy_conditions_normalized) if is_matched and total_conditions > 0 else "基础筛选",
                     "current_price": current_price,
                     "match_score": match_score
@@ -502,7 +523,13 @@ class ScreeningService:
         stock_codes = local_service.get_all_stocks()
         if not stock_codes:
             raise Exception("本地数据库为空，请先下载 K 线数据")
-        
+
+        # 市场过滤
+        markets = config.get("markets")
+        if markets:
+            stock_codes = [c for c in stock_codes if c.split(".")[-1] in markets]
+            print(f"[Screening] 市场过滤后剩余 {len(stock_codes)} 只股票（允许市场: {markets}）")
+
         print(f"[Screening] 从本地数据库获取到 {len(stock_codes)} 只股票")
         self._progress["total_stocks"] = len(stock_codes)
         self._progress["processed"] = 0
@@ -521,6 +548,7 @@ class ScreeningService:
         
         # 遍历股票列表
         matched_count = 0
+        stock_name_map = _load_stock_names()
         for stock_code in stock_codes:
             # 更新进度
             self._progress["processed"] += 1
@@ -580,7 +608,7 @@ class ScreeningService:
             if is_matched or match_score >= match_score_threshold or not buy_conditions:
                 candidates.append({
                     "stock_code": stock_code,
-                    "stock_name": stock_code,  # 本地数据暂无名称
+                    "stock_name": stock_name_map.get(stock_code, stock_code),  # 本地数据暂无名称
                     "reason": parser.format_condition(buy_conditions_normalized) if is_matched else "基础筛选",
                     "current_price": current_price,
                     "match_score": match_score
@@ -623,6 +651,13 @@ class ScreeningService:
             self._progress["total_stocks"] = len(stock_list)
             self._progress["processed"] = 0
             self._progress["matched"] = 0
+
+            # 市场过滤
+            markets = config.get("markets")
+            if markets:
+                stock_list = [s for s in stock_list if s.get("code", "").split(".")[-1] in markets]
+                print(f"[Screening] 市场过滤后剩余 {len(stock_list)} 只股票（允许市场: {markets}）")
+                self._progress["total_stocks"] = len(stock_list)
         except Exception as e:
             raise Exception(f"获取股票列表失败：{str(e)} - SDK 可能未安装或连接失败")
 

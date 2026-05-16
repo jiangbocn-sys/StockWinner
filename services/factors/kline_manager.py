@@ -283,6 +283,22 @@ class KlineManager:
         result = {row[0]: row[1] for row in cursor.fetchall()}
         return result
 
+    def get_weekly_earliest(self) -> Dict[str, str]:
+        """获取每只股票已有周K线的最早 week_end_date。
+
+        Returns:
+            {stock_code: earliest_week_end_date}
+        """
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT stock_code, MIN(week_end_date)
+            FROM weekly_kline_data
+            GROUP BY stock_code
+        """)
+        result = {row[0]: row[1] for row in cursor.fetchall()}
+        return result
+
     def get_weekly_data(
         self, stock_code: str, limit: Optional[int] = None
     ) -> pd.DataFrame:
@@ -457,13 +473,14 @@ class KlineManager:
         """
         保存单只股票的周K线数据。
 
-        SDK 返回的周线不含 trade_date，需通过个股交易周日历映射。
+        使用 SDK 返回的 trade_date 直接计算周边界（周一至周五）。
+        不再依赖预构建日历，避免日历覆盖不足导致数据丢失。
 
         Args:
             stock_code: 股票代码
             stock_name: 股票名称
             data: SDK 返回的周K线 DataFrame
-            week_calendar: [(iso_year, iso_week, week_start, week_end), ...]
+            week_calendar: 已废弃，保留兼容性
             skip_existing_before: 跳过此日期之前的周（增量更新用）
 
         Returns:
@@ -477,36 +494,38 @@ class KlineManager:
         if df.empty:
             return 0
 
-        if week_calendar is None:
-            week_calendar = self.build_stock_week_calendar(stock_code)
-
         conn = self._conn()
         cursor = conn.cursor()
         saved = 0
-        bar_index = 0
-        cal_index = 0
-        total_bars = len(df)
-
-        if week_calendar:
-            if skip_existing_before:
-                for i, (iso_y, iso_w, ws, we) in enumerate(week_calendar):
-                    if we > skip_existing_before:
-                        cal_index = i
-                        break
-                    bar_index += 1
 
         for _, row in df.iterrows():
-            if bar_index >= total_bars:
-                break
+            # 从 trade_date 获取周结束日期（ISO周五）
+            trade_date_raw = row.get('trade_date', '')
+            if not trade_date_raw or trade_date_raw == '':
+                continue
+
+            week_ref_str = self._normalize_date(trade_date_raw)
+            if not week_ref_str:
+                continue
+
+            # SDK 周线的 trade_date 通常是该周第一个交易日（可能为周一），
+            # 需要计算该 ISO 周的周五作为 week_end_date
+            try:
+                ref_dt = datetime.strptime(week_ref_str, '%Y-%m-%d')
+                iso_y, iso_w, _ = ref_dt.isocalendar()
+                # ISO 周五 = ISO Monday + 4 days
+                monday_dt = datetime.fromisocalendar(iso_y, iso_w, 1)
+                friday_dt = monday_dt + timedelta(days=4)
+                week_start_str = monday_dt.strftime('%Y-%m-%d')
+                week_end_str = friday_dt.strftime('%Y-%m-%d')
+            except (ValueError, TypeError):
+                continue
+
+            # 跳过已有数据
+            if skip_existing_before and week_end_str <= skip_existing_before:
+                continue
 
             try:
-                if week_calendar and cal_index < len(week_calendar):
-                    _, _, week_start_str, week_end_str = week_calendar[cal_index]
-                    cal_index += 1
-                else:
-                    bar_index += 1
-                    continue
-
                 cursor.execute("""
                     INSERT OR REPLACE INTO weekly_kline_data
                     (stock_code, stock_name, week_start_date, week_end_date,
@@ -522,9 +541,7 @@ class KlineManager:
                     float(row.get('amount', 0)) if not pd.isna(row.get('amount')) else None
                 ))
                 saved += 1
-                bar_index += 1
             except Exception:
-                bar_index += 1
                 continue
 
         conn.commit()

@@ -555,72 +555,56 @@ async def submit_manual_order(
                 "message": f"可卖数量不足（持仓可卖 {position['available_quantity']} 股，委托 {quantity} 股）",
             }
 
-    # 创建 trading_signals 记录，由监控程序扫描执行
-    signal_id = await db.insert("trading_signals", {
-        "account_id": account_id,
-        "strategy_id": None,
-        "stock_code": normalized_code,
-        "stock_name": stock_name or normalized_code,
-        "signal_type": trade_type,
-        "price": price,
-        "target_quantity": quantity,
-        "status": "pending",
-        "order_type": order_type,
-        "created_at": format_china_time(),
-        "executed_at": None,
-    })
-
+    # 创建/更新 watchlist 记录，状态为 pending，由监控程序扫描执行
     watchlist_action = "existing"  # existing / added / skipped
 
-    # 如果是买入单，同时更新/创建 watchlist 记录（供止损止盈监控）
-    if trade_type == "buy":
-        # 手动下单使用 'watching' 状态，避免被 _monitor_watchlist 当作策略选出的 pending 股票再次买入
-        existing = await db.fetchone(
-            "SELECT id FROM watchlist WHERE account_id = ? AND stock_code = ? AND status IN ('pending', 'watching', 'bought')",
-            (account_id, normalized_code)
-        )
-        if existing:
-            # 已在 watchlist 中，更新价格和数量
-            await db.update(
-                "watchlist",
-                {"buy_price": price, "target_quantity": quantity, "status": "watching", "updated_at": format_china_time()},
-                "id = ?",
-                (existing['id'],)
-            )
-        else:
-            # 不在 watchlist 中，自动创建「手动下单」分组并加入
-            existing_group = await db.fetchone(
-                "SELECT id FROM candidate_groups WHERE account_id = ? AND name = '手动下单' AND group_type = 'manual'",
-                (account_id,)
-            )
-            if existing_group:
-                group_id = existing_group['id']
-            else:
-                group_id = await db.insert("candidate_groups", {
-                    "account_id": account_id,
-                    "name": "手动下单",
-                    "group_type": "manual",
-                    "screening_strategy_id": None,
-                })
+    # 只检查"手动下单"分组中是否已有该股票，不跨分组更新
+    existing_group = await db.fetchone(
+        "SELECT id FROM candidate_groups WHERE account_id = ? AND name = '手动下单' AND group_type = 'manual'",
+        (account_id,)
+    )
+    if existing_group:
+        manual_group_id = existing_group['id']
+    else:
+        manual_group_id = await db.insert("candidate_groups", {
+            "account_id": account_id,
+            "name": "手动下单",
+            "group_type": "manual",
+            "screening_strategy_id": None,
+        })
 
-            await db.insert("watchlist", {
-                "account_id": account_id,
-                "stock_code": normalized_code,
-                "stock_name": stock_name or normalized_code,
-                "buy_price": price,
-                "target_quantity": quantity,
-                "status": "watching",
-                "source_type": "manual",
-                "group_id": group_id,
-                "created_at": format_china_time(),
-                "updated_at": format_china_time(),
-            })
-            watchlist_action = "added"
+    # 检查"手动下单"分组中是否已有该股票
+    existing = await db.fetchone(
+        "SELECT id FROM watchlist WHERE account_id = ? AND stock_code = ? AND group_id = ? AND status IN ('pending', 'watching', 'bought')",
+        (account_id, normalized_code, manual_group_id)
+    )
+    if existing:
+        # 已在"手动下单"分组中，更新价格和数量
+        await db.update(
+            "watchlist",
+            {"buy_price": price, "target_quantity": quantity, "status": "pending", "updated_at": format_china_time()},
+            "id = ?",
+            (existing['id'],)
+        )
+    else:
+        # 不在"手动下单"分组中，创建新记录
+        await db.insert("watchlist", {
+            "account_id": account_id,
+            "stock_code": normalized_code,
+            "stock_name": stock_name or normalized_code,
+            "buy_price": price,
+            "target_quantity": quantity,
+            "status": "pending",
+            "source_type": "manual",
+            "group_id": manual_group_id,
+            "created_at": format_china_time(),
+            "updated_at": format_china_time(),
+        })
+        watchlist_action = "added"
 
     result = {
         "success": True,
-        "message": "委托单已提交，等待监控程序执行",
-        "signal_id": signal_id,
+        "message": "已添加到 watchlist，等待监控程序执行",
         "stock_code": normalized_code,
         "price": price,
         "quantity": quantity,

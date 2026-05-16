@@ -73,7 +73,9 @@
         v-model="dsaDialogVisible"
         :title="`DSA 分析 - ${dsaStock.stock_name}(${dsaStock.stock_code})`"
         width="700px"
-        destroy-on-close
+        :close-on-click-modal="false"
+        :close-on-press-escape="false"
+        :show-close="false"
       >
         <div v-if="dsaAnalyzing" class="dsa-loading">
           <el-icon class="is-loading" size="40"><Loading /></el-icon>
@@ -109,6 +111,9 @@
         <div v-else-if="dsaError" class="dsa-error">
           <el-alert :title="dsaError" type="error" :closable="false" />
         </div>
+        <template #footer>
+          <el-button type="primary" @click="dsaDialogVisible = false">关闭</el-button>
+        </template>
       </el-dialog>
     </el-main>
   </div>
@@ -137,24 +142,6 @@ const dsaAnalyzing = ref(false)
 const dsaStock = ref({ stock_code: '', stock_name: '' })
 const dsaResult = ref(null)
 const dsaError = ref('')
-
-const loadPositions = async () => {
-  try {
-    const response = await fetch(`/api/v1/ui/${currentAccountId.value}/positions`)
-    const data = await response.json()
-
-    positions.value = data.positions || []
-    availableCash.value = data.available_cash || 0
-
-    // 计算汇总数据
-    marketValue.value = positions.value.reduce((sum, p) => sum + (p.market_value || 0), 0)
-    totalPnl.value = positions.value.reduce((sum, p) => sum + (p.profit_loss || 0), 0)
-    totalAssets.value = marketValue.value + availableCash.value
-    pnlPercent.value = (totalPnl.value / (totalAssets.value - availableCash.value)) * 100 || 0
-  } catch (error) {
-    console.error('加载持仓数据失败:', error)
-  }
-}
 
 const refreshing = ref(false)
 const refreshPrices = async () => {
@@ -220,7 +207,7 @@ const handleDsaAnalysis = async (row) => {
 }
 
 onMounted(async () => {
-  await loadPositions()
+  await refreshPrices()
 })
 </script>
 

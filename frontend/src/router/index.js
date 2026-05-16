@@ -72,6 +72,12 @@ const routes = [
     meta: { title: '系统设置' }
   },
   {
+    path: '/backtest',
+    name: 'Backtest',
+    component: () => import('../views/Backtest.vue'),
+    meta: { title: '策略回测' }
+  },
+  {
     path: '/change-password',
     name: 'ChangePassword',
     component: () => import('../views/ChangePassword.vue'),
