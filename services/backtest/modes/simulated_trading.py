@@ -163,7 +163,7 @@ class SimulatedTradingEngine:
         # 2. 检查持仓卖出信号
         self._check_sell_signals(trade_date, prices)
 
-        # 3. 执行选股买入信号
+        # 3. 执行选股买入信号（优化：仓位已满且无卖出时跳过扫描）
         self._check_buy_signals(trade_date, prices)
 
         # 4. 更新持仓标记价格（移动止盈用）
@@ -312,6 +312,10 @@ class SimulatedTradingEngine:
 
     def _check_buy_signals(self, trade_date: str, prices: Dict[str, float]):
         """执行选股买入信号"""
+        # 优化：仓位已满且无卖出时跳过全池扫描（最耗时的步骤）
+        if not self._has_buy_capacity():
+            return
+
         # 代码型策略不需要 buy_conditions，直接走信号筛选
         if not self.is_code_strategy and not self.buy_conditions:
             return
@@ -337,6 +341,29 @@ class SimulatedTradingEngine:
                 stock_name=candidate.get("stock_name", ""),
                 prev_close=prev_close,
             )
+
+    def _has_buy_capacity(self) -> bool:
+        """判断是否有买入空间（资金 + 仓位数量）"""
+        cash = self.execution.get_cash()
+        limits = self.execution.position_limits
+        total_value = self.execution.get_total_value()
+
+        # 资金检查：至少能买 100 股（按最低 1 元估算）
+        if cash < 100 * 1.01:  # 100 股 + 少量手续费
+            return False
+
+        # 总仓位检查
+        positions_value = total_value - cash
+        if limits.max_total_position_pct > 0:
+            if positions_value >= total_value * limits.max_total_position_pct:
+                return False
+
+        # 持仓数量检查（估算：如果单只最小市值已满，无法再开新仓）
+        max_positions = int(1.0 / limits.max_single_position_pct) if limits.max_single_position_pct > 0 else 999
+        if self.execution.get_position_count() >= max_positions:
+            return False
+
+        return True
 
     def _screen_candidates(self, trade_date: str, prices: Dict[str, float]) -> List[Dict]:
         """从股票池中筛选满足买入条件的候选股票"""
