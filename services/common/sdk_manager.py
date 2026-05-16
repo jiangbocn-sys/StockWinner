@@ -16,6 +16,8 @@ SDK 登录管理器
 """
 
 import time
+from collections import deque
+from threading import Lock
 from typing import Optional, Dict
 import pandas as pd
 
@@ -36,10 +38,26 @@ class SDKManager:
     _market_data_instance = None
     _calendar = None
 
+    # SDK 调用统计（线程安全）
+    _sdk_metrics_lock: Optional[Lock] = None
+    _sdk_total_calls = 0
+    _sdk_success_calls = 0
+    _sdk_total_rows = 0
+    _sdk_call_log: Optional[deque] = None  # (timestamp, method, row_count, success)
+
     def __new__(cls):
         if cls._instance is None:
             cls._instance = super().__new__(cls)
         return cls._instance
+
+    def __init__(self):
+        # 延迟初始化统计字段，避免跨实例重复初始化
+        if SDKManager._sdk_metrics_lock is None:
+            SDKManager._sdk_metrics_lock = Lock()
+            SDKManager._sdk_total_calls = 0
+            SDKManager._sdk_success_calls = 0
+            SDKManager._sdk_total_rows = 0
+            SDKManager._sdk_call_log = deque(maxlen=200)
 
     @classmethod
     def get_instance(cls) -> 'SDKManager':
@@ -56,6 +74,70 @@ class SDKManager:
         """获取底层连接管理器"""
         from services.common.sdk_connection_manager import get_connection_manager
         return get_connection_manager()
+
+    def _record_sdk_call(self, method: str, row_count: int = 0, success: bool = True):
+        """记录一次 SDK 调用（线程安全）"""
+        with SDKManager._sdk_metrics_lock:
+            SDKManager._sdk_total_calls += 1
+            if success:
+                SDKManager._sdk_success_calls += 1
+            SDKManager._sdk_total_rows += row_count
+            if SDKManager._sdk_call_log is not None:
+                SDKManager._sdk_call_log.append((time.time(), method, row_count, success))
+
+    @staticmethod
+    def _count_result_rows(result) -> int:
+        """估算 SDK 返回结果的行数"""
+        if isinstance(result, pd.DataFrame):
+            return len(result)
+        if isinstance(result, dict):
+            total = 0
+            for v in result.values():
+                if isinstance(v, pd.DataFrame):
+                    total += len(v)
+            return total
+        if isinstance(result, list):
+            return len(result)
+        return 0
+
+    def get_sdk_metrics(self) -> Dict:
+        """
+        获取 SDK 调用统计。
+        返回 session 累计 + 最近 60 秒滑动窗口的调用次数/行数/成功率/方法分解。
+        """
+        now = time.time()
+        with SDKManager._sdk_metrics_lock:
+            recent_calls = [
+                entry for entry in (SDKManager._sdk_call_log or [])
+                if now - entry[0] <= 60
+            ]
+            recent_count = len(recent_calls)
+            recent_rows = sum(e[2] for e in recent_calls)
+            recent_success = sum(1 for e in recent_calls if e[3])
+            recent_rate = round(recent_success / recent_count * 100, 1) if recent_count > 0 else 0
+
+            method_counts: Dict[str, int] = {}
+            for _, method, _, _ in recent_calls:
+                method_counts[method] = method_counts.get(method, 0) + 1
+            active_methods = sorted(method_counts.keys())
+
+            session_total = SDKManager._sdk_total_calls
+            session_success = SDKManager._sdk_success_calls
+            session_rows = SDKManager._sdk_total_rows
+
+        return {
+            "recent_60s": {
+                "calls": recent_count,
+                "rows": recent_rows,
+                "success_rate": recent_rate,
+                "active_methods": active_methods,
+            },
+            "session": {
+                "total_calls": session_total,
+                "success_calls": session_success,
+                "total_rows": session_rows,
+            },
+        }
 
     def connect(self) -> bool:
         """确保 SDK 连接可用（委托给连接管理器）"""
@@ -159,6 +241,7 @@ class SDKManager:
             result = info.get_equity_structure(stock_codes, is_local=False)
             duration_ms = (time.monotonic() - start) * 1000
             logger.log_sdk_call("get_equity_structure", duration_ms, "download", "success", stock_count=len(stock_codes) if stock_codes else 0)
+            self._record_sdk_call("get_equity_structure", self._count_result_rows(result), True)
             if isinstance(result, dict):
                 dfs = [df for df in result.values() if isinstance(df, pd.DataFrame)]
                 if dfs:
@@ -185,6 +268,7 @@ class SDKManager:
             result = info.get_income(stock_codes, is_local=False)
             duration_ms = (time.monotonic() - start) * 1000
             logger.log_sdk_call("get_income_statement", duration_ms, "download", "success", stock_count=len(stock_codes) if stock_codes else 0)
+            self._record_sdk_call("get_income_statement", self._count_result_rows(result), True)
             if isinstance(result, dict):
                 dfs = [df for df in result.values() if isinstance(df, pd.DataFrame)]
                 if dfs:
@@ -211,6 +295,7 @@ class SDKManager:
             result = info.get_balance_sheet(stock_codes, is_local=False)
             duration_ms = (time.monotonic() - start) * 1000
             logger.log_sdk_call("get_balance_sheet", duration_ms, "download", "success", stock_count=len(stock_codes) if stock_codes else 0)
+            self._record_sdk_call("get_balance_sheet", self._count_result_rows(result), True)
             if isinstance(result, dict):
                 dfs = [df for df in result.values() if isinstance(df, pd.DataFrame)]
                 if dfs:
@@ -237,6 +322,7 @@ class SDKManager:
             result = info.get_cash_flow(stock_codes, is_local=False)
             duration_ms = (time.monotonic() - start) * 1000
             logger.log_sdk_call("get_cash_flow_statement", duration_ms, "download", "success", stock_count=len(stock_codes) if stock_codes else 0)
+            self._record_sdk_call("get_cash_flow_statement", self._count_result_rows(result), True)
             if isinstance(result, dict):
                 dfs = [df for df in result.values() if isinstance(df, pd.DataFrame)]
                 if dfs:
@@ -263,6 +349,7 @@ class SDKManager:
             result = info.get_industry_base_info(is_local=False)
             duration_ms = (time.monotonic() - start) * 1000
             logger.log_sdk_call("get_industry_base_info", duration_ms, "download", "success")
+            self._record_sdk_call("get_industry_base_info", self._count_result_rows(result), True)
             if isinstance(result, dict):
                 dfs = [df for df in result.values() if isinstance(df, pd.DataFrame)]
                 if dfs:
@@ -289,6 +376,7 @@ class SDKManager:
             result = base_data.get_code_info(security_type=security_type)
             duration_ms = (time.monotonic() - start) * 1000
             logger.log_sdk_call("get_code_info", duration_ms, "query", "success")
+            self._record_sdk_call("get_code_info", self._count_result_rows(result), True)
             if isinstance(result, pd.DataFrame):
                 return result
             return pd.DataFrame()
@@ -311,6 +399,7 @@ class SDKManager:
             result = base_data.get_code_list(security_type=security_type)
             duration_ms = (time.monotonic() - start) * 1000
             logger.log_sdk_call("get_code_list", duration_ms, "query", "success")
+            self._record_sdk_call("get_code_list", self._count_result_rows(result), True)
             if isinstance(result, list):
                 return result
             return []
@@ -378,6 +467,7 @@ class SDKManager:
             )
             duration_ms = (time.monotonic() - start) * 1000
             logger.log_sdk_call("query_kline", duration_ms, task_type, "success", stock_count=stock_count, timeout=timeout)
+            self._record_sdk_call("query_kline", self._count_result_rows(result), True)
             return result if isinstance(result, dict) else {}
         except Exception as e:
             duration_ms = (time.monotonic() - start) * 1000
@@ -411,6 +501,7 @@ class SDKManager:
             )
             duration_ms = (time.monotonic() - start) * 1000
             logger.log_sdk_call("query_snapshot", duration_ms, "query", "success", stock_count=stock_count, timeout=30.0)
+            self._record_sdk_call("query_snapshot", self._count_result_rows(result), True)
             return result if isinstance(result, dict) else {}
         except Exception as e:
             duration_ms = (time.monotonic() - start) * 1000
@@ -436,6 +527,7 @@ class SDKManager:
             result = info.get_industry_daily(code_list=code_list, is_local=False)
             duration_ms = (time.monotonic() - start) * 1000
             logger.log_sdk_call("get_industry_daily", duration_ms, "download", "success", stock_count=len(code_list) if code_list else 0)
+            self._record_sdk_call("get_industry_daily", self._count_result_rows(result), True)
             if isinstance(result, dict):
                 return result
             return {}
@@ -458,6 +550,7 @@ class SDKManager:
             result = info.get_profit_notice(code_list=stock_codes, is_local=False)
             duration_ms = (time.monotonic() - start) * 1000
             logger.log_sdk_call("get_profit_notice", duration_ms, "download", "success", stock_count=len(stock_codes) if stock_codes else 0)
+            self._record_sdk_call("get_profit_notice", self._count_result_rows(result), True)
             if isinstance(result, dict):
                 dfs = [df for df in result.values() if isinstance(df, pd.DataFrame)]
                 if dfs:
@@ -484,6 +577,7 @@ class SDKManager:
             result = info.get_profit_express(code_list=stock_codes, is_local=False)
             duration_ms = (time.monotonic() - start) * 1000
             logger.log_sdk_call("get_profit_express", duration_ms, "download", "success", stock_count=len(stock_codes) if stock_codes else 0)
+            self._record_sdk_call("get_profit_express", self._count_result_rows(result), True)
             if isinstance(result, dict):
                 dfs = [df for df in result.values() if isinstance(df, pd.DataFrame)]
                 if dfs:
@@ -510,6 +604,7 @@ class SDKManager:
             result = info.get_long_hu_bang(code_list=stock_codes, begin_date=begin_date, end_date=end_date, is_local=False)
             duration_ms = (time.monotonic() - start) * 1000
             logger.log_sdk_call("get_long_hu_bang", duration_ms, "download", "success", stock_count=len(stock_codes) if stock_codes else 0)
+            self._record_sdk_call("get_long_hu_bang", self._count_result_rows(result), True)
             if isinstance(result, pd.DataFrame):
                 return result
             return pd.DataFrame()
@@ -532,6 +627,7 @@ class SDKManager:
             result = info.get_margin_summary(begin_date=begin_date, end_date=end_date, is_local=False)
             duration_ms = (time.monotonic() - start) * 1000
             logger.log_sdk_call("get_margin_summary", duration_ms, "download", "success")
+            self._record_sdk_call("get_margin_summary", self._count_result_rows(result), True)
             if isinstance(result, pd.DataFrame):
                 return result
             return pd.DataFrame()
@@ -554,6 +650,7 @@ class SDKManager:
             result = info.get_margin_detail(code_list=stock_codes, begin_date=begin_date, end_date=end_date, is_local=False)
             duration_ms = (time.monotonic() - start) * 1000
             logger.log_sdk_call("get_margin_detail", duration_ms, "download", "success", stock_count=len(stock_codes) if stock_codes else 0)
+            self._record_sdk_call("get_margin_detail", self._count_result_rows(result), True)
             if isinstance(result, dict):
                 dfs = [df for df in result.values() if isinstance(df, pd.DataFrame)]
                 if dfs:
@@ -580,6 +677,7 @@ class SDKManager:
             result = info.get_block_trading(code_list=stock_codes, begin_date=begin_date, end_date=end_date, is_local=False)
             duration_ms = (time.monotonic() - start) * 1000
             logger.log_sdk_call("get_block_trading", duration_ms, "download", "success", stock_count=len(stock_codes) if stock_codes else 0)
+            self._record_sdk_call("get_block_trading", self._count_result_rows(result), True)
             if isinstance(result, pd.DataFrame):
                 return result
             return pd.DataFrame()
@@ -602,6 +700,7 @@ class SDKManager:
             result = info.get_treasury_yield(is_local=False)
             duration_ms = (time.monotonic() - start) * 1000
             logger.log_sdk_call("get_treasury_yield", duration_ms, "download", "success")
+            self._record_sdk_call("get_treasury_yield", self._count_result_rows(result), True)
             if isinstance(result, dict):
                 dfs = [df for df in result.values() if isinstance(df, pd.DataFrame)]
                 if dfs:
@@ -628,6 +727,7 @@ class SDKManager:
             result = info.get_industry_constituent(code_list=index_codes, is_local=False)
             duration_ms = (time.monotonic() - start) * 1000
             logger.log_sdk_call("get_industry_constituent", duration_ms, "download", "success", stock_count=len(index_codes) if index_codes else 0)
+            self._record_sdk_call("get_industry_constituent", self._count_result_rows(result), True)
             if isinstance(result, dict):
                 dfs = [df for df in result.values() if isinstance(df, pd.DataFrame)]
                 if dfs:
@@ -654,6 +754,7 @@ class SDKManager:
             result = info.get_index_constituent(code_list=index_codes, is_local=False)
             duration_ms = (time.monotonic() - start) * 1000
             logger.log_sdk_call("get_index_constituent", duration_ms, "download", "success", stock_count=len(index_codes) if index_codes else 0)
+            self._record_sdk_call("get_index_constituent", self._count_result_rows(result), True)
             if isinstance(result, dict):
                 dfs = [df for df in result.values() if isinstance(df, pd.DataFrame)]
                 if dfs:

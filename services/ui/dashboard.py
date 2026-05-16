@@ -11,6 +11,19 @@ from services._version import VERSION, get_start_time
 router = APIRouter()
 
 
+def get_sdk_metrics() -> dict:
+    """获取 SDK 调用统计（只读状态，不触发登录）"""
+    try:
+        from services.common.sdk_manager import get_sdk_manager
+        sdk_mgr = get_sdk_manager()
+        return sdk_mgr.get_sdk_metrics()
+    except Exception:
+        return {
+            "recent_60s": {"calls": 0, "rows": 0, "success_rate": 0, "active_methods": []},
+            "session": {"total_calls": 0, "success_calls": 0, "total_rows": 0},
+        }
+
+
 def get_uptime_text() -> str:
     """获取运行时长文本"""
     start = get_start_time()
@@ -228,6 +241,8 @@ async def get_dashboard(account_id: str = Path(..., description="账户 ID")):
             "fail_count": today_tasks["fail_count"],
         },
         "db_stats": db_stats,
+        "db_throughput": db.get_throughput(),
+        "sdk_metrics": get_sdk_metrics(),
     }
 
 

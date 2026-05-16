@@ -59,6 +59,36 @@
             </el-alert>
           </el-card>
 
+          <!-- 系统实时指标 -->
+          <el-row :gutter="20" class="stats-row">
+            <el-col :span="12">
+              <el-card class="stat-card">
+                <template #header><span>数据库吞吐</span></template>
+                <el-descriptions :column="2" border>
+                  <el-descriptions-item label="查询/秒">{{ dbThroughput.queries_per_sec }}</el-descriptions-item>
+                  <el-descriptions-item label="读取/秒">{{ dbThroughput.reads_per_sec }}</el-descriptions-item>
+                  <el-descriptions-item label="写入/秒">{{ dbThroughput.writes_per_sec }}</el-descriptions-item>
+                  <el-descriptions-item label="读取行/秒">{{ dbThroughput.rows_read_per_sec }}</el-descriptions-item>
+                  <el-descriptions-item label="累计查询" :span="2">{{ formatNumber(dbThroughput.total_queries) }}</el-descriptions-item>
+                </el-descriptions>
+              </el-card>
+            </el-col>
+            <el-col :span="12">
+              <el-card class="stat-card">
+                <template #header><span>SDK 调用统计</span></template>
+                <el-descriptions :column="2" border>
+                  <el-descriptions-item label="近60秒调用">{{ sdkMetrics.recent_60s.calls }} 次</el-descriptions-item>
+                  <el-descriptions-item label="近60秒返回">{{ sdkMetrics.recent_60s.rows }} 行</el-descriptions-item>
+                  <el-descriptions-item label="成功率">{{ sdkMetrics.recent_60s.success_rate }}%</el-descriptions-item>
+                  <el-descriptions-item label="活跃方法">
+                    <el-tag v-for="m in sdkMetrics.recent_60s.active_methods" :key="m" size="small" style="margin: 1px">{{ m }}</el-tag>
+                  </el-descriptions-item>
+                  <el-descriptions-item label="累计调用" :span="2">{{ formatNumber(sdkMetrics.session.total_calls) }} 次</el-descriptions-item>
+                </el-descriptions>
+              </el-card>
+            </el-col>
+          </el-row>
+
           <!-- 仓位信息 -->
           <el-card class="position-card">
             <template #header>
@@ -216,6 +246,26 @@ const dbStats = ref({
   baseInfoNeeq: 0,
 })
 
+// 数据库吞吐量
+const dbThroughput = ref({
+  total_queries: 0,
+  total_reads: 0,
+  total_writes: 0,
+  total_rows_read: 0,
+  total_rows_written: 0,
+  queries_per_sec: 0,
+  reads_per_sec: 0,
+  writes_per_sec: 0,
+  rows_read_per_sec: 0,
+  rows_written_per_sec: 0,
+})
+
+// SDK 调用统计
+const sdkMetrics = ref({
+  recent_60s: { calls: 0, rows: 0, success_rate: 0, active_methods: [] },
+  session: { total_calls: 0, success_calls: 0, total_rows: 0 },
+})
+
 // 本地时钟自动更新运行时长
 let uptimeTimer = null
 let serverStartTimestamp = null  // 服务器启动时间的时间戳（毫秒）
@@ -291,6 +341,28 @@ const loadDashboard = async () => {
       baseInfoSz: ds.base_info_sz || 0,
       baseInfoBj: ds.base_info_bj || 0,
       baseInfoNeeq: ds.base_info_neeq || 0,
+    }
+
+    // 数据库吞吐量
+    const dt = data.db_throughput || {}
+    dbThroughput.value = {
+      total_queries: dt.total_queries || 0,
+      total_reads: dt.total_reads || 0,
+      total_writes: dt.total_writes || 0,
+      total_rows_read: dt.total_rows_read || 0,
+      total_rows_written: dt.total_rows_written || 0,
+      queries_per_sec: dt.queries_per_sec || 0,
+      reads_per_sec: dt.reads_per_sec || 0,
+      writes_per_sec: dt.writes_per_sec || 0,
+      rows_read_per_sec: dt.rows_read_per_sec || 0,
+      rows_written_per_sec: dt.rows_written_per_sec || 0,
+    }
+
+    // SDK 调用统计
+    const sm = data.sdk_metrics || {}
+    sdkMetrics.value = {
+      recent_60s: sm.recent_60s || { calls: 0, rows: 0, success_rate: 0, active_methods: [] },
+      session: sm.session || { total_calls: 0, success_calls: 0, total_rows: 0 },
     }
   } catch (error) {
     console.error('加载仪表盘数据失败:', error)

@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from contextlib import asynccontextmanager, contextmanager
 import logging
 import threading
+import time
 
 logger = logging.getLogger('Database')
 
@@ -33,6 +34,22 @@ class DatabaseManager:
         self._pool: Optional[asyncio.Queue] = None  # 延迟初始化，避免跨事件循环问题
         self._initialized = False
         self._lock: Optional[asyncio.Lock] = None
+
+        # 吞吐量计数器（线程安全）
+        self._counter_lock = threading.Lock()
+        self._total_queries = 0
+        self._total_reads = 0
+        self._total_writes = 0
+        self._total_rows_read = 0
+        self._total_rows_written = 0
+
+        # 上次快照（用于计算速率）
+        self._last_snapshot_time = time.monotonic()
+        self._snap_queries = 0
+        self._snap_reads = 0
+        self._snap_writes = 0
+        self._snap_rows_read = 0
+        self._snap_rows_written = 0
 
     def _ensure_loop_resources(self):
         """确保在当前事件循环中初始化 pool 和 lock"""
@@ -130,10 +147,12 @@ class DatabaseManager:
 
     async def execute(self, query: str, params: Tuple = ()) -> aiosqlite.Cursor:
         """执行 SQL"""
+        self._increment_counters(writes=1, rows_written=1)
         return await self._execute_with_conn(query, params, commit=True)
 
     async def executemany(self, query: str, params_list: List[Tuple]) -> aiosqlite.Cursor:
         """批量执行 SQL"""
+        self._increment_counters(writes=1, rows_written=len(params_list))
         conn = await self._acquire()
         try:
             cursor = await conn.executemany(query, params_list)
@@ -144,6 +163,7 @@ class DatabaseManager:
 
     async def fetchone(self, query: str, params: Tuple = ()) -> Optional[Dict]:
         """查询单条记录"""
+        self._increment_counters(reads=1, rows_read=1)
         conn = await self._acquire()
         try:
             cursor = await conn.execute(query, params)
@@ -154,16 +174,19 @@ class DatabaseManager:
 
     async def fetchall(self, query: str, params: Tuple = ()) -> List[Dict]:
         """查询多条记录"""
+        self._increment_counters(reads=1, rows_read=0)  # 行数在返回后补充
         conn = await self._acquire()
         try:
             cursor = await conn.execute(query, params)
             rows = await cursor.fetchall()
+            self._increment_counters(rows_read=len(rows))
             return [dict(row) for row in rows]
         finally:
             await self._release(conn)
 
     async def fetchval(self, query: str, params: Tuple = ()) -> Optional[Any]:
         """查询单个值"""
+        self._increment_counters(reads=1, rows_read=1)
         conn = await self._acquire()
         try:
             cursor = await conn.execute(query, params)
@@ -181,6 +204,7 @@ class DatabaseManager:
         query = f"INSERT INTO {table} ({columns}) VALUES ({placeholders})"
         conn = await self._acquire()
         try:
+            self._increment_counters(writes=1, rows_written=1)
             cursor = await conn.execute(query, tuple(data.values()))
             await conn.commit()
             return cursor.lastrowid
@@ -195,6 +219,7 @@ class DatabaseManager:
         try:
             cursor = await conn.execute(query, tuple(data.values()) + params)
             await conn.commit()
+            self._increment_counters(writes=1, rows_written=cursor.rowcount or 1)
             return cursor.rowcount
         finally:
             await self._release(conn)
@@ -206,6 +231,7 @@ class DatabaseManager:
         try:
             cursor = await conn.execute(query, params)
             await conn.commit()
+            self._increment_counters(writes=1, rows_written=cursor.rowcount or 1)
             return cursor.rowcount
         finally:
             await self._release(conn)
@@ -217,6 +243,56 @@ class DatabaseManager:
     async def rollback(self):
         """回滚事务 — 池化模式下不直接支持，建议使用 transaction()"""
         pass
+
+    def _increment_counters(self, reads: int = 0, writes: int = 0, rows_read: int = 0, rows_written: int = 0):
+        """线程安全计数器"""
+        with self._counter_lock:
+            self._total_queries += reads + writes
+            self._total_reads += reads
+            self._total_writes += writes
+            self._total_rows_read += rows_read
+            self._total_rows_written += rows_written
+
+    def get_throughput(self) -> Dict:
+        """
+        获取数据库吞吐量统计。
+        返回累计值 + 上次调用以来的速率（queries/sec, reads/sec, writes/sec）。
+        """
+        now = time.monotonic()
+        with self._counter_lock:
+            elapsed = now - self._last_snapshot_time if now > self._last_snapshot_time else 1.0
+            delta_q = self._total_queries - self._snap_queries
+            delta_r = self._total_reads - self._snap_reads
+            delta_w = self._total_writes - self._snap_writes
+            delta_rr = self._total_rows_read - self._snap_rows_read
+            delta_rw = self._total_rows_written - self._snap_rows_written
+
+            qps = round(delta_q / elapsed, 1) if elapsed > 0 else 0
+            rps = round(delta_r / elapsed, 1) if elapsed > 0 else 0
+            wps = round(delta_w / elapsed, 1) if elapsed > 0 else 0
+            rrs = round(delta_rr / elapsed, 1) if elapsed > 0 else 0
+            rws = round(delta_rw / elapsed, 1) if elapsed > 0 else 0
+
+            # 更新快照
+            self._snap_queries = self._total_queries
+            self._snap_reads = self._total_reads
+            self._snap_writes = self._total_writes
+            self._snap_rows_read = self._total_rows_read
+            self._snap_rows_written = self._total_rows_written
+            self._last_snapshot_time = now
+
+        return {
+            "total_queries": self._total_queries,
+            "total_reads": self._total_reads,
+            "total_writes": self._total_writes,
+            "total_rows_read": self._total_rows_read,
+            "total_rows_written": self._total_rows_written,
+            "queries_per_sec": qps,
+            "reads_per_sec": rps,
+            "writes_per_sec": wps,
+            "rows_read_per_sec": rrs,
+            "rows_written_per_sec": rws,
+        }
 
 
 # 全局单例
