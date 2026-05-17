@@ -275,16 +275,50 @@ class TradingGateway(TradingGatewayInterface):
         get_sdk_manager().disconnect()
 
     async def get_market_data(self, stock_code: str) -> Optional[MarketData]:
-        """获取真实行情数据 - 使用 AmazingData SDK"""
+        """获取真实行情数据 - 使用 AmazingData SDK，失败后回退到 ChannelRouter"""
         if not self.connected:
             raise Exception("网关未连接")
 
+        # 第一优先：现有 AmazingData 路径（已测试通过，保持不变）
         try:
             result = await asyncio.to_thread(self._query_market_data_sync, stock_code)
             return result
-        except Exception as e:
-            logger.error(f"获取行情失败：{e}")
-            raise Exception(f"获取行情失败：{str(e)}")
+        except Exception as sdk_error:
+            logger.warning(f"AmazingData 行情查询失败，尝试备用通道: {sdk_error}")
+
+        # 回退：ChannelRouter 备用数据源
+        try:
+            from services.data.channel import get_channel_router, ChannelType
+            from services.data.providers.base import DataProviderError
+
+            router = get_channel_router()
+            raw_data = await router.execute(
+                ChannelType.TRADING,
+                "get_market_data",
+                stock_code=stock_code,
+            )
+
+            if raw_data:
+                return MarketData(
+                    stock_code=raw_data.get("stock_code", stock_code),
+                    stock_name=raw_data.get("stock_name", ""),
+                    current_price=float(raw_data.get("current_price", 0)),
+                    change_percent=float(raw_data.get("change_percent", 0)),
+                    high=float(raw_data.get("high", 0)),
+                    low=float(raw_data.get("low", 0)),
+                    open_price=float(raw_data.get("open_price", 0)),
+                    prev_close=float(raw_data.get("prev_close", 0)),
+                    volume=int(raw_data.get("volume", 0)),
+                    amount=float(raw_data.get("amount", 0)),
+                    bid=raw_data.get("bid", []),
+                    ask=raw_data.get("ask", []),
+                    trade_date=raw_data.get("trade_date", ""),
+                )
+        except DataProviderError as e:
+            logger.error(f"所有备用通道均失败: {e}")
+
+        logger.error(f"获取行情失败：{stock_code}")
+        raise Exception(f"获取行情失败：所有数据源均不可用")
 
     def _query_market_data_sync(self, stock_code: str) -> Optional[MarketData]:
         """同步查询行情数据（在线程池中执行）"""
@@ -964,7 +998,7 @@ class TradingGateway(TradingGatewayInterface):
         return []
 
     async def get_batch_market_data(self, stock_codes: List[str]) -> Dict[str, Optional[MarketData]]:
-        """批量获取行情数据 — 一次SDK调用获取所有代码的行情"""
+        """批量获取行情数据 — 一次SDK调用获取所有代码的行情，失败回退 ChannelRouter"""
         if not stock_codes:
             return {}
 
@@ -973,7 +1007,7 @@ class TradingGateway(TradingGatewayInterface):
         end_date = int((end_dt + datetime.timedelta(days=1)).strftime('%Y%m%d'))
         begin_date = int(begin_dt.strftime('%Y%m%d'))
 
-        # 一次SDK调用获取所有股票K线
+        # 第一优先：现有 AmazingData 路径
         try:
             kline_data = self._query_kline_via_sdk(
                 code_list=stock_codes,
@@ -982,41 +1016,77 @@ class TradingGateway(TradingGatewayInterface):
                 period=self.constant.Period.day.value,
                 task_type="query"
             )
-        except Exception as e:
-            logger.warning(f"批量获取行情失败：{e}")
-            return {code: None for code in stock_codes}
 
-        results = {}
-        for code in stock_codes:
-            if code in kline_data:
-                df = kline_data[code]
-                if df is not None and len(df) > 0:
-                    last_row = df.iloc[-1]
-                    current_price = float(last_row.get('close', 0)) if 'close' in last_row else 0
-                    high = float(last_row.get('high', current_price)) if 'high' in last_row else current_price
-                    low = float(last_row.get('low', current_price)) if 'low' in last_row else current_price
-                    open_price = float(last_row.get('open', current_price)) if 'open' in last_row else current_price
-                    prev_close = float(last_row.get('pre_close', 0)) if 'pre_close' in last_row else 0
-                    if prev_close == 0 and len(df) >= 2:
-                        prev_close = float(df.iloc[-2].get('close', current_price))
-                    if prev_close == 0:
-                        prev_close = current_price
-                    volume = int(last_row.get('volume', 0)) if 'volume' in last_row else 0
-                    amount = float(last_row.get('amount', 0)) if 'amount' in last_row else 0
-                    change_percent = ((current_price - prev_close) / prev_close * 100) if prev_close != 0 else 0
-                    stock_name = last_row.get('stock_name', '')
-                    trade_date = str(last_row.get('trade_date', last_row.get('kline_time', '')))
+            results = {}
+            for code in stock_codes:
+                if code in kline_data:
+                    df = kline_data[code]
+                    if df is not None and len(df) > 0:
+                        last_row = df.iloc[-1]
+                        current_price = float(last_row.get('close', 0)) if 'close' in last_row else 0
+                        high = float(last_row.get('high', current_price)) if 'high' in last_row else current_price
+                        low = float(last_row.get('low', current_price)) if 'low' in last_row else current_price
+                        open_price = float(last_row.get('open', current_price)) if 'open' in last_row else current_price
+                        prev_close = float(last_row.get('pre_close', 0)) if 'pre_close' in last_row else 0
+                        if prev_close == 0 and len(df) >= 2:
+                            prev_close = float(df.iloc[-2].get('close', current_price))
+                        if prev_close == 0:
+                            prev_close = current_price
+                        volume = int(last_row.get('volume', 0)) if 'volume' in last_row else 0
+                        amount = float(last_row.get('amount', 0)) if 'amount' in last_row else 0
+                        change_percent = ((current_price - prev_close) / prev_close * 100) if prev_close != 0 else 0
+                        stock_name = last_row.get('stock_name', '')
+                        trade_date = str(last_row.get('trade_date', last_row.get('kline_time', '')))
+                        results[code] = MarketData(
+                            stock_code=code, stock_name=stock_name, current_price=current_price,
+                            change_percent=change_percent, high=high, low=low, open_price=open_price,
+                            prev_close=prev_close, volume=volume, amount=amount,
+                            trade_date=trade_date,
+                        )
+                    else:
+                        results[code] = None
+                else:
+                    results[code] = None
+            return results
+        except Exception as e:
+            logger.warning(f"AmazingData 批量行情查询失败，尝试备用通道: {e}")
+
+        # 回退：ChannelRouter
+        try:
+            from services.data.channel import get_channel_router, ChannelType
+            from services.data.providers.base import DataProviderError
+
+            router = get_channel_router()
+            raw_results = await router.execute(
+                ChannelType.TRADING,
+                "get_batch_market_data",
+                stock_codes=stock_codes,
+            )
+
+            results = {}
+            for code, raw in raw_results.items():
+                if raw:
                     results[code] = MarketData(
-                        stock_code=code, stock_name=stock_name, current_price=current_price,
-                        change_percent=change_percent, high=high, low=low, open_price=open_price,
-                        prev_close=prev_close, volume=volume, amount=amount,
-                        trade_date=trade_date,
+                        stock_code=raw.get("stock_code", code),
+                        stock_name=raw.get("stock_name", ""),
+                        current_price=float(raw.get("current_price", 0)),
+                        change_percent=float(raw.get("change_percent", 0)),
+                        high=float(raw.get("high", 0)),
+                        low=float(raw.get("low", 0)),
+                        open_price=float(raw.get("open_price", 0)),
+                        prev_close=float(raw.get("prev_close", 0)),
+                        volume=int(raw.get("volume", 0)),
+                        amount=float(raw.get("amount", 0)),
+                        bid=raw.get("bid", []),
+                        ask=raw.get("ask", []),
+                        trade_date=raw.get("trade_date", ""),
                     )
                 else:
                     results[code] = None
-            else:
-                results[code] = None
-        return results
+            return results
+        except DataProviderError as e:
+            logger.error(f"所有备用通道批量行情失败: {e}")
+            return {code: None for code in stock_codes}
 
     async def get_kline_data(
         self,
@@ -1027,10 +1097,11 @@ class TradingGateway(TradingGatewayInterface):
         limit: int = 100,
         task_type: str = "query"
     ) -> List[Dict[str, Any]]:
-        """获取 K 线历史数据 — 通过 SDKManager 查询（自带排队 + 超时）"""
+        """获取 K 线历史数据 — 通过 SDKManager 查询（自带排队 + 超时），失败回退 ChannelRouter"""
         if not self.connected:
             raise Exception("网关未连接")
 
+        # 第一优先：现有 AmazingData 路径
         try:
             result = await asyncio.wait_for(
                 asyncio.to_thread(
@@ -1039,10 +1110,30 @@ class TradingGateway(TradingGatewayInterface):
                 ),
                 timeout=10.0
             )
-            return result
+            if result:
+                return result
         except asyncio.TimeoutError:
             logger.warning(f"查询 {stock_code} K线超时（>10s）")
-            raise Exception("获取 K 线数据超时")
+        except Exception as e:
+            logger.warning(f"AmazingData K线查询失败，尝试备用通道: {e}")
+
+        # 回退：ChannelRouter
+        try:
+            from services.data.channel import get_channel_router, ChannelType
+
+            router = get_channel_router()
+            return await router.execute(
+                ChannelType.MARKET_DATA,
+                "get_kline_data",
+                stock_code=stock_code,
+                period=period,
+                start_date=start_date or "",
+                end_date=end_date or "",
+                limit=limit,
+            )
+        except Exception as e:
+            logger.error(f"所有数据源 K 线查询失败: {e}")
+            raise Exception("获取 K 线数据失败：所有数据源均不可用")
 
     async def get_batch_kline_data(
         self,

@@ -31,7 +31,7 @@ from services._version import VERSION, set_start_time
 _server_start_time = None
 
 # 数据库迁移版本号 —— 每次新增迁移时递增
-MIGRATION_VERSION = 6
+MIGRATION_VERSION = 7
 
 
 @asynccontextmanager
@@ -587,6 +587,53 @@ async def lifespan(app: FastAPI):
         )""",
         """CREATE INDEX IF NOT EXISTS idx_backtest_daily_positions_run ON backtest_daily_positions(backtest_run_id, trade_date)""",
     ])
+
+    # v7: 多数据源接入架构（2026-05-16）
+    await run_migration(7, "多数据源接入", [
+        """CREATE TABLE IF NOT EXISTS data_source_config (
+            provider_id TEXT PRIMARY KEY,
+            display_name TEXT NOT NULL,
+            is_enabled INTEGER DEFAULT 0,
+            channel_priority_json TEXT,
+            system_config_json TEXT,
+            capabilities_json TEXT,
+            requires_config INTEGER DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )""",
+    ])
+
+    # v7 数据源配置 seed（从 registry.json 初始化）
+    try:
+        from services.data.channel.config_manager import seed_provider_configs, add_account_role_column
+        await seed_provider_configs()
+        await add_account_role_column()
+        log.log_event("db_migration_v7", "数据源配置已初始化")
+    except Exception as e:
+        log.error("db_migration_v7", f"数据源初始化失败: {e}")
+
+    # 初始化多数据源 ChannelRouter（在 Migration v7 之后）
+    try:
+        from services.data.channel.router import get_channel_router, ChannelType, ChannelConfig
+        from services.data.channel.config_manager import load_channel_order
+        from services.data.providers.amazingdata_provider import AmazingDataProvider
+
+        router = get_channel_router()
+        amazing_provider = AmazingDataProvider()
+        router.register_provider(amazing_provider)
+
+        for ct in [ChannelType.TRADING, ChannelType.MARKET_DATA, ChannelType.DATA_DOWNLOAD]:
+            provider_order = await load_channel_order(ct.value)
+            if provider_order:
+                router.set_channel_config(ct, ChannelConfig(
+                    channel_type=ct,
+                    provider_order=provider_order,
+                    timeout_seconds=15.0,
+                ))
+
+        log.log_event("data_source_init", "多数据源 ChannelRouter 已初始化")
+    except Exception as e:
+        log.error("data_source_init", f"ChannelRouter 初始化失败: {e}")
 
     yield
 

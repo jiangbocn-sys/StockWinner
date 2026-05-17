@@ -56,6 +56,7 @@ async def create_backtest_run(
 
     # 提取参数
     name = body.get("name", "未命名回测")
+    description = body.get("description", "")
     strategy_id = body.get("strategy_id")
     mode = body.get("mode", "simulated")
     start_date = body.get("start_date")
@@ -134,6 +135,8 @@ async def create_backtest_run(
                 f"UPDATE backtest_runs SET {key} = ? WHERE id = ?",
                 (body[key], run_id)
             )
+    if description:
+        await db.execute("UPDATE backtest_runs SET description = ? WHERE id = ?", (description, run_id))
     # markets / group_ids / stock_pool 存为 JSON
     if markets is not None:
         await db.execute("UPDATE backtest_runs SET markets = ? WHERE id = ?",
@@ -212,14 +215,14 @@ async def list_backtest_runs(
     if not account:
         raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
 
-    query = "SELECT * FROM backtest_runs WHERE account_id = ?"
+    query = "SELECT br.*, s.name as strategy_name FROM backtest_runs br LEFT JOIN strategies s ON br.strategy_id = s.id WHERE br.account_id = ?"
     params: list = [account_id]
 
     if status:
-        query += " AND status = ?"
+        query += " AND br.status = ?"
         params.append(status)
 
-    query += " ORDER BY created_at DESC LIMIT ?"
+    query += " ORDER BY br.created_at DESC LIMIT ?"
     params.append(limit)
 
     runs = await db.fetchall(query, params)
@@ -246,7 +249,7 @@ async def get_backtest_run(
     """获取回测任务详情"""
     db = get_db_manager()
     run = await db.fetchone(
-        "SELECT * FROM backtest_runs WHERE id = ? AND account_id = ?",
+        "SELECT br.*, s.name as strategy_name FROM backtest_runs br LEFT JOIN strategies s ON br.strategy_id = s.id WHERE br.id = ? AND br.account_id = ?",
         (run_id, account_id)
     )
     if not run:

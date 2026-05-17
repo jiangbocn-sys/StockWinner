@@ -1,0 +1,67 @@
+{
+  "providers": [
+    {
+      "provider_id": "eastmoney",
+      "display_name": "东方财富",
+      "description": "东方财富免费行情接口，支持实时行情和K线",
+      "capabilities": {
+        "supports_kline": true,
+        "supports_realtime": true,
+        "supports_fundamentals": false,
+        "supports_stock_list": true,
+        "supports_industry": false,
+        "supports_trading": false,
+        "supports_realtime_snapshot": false
+      },
+      "requires_config": false,
+      "default_enabled": true,
+      "priority": {
+        "trading": 1,
+        "market_data": 1,
+        "download": 1
+      }
+    },
+    {
+      "provider_id": "tushare",
+      "display_name": "Tushare Pro",
+      "description": "Tushare Pro 金融数据接口（需要付费 API Token）",
+      "capabilities": {
+        "supports_kline": true,
+        "supports_realtime": false,
+        "supports_fundamentals": true,
+        "supports_stock_list": true,
+        "supports_industry": false,
+        "supports_trading": false,
+        "supports_realtime_snapshot": false
+      },
+      "requires_config": true,
+      "default_enabled": false,
+      "priority": {
+        "trading": 3,
+        "market_data": 2,
+        "download": 2
+      }
+    },
+    {
+      "provider_id": "amazingdata",
+      "display_name": "银河证券",
+      "description": "银河证券 AmazingData SDK（系统默认数据源）",
+      "capabilities": {
+        "supports_kline": true,
+        "supports_realtime": true,
+        "supports_fundamentals": true,
+        "supports_stock_list": true,
+        "supports_industry": true,
+        "supports_trading": true,
+        "supports_realtime_snapshot": true
+      },
+      "requires_config": true,
+      "default_enabled": true,
+      "priority": {
+        "trading": 2,
+        "market_data": 3,
+        "download": 3
+      }
+    }
+  ]
+}

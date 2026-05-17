@@ -126,6 +126,10 @@
             </el-col>
           </el-row>
 
+          <el-form-item label="回测说明">
+            <el-input v-model="form.description" type="textarea" :rows="2" placeholder="简要记录回测目的、注意事项等（可选）" style="width: 100%" />
+          </el-form-item>
+
           <el-form-item>
             <el-button type="primary" @click="handleStartBacktest" :loading="running">
               开始回测
@@ -154,7 +158,20 @@
 
         <el-table :data="history" v-loading="loadingHistory" stripe @selection-change="handleSelectionChange">
           <el-table-column type="selection" width="40" :selectable="(row) => row.status === 'completed'" />
-          <el-table-column prop="name" label="回测名称" min-width="100" show-overflow-tooltip />
+          <el-table-column label="回测名称" min-width="100">
+            <template #default="{ row }">
+              <el-tooltip v-if="row.description" :content="row.description" placement="top">
+                <span>{{ row.name }}</span>
+              </el-tooltip>
+              <span v-else>{{ row.name }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column prop="strategy_name" label="策略" width="100" show-overflow-tooltip>
+            <template #default="{ row }">
+              <span v-if="row.strategy_name">{{ row.strategy_name }}</span>
+              <span v-else class="text-muted">手动</span>
+            </template>
+          </el-table-column>
           <el-table-column prop="mode" label="模式" width="120">
             <template #default="{ row }">
               {{ row.mode === 'simulated' ? '撮合模拟盘' : '收益率累积' }}
@@ -232,11 +249,12 @@
         <el-card style="margin-bottom: 16px">
           <template #header><span>回测参数</span></template>
           <el-descriptions :column="4" border size="small">
-            <el-descriptions-item label="回测模式">
+            <el-descriptions-item label="回测名称" :span="3">{{ currentRun.name }}</el-descriptions-item>
+            <el-descriptions-item label="模式">
               {{ currentRun.mode === 'simulated' ? '撮合模拟盘' : '收益率累积' }}
             </el-descriptions-item>
             <el-descriptions-item label="策略">
-              <span v-if="currentRun.strategy_id">ID {{ currentRun.strategy_id }}</span>
+              <span v-if="currentRun.strategy_name">{{ currentRun.strategy_name }}</span>
               <span v-else class="text-muted">手动配置</span>
             </el-descriptions-item>
             <el-descriptions-item label="日期范围">{{ currentRun.start_date }} ~ {{ currentRun.end_date }}</el-descriptions-item>
@@ -247,6 +265,7 @@
               <span v-else-if="currentRun.stock_pool && currentRun.stock_pool.length > 0">{{ currentRun.stock_pool.length }} 只</span>
               <span v-else class="text-muted">全市场</span>
             </el-descriptions-item>
+            <el-descriptions-item v-if="currentRun.description" label="回测说明" :span="4">{{ currentRun.description }}</el-descriptions-item>
             <el-descriptions-item label="止损 / 止盈">
               {{ formatPct(currentRun.stop_loss_pct) }} / {{ formatPct(currentRun.take_profit_pct) }}
             </el-descriptions-item>
@@ -403,6 +422,7 @@ const form = ref({
   stop_execution_price: 'close',
   commission_rate: 0.0001,
   slippage_pct: 0,
+  description: '',
 })
 
 const candidateGroups = ref([])
@@ -510,6 +530,7 @@ const handleStartBacktest = async () => {
       stop_execution_price: form.value.stop_execution_price,
       commission_rate: form.value.commission_rate,
       slippage_pct: form.value.slippage_pct / 100,
+      description: form.value.description || null,
       markets: form.value.markets.length > 0 ? form.value.markets : null,
       group_ids: form.value.group_ids.length > 0 ? form.value.group_ids : null,
       config: {},
@@ -551,6 +572,7 @@ const rerunBacktest = async (row) => {
       stop_execution_price: row.config?.stop_execution_price || 'close',
       commission_rate: row.commission_rate || 0.0001,
       slippage_pct: row.slippage_pct || 0,
+      description: row.description || null,
       markets: row.markets || null,
       group_ids: row.config?.group_ids || null,
       config: row.config || {},
