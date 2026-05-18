@@ -156,7 +156,7 @@
           </div>
         </template>
 
-        <el-table :data="history" v-loading="loadingHistory" stripe @selection-change="handleSelectionChange">
+        <el-table :data="history" v-loading="loadingHistory" stripe @selection-change="handleSelectionChange" @row-dblclick="handleRowDblclick">
           <el-table-column type="selection" width="40" :selectable="(row) => row.status === 'completed'" />
           <el-table-column label="回测名称" min-width="100">
             <template #default="{ row }">
@@ -260,7 +260,7 @@
             <el-descriptions-item label="日期范围">{{ currentRun.start_date }} ~ {{ currentRun.end_date }}</el-descriptions-item>
             <el-descriptions-item label="初始资金">{{ formatMoney(currentRun.initial_capital) }}</el-descriptions-item>
             <el-descriptions-item label="股票池">
-              <span v-if="currentRun.group_ids && currentRun.group_ids.length > 0">候选组 {{ currentRun.group_ids.join(', ') }}</span>
+              <span v-if="currentRun.group_ids && currentRun.group_ids.length > 0">候选组 {{ getGroupNames(currentRun.group_ids, currentRun.group_names) }}</span>
               <span v-else-if="currentRun.markets && currentRun.markets.length > 0">{{ currentRun.markets.join(', ') }}</span>
               <span v-else-if="currentRun.stock_pool && currentRun.stock_pool.length > 0">{{ currentRun.stock_pool.length }} 只</span>
               <span v-else class="text-muted">全市场</span>
@@ -306,7 +306,7 @@
         <!-- 交易记录 -->
         <el-card style="margin-top: 16px">
           <template #header><span>交易记录 ({{ trades.length }} 笔)</span></template>
-          <el-table :data="trades" stripe max-height="400">
+          <el-table :data="trades" stripe max-height="400" @row-dblclick="showTradeKline">
             <el-table-column prop="stock_code" label="股票代码" width="110" />
             <el-table-column prop="stock_name" label="股票名称" width="100" />
             <el-table-column label="买入日期" width="110">
@@ -342,6 +342,11 @@
             </el-table-column>
           </el-table>
         </el-card>
+      </el-dialog>
+
+      <!-- K 线图弹窗 -->
+      <el-dialog v-model="klineVisible" :title="`${klineStockInfo.name} (${klineStockInfo.code}) K线图`" width="80%" top="5vh" @close="destroyKlineChart">
+        <div ref="klineChartRef" style="width: 100%; height: 600px"></div>
       </el-dialog>
 
       <!-- 数据完整性检查对话框 -->
@@ -419,7 +424,7 @@ const form = ref({
   stop_loss_pct: 5,
   take_profit_pct: 15,
   trailing_stop_pct: null,
-  stop_execution_price: 'close',
+  stop_execution_price: 'trigger',
   commission_rate: 0.0001,
   slippage_pct: 0,
   description: '',
@@ -452,6 +457,12 @@ const compareNavData = ref({})
 const compareMetrics = ref([])
 const compareChartRef = ref(null)
 let compareChart = null
+
+// K 线弹窗
+const klineVisible = ref(false)
+const klineChartRef = ref(null)
+const klineStockInfo = ref({ code: '', name: '' })
+let klineChart = null
 
 // 指标卡片
 const metricCards = computed(() => {
@@ -512,6 +523,17 @@ const loadHistory = async (silent = false) => {
 const handleStartBacktest = async () => {
   if (!form.value.start_date || !form.value.end_date) {
     ElMessage.warning('请选择起始和结束日期')
+    return
+  }
+
+  // 交易时间内禁止全市场回测
+  const hasGroupIds = form.value.group_ids && form.value.group_ids.length > 0
+  const hasStockPool = false  // 前端不直接传 stock_pool
+  const hasLimitedMarket = form.value.markets && form.value.markets.length > 0 && form.value.markets.length < 2
+  const isFullMarket = !hasGroupIds && !hasStockPool && !hasLimitedMarket
+
+  if (isFullMarket) {
+    ElMessage.warning('交易时间内禁止全市场回测（占用过多系统资源）。请选择候选组作为股票池，或在非交易时段进行全市场回测。')
     return
   }
 
@@ -712,6 +734,188 @@ const renderNavChart = () => {
   window.addEventListener('resize', () => navChart.resize())
 }
 
+// 显示交易 K 线图
+const showTradeKline = async (row) => {
+  klineStockInfo.value = { code: row.stock_code, name: row.stock_name }
+  klineVisible.value = true
+
+  const buyDate = row.buy_date
+  const sellDate = row.sell_date || new Date().toISOString().slice(0, 10)
+
+  // 买入当月1日
+  const buyMonth = buyDate.slice(0, 7)
+  const start = buyMonth + '-01'
+
+  // 卖出月月末
+  const sellMonth = sellDate.slice(0, 7)
+  const nextMonth = new Date(sellMonth + '-01')
+  nextMonth.setMonth(nextMonth.getMonth() + 1)
+  nextMonth.setDate(0)
+  const end = nextMonth.toISOString().slice(0, 10)
+
+  const startFmt = start.replace(/-/g, '')
+  const endFmt = end.replace(/-/g, '')
+
+  try {
+    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/market/kline?stock_code=${row.stock_code}&period=day&start_date=${startFmt}&end_date=${endFmt}`)
+    const data = await res.json()
+    await nextTick()
+    renderKlineChart(data.data?.kline || [], row)
+  } catch (e) {
+    console.error('加载 K 线数据失败:', e)
+  }
+}
+
+// 渲染 K 线图
+const renderKlineChart = (klineData, trade) => {
+  if (!klineChartRef.value) return
+  if (!klineChart) {
+    klineChart = echarts.init(klineChartRef.value)
+  }
+
+  const dates = klineData.map(d => String(d.trade_date))
+  const values = klineData.map(d => [d.open, d.close, d.low, d.high])
+
+  // 标准化日期用于匹配
+  const normalizeDate = (ds) => {
+    if (!ds) return ''
+    return String(ds).replace(/-/g, '')
+  }
+
+  const buyDateNorm = normalizeDate(trade.buy_date)
+  const sellDateNorm = normalizeDate(trade.sell_date)
+
+  // 调试：打印日期匹配信息
+  console.log('Trade buy_date:', trade.buy_date, 'normalized:', buyDateNorm)
+  console.log('Trade sell_date:', trade.sell_date, 'normalized:', sellDateNorm)
+  console.log('K-line data count:', klineData.length, 'first item:', klineData[0])
+  const nonEmptyDates = dates.filter(d => d && d !== '')
+  console.log('K-line dates with values:', nonEmptyDates.length, '/', dates.length)
+  if (nonEmptyDates.length > 0) {
+    console.log('K-line dates range:', nonEmptyDates[0], '~', nonEmptyDates[nonEmptyDates.length - 1])
+  }
+
+  // 找最高/最低价及对应索引
+  let maxPrice = -Infinity, minPrice = Infinity, maxIdx = -1, minIdx = -1
+  for (let i = 0; i < klineData.length; i++) {
+    const d = klineData[i]
+    if (d.high > maxPrice) { maxPrice = d.high; maxIdx = i }
+    if (d.low < minPrice) { minPrice = d.low; minIdx = i }
+  }
+
+  // 找买入/卖出日期对应的 K线索引
+  let buyIdx = -1, sellIdx = -1
+  for (let i = 0; i < dates.length; i++) {
+    const dn = normalizeDate(dates[i])
+    if (dn === buyDateNorm) buyIdx = i
+    if (sellDateNorm && dn === sellDateNorm) sellIdx = i
+  }
+  console.log('buyIdx:', buyIdx, 'sellIdx:', sellIdx)
+
+  // 用 markLine 画水平线标注价格，用 markPoint 标注位置
+  const markPointData = []
+  if (maxIdx >= 0) {
+    markPointData.push({
+      name: '最高价',
+      xAxis: maxIdx,
+      yAxis: maxPrice,
+      value: maxPrice.toFixed(2),
+      label: { formatter: '最高\n{c}' },
+      itemStyle: { color: '#ffd700' },
+    })
+  }
+  if (minIdx >= 0) {
+    markPointData.push({
+      name: '最低价',
+      xAxis: minIdx,
+      yAxis: minPrice,
+      value: minPrice.toFixed(2),
+      label: { formatter: '最低\n{c}' },
+      itemStyle: { color: '#00bfff' },
+    })
+  }
+  if (buyIdx >= 0) {
+    markPointData.push({
+      name: '买入',
+      xAxis: buyIdx,
+      yAxis: trade.buy_price,
+      value: trade.buy_price.toFixed(2),
+      label: { formatter: '买入\n{c}' },
+      itemStyle: { color: '#ff4444' },
+    })
+  }
+  if (sellIdx >= 0 && trade.sell_price) {
+    markPointData.push({
+      name: '卖出',
+      xAxis: sellIdx,
+      yAxis: trade.sell_price,
+      value: trade.sell_price.toFixed(2),
+      label: { formatter: '卖出\n{c}' },
+      itemStyle: { color: '#00aa00' },
+    })
+  }
+
+  // 画买入/卖出价格水平线
+  const markLineData = []
+  if (buyIdx >= 0) {
+    markLineData.push({
+      name: '买入价',
+      yAxis: trade.buy_price,
+      lineStyle: { color: '#ff4444', type: 'dashed' },
+      label: { formatter: '买入 {c}' },
+    })
+  }
+  if (sellIdx >= 0 && trade.sell_price) {
+    markLineData.push({
+      name: '卖出价',
+      yAxis: trade.sell_price,
+      lineStyle: { color: '#00aa00', type: 'dashed' },
+      label: { formatter: '卖出 {c}' },
+    })
+  }
+
+  const pnlText = trade.pnl_pct != null ? `${trade.pnl_pct >= 0 ? '+' : ''}${trade.pnl_pct.toFixed(2)}%` : '-'
+  const buyStr = trade.buy_price?.toFixed(2) || '-'
+  const sellStr = trade.sell_price?.toFixed(2) || '-'
+
+  klineChart.setOption({
+    title: { text: `${klineStockInfo.value.name} (${klineStockInfo.value.code})  盈亏: ${pnlText}`, left: 'center', textStyle: { fontSize: 14 } },
+    tooltip: {
+      trigger: 'axis',
+      formatter: (params) => {
+        const p = params[0]
+        if (!p) return ''
+        const v = p.value
+        // 查找对应日期的成交量
+        const idx = dates.indexOf(p.name)
+        const vol = idx >= 0 && klineData[idx] ? klineData[idx].volume : '-'
+        return `${p.name}<br/>开: ${v[1]}  收: ${v[2]}  低: ${v[3]}  高: ${v[4]}<br/>量: ${vol}`
+      },
+    },
+    xAxis: { type: 'category', data: dates },
+    yAxis: { type: 'value', scale: true },
+    series: [{
+      name: 'K线',
+      type: 'candlestick',
+      data: values,
+      itemStyle: { color: '#ef232a', color0: '#14b143', borderColor: '#ef232a', borderColor0: '#14b143' },
+      markPoint: { symbolSize: 50, data: markPointData, label: { show: true, fontSize: 11, position: 'top' } },
+      markLine: {
+        data: markLineData,
+        symbol: 'none',
+        lineStyle: { width: 1, type: 'dashed' },
+        label: { show: true, fontSize: 10 },
+      },
+    }],
+    dataZoom: [{ type: 'inside' }, { type: 'slider' }],
+  })
+  window.addEventListener('resize', () => klineChart.resize())
+}
+
+const destroyKlineChart = () => {
+  if (klineChart) { klineChart.dispose(); klineChart = null }
+}
+
 // 删除回测任务
 const deleteRun = async (runId) => {
   try {
@@ -751,9 +955,48 @@ const formatPct = (val) => {
   return (n * 100).toFixed(2) + '%'
 }
 
+// 获取候选组名称列表
+const getGroupNames = (groupIds, groupNamesMap) => {
+  if (!groupIds || !groupNamesMap) return groupIds?.join(', ') || ''
+  return groupIds.map(id => groupNamesMap[String(id)] || `候选组 ${id}`).join(', ')
+}
+
 // 选中变化
 const handleSelectionChange = (selection) => {
   selectedRuns.value = selection
+}
+
+// 双击列表行，回填参数到配置栏
+const handleRowDblclick = async (row) => {
+  try {
+    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/backtest/runs/${row.id}`)
+    const data = await res.json()
+    if (!data.success || !data.run) {
+      ElMessage.error(data.message || '加载回测详情失败')
+      return
+    }
+    const run = data.run
+
+    form.value.name = run.name || ''
+    form.value.mode = run.mode || 'simulated'
+    form.value.strategy_id = run.strategy_id || null
+    form.value.start_date = run.start_date || '2024-01-01'
+    form.value.end_date = run.end_date || '2025-12-31'
+    form.value.initial_capital = run.initial_capital || 1000000
+    form.value.markets = run.markets || []
+    form.value.group_ids = run.group_ids || []
+    form.value.stop_loss_pct = run.stop_loss_pct ? Math.round(run.stop_loss_pct * 1000) / 10 : 5
+    form.value.take_profit_pct = run.take_profit_pct ? Math.round(run.take_profit_pct * 1000) / 10 : 15
+    form.value.trailing_stop_pct = run.trailing_stop_pct ? Math.round(run.trailing_stop_pct * 1000) / 10 : null
+    form.value.stop_execution_price = run.stop_execution_price || 'close'
+    form.value.commission_rate = run.commission_rate || 0.0001
+    form.value.slippage_pct = run.slippage_pct ? run.slippage_pct * 100 : 0
+    form.value.description = run.description || ''
+
+    ElMessage.success('已加载回测参数到配置栏')
+  } catch (e) {
+    ElMessage.error('加载回测参数失败: ' + e.message)
+  }
 }
 
 // 对比回测
@@ -884,6 +1127,7 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   if (statusTimer) clearInterval(statusTimer)
+  if (klineChart) { klineChart.dispose(); klineChart = null }
 })
 </script>
 

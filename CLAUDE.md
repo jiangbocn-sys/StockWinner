@@ -199,6 +199,11 @@ result = sdk_mgr.query_kline(...)
 - 使用 `services/common/stock_code.py` 的 `normalize_stock_code()` 规范化
 - 禁止各模块各自实现后缀判断逻辑
 
+**规则 6：APScheduler cron 表达式 day_of_week 必须用命名格式**
+- `CronTrigger.from_crontab()` 的 `day_of_week` 使用 Python weekday 映射（0=周一），与标准 cron（0=周日）不一致
+- 必须使用 `mon-fri`、`sat`、`sun` 等命名，禁止使用数字范围如 `1-5`、`0-4`
+- 适用于数据库 `strategy_tasks.cron_expression` 和代码中所有 cron 表达式
+
 ## SDK Integration (AmazingData/银河证券)
 
 The system integrates with Galaxy Securities SDK for real-time market data:

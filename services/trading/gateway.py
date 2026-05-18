@@ -1307,11 +1307,18 @@ class TradingGateway(TradingGatewayInterface):
                 if len(df) > limit:
                     df = df.tail(limit)
 
+                # 字段重命名：将 SDK 的 kline_time 重命名为 trade_date（与批量方法保持一致）
+                if 'kline_time' in df.columns:
+                    df = df.rename(columns={'kline_time': 'trade_date'})
+                if 'trade_date' in df.columns:
+                    import pandas as pd
+                    df['trade_date'] = df['trade_date'].apply(
+                        lambda x: x.strftime('%Y-%m-%d') if pd.notnull(x) else ''
+                    )
+
                 result = []
-                for idx, row in df.iterrows():
+                for _, row in df.iterrows():
                     time_val = row.get("trade_date", "")
-                    if not time_val:
-                        time_val = row.get("time", "")
 
                     result.append({
                         "stock_code": stock_code,

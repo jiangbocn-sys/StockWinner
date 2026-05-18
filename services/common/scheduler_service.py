@@ -89,6 +89,15 @@ class SchedulerService:
             # 注册交易监控自动启动任务（每天 9:15）
             self._register_monitor_auto_start_job()
 
+            # 注册 scheduler 心跳检查（每 30 分钟），用于诊断 daemon 线程是否存活
+            self._register_heartbeat_job()
+
+            # 记录 daemon 线程状态，用于诊断 scheduler 静默失效
+            import threading
+            thread_names = [t.name for t in threading.enumerate()]
+            aps_threads = [n for n in thread_names if 'apscheduler' in n.lower() or 'apsched' in n.lower()]
+            logger.info(f"Scheduler daemon 线程: {aps_threads}, 总线程数: {len(threading.enumerate())}")
+
         except ImportError:
             logger.warning("APScheduler 未安装，使用简单的定时检查方案")
             self._start_simple_scheduler()
@@ -808,7 +817,21 @@ class SchedulerService:
         return {'success': True, 'message': '盘后分析任务已启动'}
 
     def get_status(self) -> Dict:
-        """获取调度服务状态"""
+        """获取调度服务状态（含健康检查日志）"""
+        # 健康检查日志：定期打印 scheduler 状态
+        import threading
+        thread_names = [t.name for t in threading.enumerate()]
+        aps_threads = [n for n in thread_names if 'apscheduler' in n.lower() or 'apsched' in n.lower()]
+        scheduler_running = bool(self._scheduler and self._scheduler.running)
+        job_count = len(self._scheduler.get_jobs()) if self._scheduler else 0
+
+        if not scheduler_running or not aps_threads:
+            logger.warning(
+                f"Scheduler 健康检查异常: running={self._running}, "
+                f"scheduler.running={scheduler_running}, jobs={job_count}, "
+                f"daemon_threads={aps_threads}"
+            )
+
         jobs = []
         if self._scheduler:
             for job in self._scheduler.get_jobs():
@@ -824,6 +847,8 @@ class SchedulerService:
 
         return {
             'running': self._running,
+            'scheduler_running': scheduler_running,
+            'daemon_threads': aps_threads,
             'scheduler_type': 'APScheduler' if self._scheduler else 'Simple',
             'jobs': jobs,
             'current_task': self._current_task,
@@ -908,24 +933,136 @@ class SchedulerService:
             # 早盘启动：9:15
             self._scheduler.add_job(
                 self._monitor_auto_start_job,
-                CronTrigger.from_crontab("15 9 * * 1-5", timezone=CHINA_TZ),
+                CronTrigger.from_crontab("15 9 * * mon-fri", timezone=CHINA_TZ),
                 id="monitor_auto_start",
                 name="系统任务: 自动启动交易监控",
                 replace_existing=True,
             )
-            logger.info("  注册监控任务: monitor_auto_start (cron=15 9 * * 1-5)")
+            logger.info("  注册监控任务: monitor_auto_start (cron=15 9 * * mon-fri)")
 
             # 午盘启动：13:00（覆盖后端在午间重启的场景）
             self._scheduler.add_job(
                 self._monitor_auto_start_job,
-                CronTrigger.from_crontab("0 13 * * 1-5", timezone=CHINA_TZ),
+                CronTrigger.from_crontab("0 13 * * mon-fri", timezone=CHINA_TZ),
                 id="monitor_auto_start_afternoon",
                 name="系统任务: 自动启动交易监控（午后）",
                 replace_existing=True,
             )
-            logger.info("  注册监控任务: monitor_auto_start_afternoon (cron=0 13 * * 1-5)")
+            logger.info("  注册监控任务: monitor_auto_start_afternoon (cron=0 13 * * mon-fri)")
         except Exception as e:
             logger.error(f"注册监控自动启动任务失败: {e}")
+
+    def _register_heartbeat_job(self):
+        """注册 scheduler 心跳检查任务（每 30 分钟），用于确认 daemon 线程存活"""
+        try:
+            self._scheduler.add_job(
+                self._heartbeat_job,
+                CronTrigger.from_crontab("*/30 * * * *", timezone=CHINA_TZ),
+                id="scheduler_heartbeat",
+                name="系统任务: Scheduler 心跳检查",
+                replace_existing=True,
+            )
+            logger.info("  注册心跳任务: scheduler_heartbeat (cron=*/30 * * * *)")
+        except Exception as e:
+            logger.error(f"注册心跳任务失败: {e}")
+
+    def _heartbeat_job(self):
+        """Scheduler 心跳检查，每 30 分钟执行一次
+        同时检查交易监控是否存活（交易日交易时段内）
+        """
+        import threading
+        from services.common.timezone import get_china_time
+
+        thread_names = [t.name for t in threading.enumerate()]
+        aps_threads = [n for n in thread_names if 'apscheduler' in n.lower() or 'apsched' in n.lower()]
+        scheduler_ok = self._scheduler and self._scheduler.running
+        now_str = get_china_time().strftime("%H:%M")
+
+        logger.info(
+            f"Scheduler 心跳: running={scheduler_ok}, daemon_threads={aps_threads}, "
+            f"总线程数={len(threading.enumerate())}"
+        )
+
+        # --- 异常检测：发飞书通知 ---
+        if not scheduler_ok:
+            try:
+                from services.notifications import get_notification_service
+                notification = get_notification_service()
+                # 尝试给所有有通知配置的账户发警报
+                conn = get_sync_connection(path=Path(__file__).parent.parent.parent / "data" / "stockwinner.db")
+                account_ids = [r["account_id"] for r in conn.execute(
+                    "SELECT DISTINCT account_id FROM accounts WHERE is_active = 1"
+                ).fetchall()]
+                conn.close()
+
+                for acct_id in account_ids:
+                    import asyncio
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    try:
+                        loop.run_until_complete(notification.emit(
+                            event_type="scheduler_down",
+                            account_id=acct_id,
+                            payload={
+                                "detected_at": now_str,
+                                "detail": "Scheduler daemon 线程已死亡，需重启后端",
+                            },
+                        ))
+                    finally:
+                        loop.close()
+                logger.warning("已发送 Scheduler 异常飞书通知")
+            except Exception as e:
+                logger.error(f"发送 Scheduler 通知失败: {e}")
+
+        # --- 检查交易监控是否存活（仅交易日交易时段） ---
+        if scheduler_ok:
+            try:
+                from services.trading.trading_hours import is_today_trading_day
+                from services.trading.trading_hours import is_trading_time as _is_trading_hours
+
+                if is_today_trading_day() and _is_trading_hours():
+                    from services.monitoring.service import get_trading_monitor
+                    from services.notifications import get_notification_service
+
+                    monitor = get_trading_monitor()
+                    if not monitor._running:
+                        # 交易时段内监控未运行，发警报
+                        logger.warning("交易监控在交易时段内未运行，发送飞书通知")
+
+                        # 检查是否有持仓
+                        positions_conn = get_sync_connection(
+                            path=Path(__file__).parent.parent.parent / "data" / "stockwinner.db"
+                        )
+                        position_count = positions_conn.execute(
+                            "SELECT COUNT(*) FROM stock_positions WHERE quantity > 0"
+                        ).fetchone()[0]
+                        acct_rows = positions_conn.execute(
+                            "SELECT DISTINCT account_id FROM stock_positions WHERE quantity > 0"
+                        ).fetchall()
+                        positions_conn.close()
+
+                        if position_count > 0:
+                            for acct_id in [r["account_id"] for r in acct_rows]:
+                                notification = get_notification_service()
+                                loop = asyncio.new_event_loop()
+                                asyncio.set_event_loop(loop)
+                                try:
+                                    loop.run_until_complete(notification.emit(
+                                        event_type="monitor_interrupted",
+                                        account_id=acct_id,
+                                        payload={
+                                            "detected_at": now_str,
+                                            "account_id": acct_id,
+                                            "position_count": position_count,
+                                        },
+                                    ))
+                                finally:
+                                    loop.close()
+                            logger.warning(f"已发送交易监控中断飞书通知（{position_count} 只持仓）")
+                        else:
+                            logger.info("交易监控未运行，但无持仓，不发通知")
+            except Exception as e:
+                logger.error(f"检查交易监控状态失败: {e}")
 
     def _monitor_auto_start_job(self):
         """9:15 定时任务 — 自动启动交易监控"""
@@ -999,6 +1136,9 @@ class SchedulerService:
             # 重新注册监控自动启动任务（9:15 + 13:00）
             self._register_monitor_auto_start_job()
 
+            # 重新注册心跳任务
+            self._register_heartbeat_job()
+
             return {"success": True, "count": count}
 
         except Exception as e:
@@ -1024,45 +1164,45 @@ class SchedulerService:
                 start_job_id = f'monitor_start_{acct_id}'
                 self._scheduler.add_job(
                     self._auto_start_monitor_job,
-                    CronTrigger.from_crontab("20 9 * * 1-5", timezone=CHINA_TZ),
+                    CronTrigger.from_crontab("20 9 * * mon-fri", timezone=CHINA_TZ),
                     id=start_job_id,
                     name=f"自动启动监控: {acct_id}",
                     args=[acct_id],
                     replace_existing=True,
                 )
-                logger.info(f"  注册监控任务: {start_job_id} (cron=20 9 * * 1-5)")
+                logger.info(f"  注册监控任务: {start_job_id} (cron=20 9 * * mon-fri)")
 
                 # 收盘后停止监控（15:05）
                 stop_job_id = f'monitor_stop_{acct_id}'
                 self._scheduler.add_job(
                     self._auto_stop_monitor_job,
-                    CronTrigger.from_crontab("5 15 * * 1-5", timezone=CHINA_TZ),
+                    CronTrigger.from_crontab("5 15 * * mon-fri", timezone=CHINA_TZ),
                     id=stop_job_id,
                     name=f"自动停止监控: {acct_id}",
                     args=[acct_id],
                     replace_existing=True,
                 )
-                logger.info(f"  注册停监控任务: {stop_job_id} (cron=5 15 * * 1-5)")
+                logger.info(f"  注册停监控任务: {stop_job_id} (cron=5 15 * * mon-fri)")
 
             # T+1 解冻持仓 + 重置 watchlist pending 状态（每日收盘后 15:05）
             self._scheduler.add_job(
                 self._auto_unfreeze_positions_job,
-                CronTrigger.from_crontab("5 15 * * 1-5", timezone=CHINA_TZ),
+                CronTrigger.from_crontab("5 15 * * mon-fri", timezone=CHINA_TZ),
                 id="t1_unfreeze",
                 name="T+1 持仓解冻",
                 replace_existing=True,
             )
-            logger.info(f"  注册 T+1 解冻任务 (cron=5 15 * * 1-5)")
+            logger.info(f"  注册 T+1 解冻任务 (cron=5 15 * * mon-fri)")
 
             # 收盘后失效当日单（15:05）
             self._scheduler.add_job(
                 self._expire_day_orders_job,
-                CronTrigger.from_crontab("5 15 * * 1-5", timezone=CHINA_TZ),
+                CronTrigger.from_crontab("5 15 * * mon-fri", timezone=CHINA_TZ),
                 id="expire_day_orders",
                 name="收盘后失效当日单",
                 replace_existing=True,
             )
-            logger.info(f"  注册收盘失效当日单任务 (cron=5 15 * * 1-5)")
+            logger.info(f"  注册收盘失效当日单任务 (cron=5 15 * * mon-fri)")
 
         except Exception as e:
             logger.error(f"注册监控任务失败: {e}", exc_info=True)
@@ -1218,6 +1358,23 @@ class SchedulerService:
         asyncio.set_event_loop(loop)
         try:
             loop.run_until_complete(self._execute_strategy_task(task_id))
+        except Exception as e:
+            # APScheduler daemon 线程中未捕获异常会静默退出，必须捕获
+            logger.error(f"策略任务 {task_id} 线程异常: {e}", exc_info=True)
+            # 尝试更新数据库状态
+            try:
+                from services.common.database import get_sync_connection
+                import json as _json
+                db_path = Path(__file__).parent.parent.parent / "data" / "stockwinner.db"
+                conn = get_sync_connection(path=db_path)
+                conn.execute(
+                    "UPDATE strategy_tasks SET last_status='error', last_output=? WHERE id=?",
+                    (_json.dumps({"error": f"线程异常: {e}"}, ensure_ascii=False), task_id)
+                )
+                conn.commit()
+                conn.close()
+            except Exception:
+                pass
         finally:
             loop.close()
 
