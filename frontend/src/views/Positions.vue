@@ -144,6 +144,23 @@ const dsaResult = ref(null)
 const dsaError = ref('')
 
 const refreshing = ref(false)
+
+const loadPositions = async () => {
+  // 先从 DB 加载数据（不等待行情刷新）
+  try {
+    const response = await fetch(`/api/v1/ui/${currentAccountId.value}/positions`)
+    const data = await response.json()
+    positions.value = data.positions || []
+    availableCash.value = data.available_cash || 0
+    marketValue.value = positions.value.reduce((sum, p) => sum + (p.market_value || 0), 0)
+    totalPnl.value = positions.value.reduce((sum, p) => sum + (p.profit_loss || 0), 0)
+    totalAssets.value = marketValue.value + availableCash.value
+    pnlPercent.value = (totalPnl.value / (totalAssets.value - availableCash.value)) * 100 || 0
+  } catch (error) {
+    console.error('加载持仓失败:', error)
+  }
+}
+
 const refreshPrices = async () => {
   refreshing.value = true
   try {
@@ -207,7 +224,10 @@ const handleDsaAnalysis = async (row) => {
 }
 
 onMounted(async () => {
-  await refreshPrices()
+  // 先展示 DB 数据
+  await loadPositions()
+  // 后台静默刷新实时行情
+  refreshPrices()
 })
 </script>
 

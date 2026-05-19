@@ -47,12 +47,15 @@
             <template #header>
               <div class="card-header">
                 <span>候选组</span>
+                <el-button size="small" text @click="groupSortOrder = groupSortOrder === 'asc' ? 'desc' : 'asc'">
+                  {{ groupSortOrder === 'asc' ? '↑' : '↓' }}
+                </el-button>
               </div>
             </template>
 
             <div class="group-list" v-loading="groupsLoading">
               <div
-                v-for="group in candidateGroups"
+                v-for="group in sortedGroups"
                 :key="group.id"
                 class="group-item"
                 :class="{ active: selectedGroupId === group.id }"
@@ -122,7 +125,7 @@
               </div>
             </template>
 
-            <el-table :data="currentStocks" stripe style="width: 100%" v-loading="stocksLoading" @selection-change="handleStockSelectionChange"
+            <el-table :data="paginatedStocks" stripe style="width: 100%" v-loading="stocksLoading" @selection-change="handleStockSelectionChange" @row-dblclick="showKline"
               :default-sort="{ prop: 'updated_at', order: 'descending' }">
               <el-table-column type="selection" width="50" />
               <el-table-column prop="stock_code" label="股票代码" width="120" sortable />
@@ -158,6 +161,16 @@
                 <template #default="{ row }">{{ formatTime(row.updated_at) }}</template>
               </el-table-column>
             </el-table>
+
+            <div class="pagination-bar" v-if="currentStocks.length > pageSize">
+              <el-pagination
+                v-model:current-page="currentPage"
+                :page-size="pageSize"
+                :total="currentStocks.length"
+                layout="prev, pager, next, total"
+                small
+              />
+            </div>
 
             <el-empty v-if="!stocksLoading && currentStocks.length === 0" description="暂无候选股票，请添加或运行选股" />
           </el-card>
@@ -225,18 +238,20 @@
         <el-form :model="addStockForm" label-width="100px">
           <el-form-item label="选择股票" required>
             <el-select
-              v-model="addStockForm.selectedStock"
+              v-model="addStockForm.selectedStockCode"
               filterable remote
               :remote-method="searchStocksForAdd"
               :loading="searchingStocks"
               placeholder="输入代码、拼音首字母或名称搜索"
               style="width: 100%"
+              value-key="stock_code"
+              clearable
             >
               <el-option
                 v-for="s in stockSearchResults"
                 :key="s.stock_code"
                 :label="`${s.stock_code} - ${s.stock_name?.trim()}${s.spell_initial ? ' (' + s.spell_initial + ')' : ''}`"
-                :value="s"
+                :value="s.stock_code"
               >
                 <span>{{ s.stock_code }}</span>
                 <span style="margin-left: 8px">{{ s.stock_name?.trim() }}</span>
@@ -265,7 +280,7 @@
             <el-input-number v-model="addStockForm.takeProfit" :precision="2" :step="0.1" :min="0" />
           </el-form-item>
           <el-form-item label="目标数量">
-            <el-input-number v-model="addStockForm.quantity" :min="100" :step="100" />
+            <el-input-number v-model="addStockForm.quantity" :min="0" :step="100" placeholder="留空则按策略计算" />
           </el-form-item>
           <el-form-item label="原因">
             <el-input v-model="addStockForm.reason" type="textarea" :rows="2" />
@@ -494,16 +509,22 @@
           </el-form-item>
         </el-form>
       </el-dialog>
+
+      <!-- K 线图弹窗 -->
+      <el-dialog v-model="klineVisible" :title="`${klineStockInfo.name} (${klineStockInfo.code}) K线走势`" width="85%" top="5vh" @close="destroyKlineChart">
+        <div ref="klineChartRef" style="width: 100%; height: 550px"></div>
+      </el-dialog>
     </el-main>
   </div>
 </template>
 
 <script setup>
-import { ref, reactive, onMounted, computed, watch } from 'vue'
+import { ref, reactive, onMounted, computed, watch, nextTick } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Search, Refresh, Plus, MoreFilled, Upload, Loading, WarningFilled, Edit, Delete } from '@element-plus/icons-vue'
 import { useAccountStore } from '../stores/account'
 import NavBar from '../components/NavBar.vue'
+import * as echarts from 'echarts'
 
 const accountStore = useAccountStore()
 const currentAccountId = computed(() => accountStore.currentAccountId)
@@ -515,10 +536,37 @@ const selectedGroupId = ref(null)
 const groupsLoading = ref(false)
 const currentGroup = computed(() => candidateGroups.value.find(g => g.id === selectedGroupId.value))
 
+// 候选组排序
+const groupSortOrder = ref('asc')
+const sortedGroups = computed(() => {
+  const sorted = [...candidateGroups.value]
+  sorted.sort((a, b) => {
+    if (groupSortOrder.value === 'asc') {
+      return (a.name || '').localeCompare(b.name || '')
+    }
+    return (b.name || '').localeCompare(a.name || '')
+  })
+  return sorted
+})
+
 // 当前组股票
 const currentStocks = ref([])
 const stocksLoading = ref(false)
 const filterStatus = ref('')
+
+// 分页
+const currentPage = ref(1)
+const pageSize = 20
+const paginatedStocks = computed(() => {
+  const start = (currentPage.value - 1) * pageSize
+  return currentStocks.value.slice(start, start + pageSize)
+})
+
+// K 线图
+const klineVisible = ref(false)
+const klineChartRef = ref(null)
+const klineStockInfo = ref({ code: '', name: '' })
+let klineChart = null
 
 // 策略
 const strategies = ref([])
@@ -576,16 +624,16 @@ const createGroupForm = reactive({ name: '', screeningStrategyId: null })
 const renameForm = reactive({ groupId: null, name: '' })
 const associateForm = reactive({ groupId: null, screeningStrategyId: null })
 const addStockForm = reactive({
-  selectedStock: null,
+  selectedStockCode: '',
   status: 'watching',
   buyPrice: null,
   stopLoss: null,
   takeProfit: null,
-  quantity: 100,
+  quantity: null,
   reason: '手动添加'
 })
 const strategySelectForm = reactive({ strategyId: null, useLocal: true })
-const editingStock = reactive({ stock_code: '', stock_name: '', buy_price: 0, stop_loss_price: 0, take_profit_price: 0, target_quantity: 100, status: 'pending' })
+const editingStock = reactive({ stock_code: '', stock_name: '', buy_price: 0, stop_loss_price: 0, take_profit_price: 0, target_quantity: null, status: 'pending' })
 
 // 候选
 const candidates = ref([])
@@ -641,11 +689,16 @@ const loadGroups = async () => {
   } finally {
     groupsLoading.value = false
   }
+  // 如果当前选中的组不在新列表中，重置选择
+  if (selectedGroupId.value && !candidateGroups.value.find(g => g.id === selectedGroupId.value)) {
+    selectedGroupId.value = candidateGroups.value.length > 0 ? candidateGroups.value[0].id : null
+  }
 }
 
 const selectGroup = (group) => {
   selectedGroupId.value = group.id
   filterStatus.value = ''
+  currentPage.value = 1
   loadCurrentGroupStocks()
 }
 
@@ -810,6 +863,7 @@ const loadCurrentGroupStocks = async () => {
     return
   }
   stocksLoading.value = true
+  currentPage.value = 1
   try {
     let url = `/api/v1/ui/${currentAccountId.value}/watchlist?group_id=${selectedGroupId.value}`
     if (filterStatus.value) url += `&status=${filterStatus.value}`
@@ -821,6 +875,99 @@ const loadCurrentGroupStocks = async () => {
   } finally {
     stocksLoading.value = false
   }
+}
+
+// ========== K 线图 ==========
+
+const showKline = async (row) => {
+  klineStockInfo.value = { code: row.stock_code, name: row.stock_name }
+  klineVisible.value = true
+
+  // 计算日期：最近三个月
+  const endDt = new Date()
+  const startDt = new Date()
+  startDt.setMonth(startDt.getMonth() - 3)
+  const start = startDt.toISOString().slice(0, 10).replace(/-/g, '')
+  const end = endDt.toISOString().slice(0, 10).replace(/-/g, '')
+
+  try {
+    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/market/kline?stock_code=${row.stock_code}&period=day&start_date=${start}&end_date=${end}`)
+    const data = await res.json()
+    await nextTick()
+    renderKlineChart(data.data?.kline || [])
+  } catch (e) {
+    console.error('加载 K 线数据失败:', e)
+  }
+}
+
+const renderKlineChart = (klineData) => {
+  if (!klineChartRef.value) return
+  if (!klineChart) {
+    klineChart = echarts.init(klineChartRef.value)
+  }
+
+  const dates = klineData.map(d => String(d.trade_date))
+  const ohlcValues = klineData.map(d => [d.open, d.close, d.low, d.high])
+  const volumes = klineData.map(d => d.volume || 0)
+
+  klineChart.setOption({
+    tooltip: {
+      trigger: 'axis',
+      axisPointer: { type: 'cross' },
+      formatter: (params) => {
+        const p = params[0]
+        if (!p || !p.value) return ''
+        const idx = dates.indexOf(p.name)
+        const vol = idx >= 0 ? volumes[idx] : '-'
+        const v = p.value
+        return `${p.name}<br/>开: ${v[1]}  收: ${v[2]}  低: ${v[3]}  高: ${v[4]}<br/>量: ${typeof vol === 'number' ? vol.toLocaleString() : vol}`
+      },
+    },
+    grid: [
+      { left: '8%', right: '4%', top: '8%', height: '55%' },
+      { left: '8%', right: '4%', top: '68%', height: '22%' },
+    ],
+    xAxis: [
+      { type: 'category', data: dates, gridIndex: 0, axisLabel: { show: false } },
+      { type: 'category', data: dates, gridIndex: 1 },
+    ],
+    yAxis: [
+      { type: 'value', scale: true, gridIndex: 0 },
+      { type: 'value', scale: true, gridIndex: 1, splitNumber: 2 },
+    ],
+    series: [
+      {
+        name: 'K线',
+        type: 'candlestick',
+        data: ohlcValues,
+        xAxisIndex: 0,
+        yAxisIndex: 0,
+        itemStyle: { color: '#ef232a', color0: '#14b143', borderColor: '#ef232a', borderColor0: '#14b143' },
+      },
+      {
+        name: '成交量',
+        type: 'bar',
+        data: volumes,
+        xAxisIndex: 1,
+        yAxisIndex: 1,
+        itemStyle: {
+          color: (param) => {
+            const idx = param.dataIndex
+            if (idx < klineData.length) {
+              return klineData[idx].close >= klineData[idx].open ? '#ef232a' : '#14b143'
+            }
+            return '#999'
+          },
+        },
+      },
+    ],
+    dataZoom: [{ type: 'inside' }, { type: 'slider', xAxisIndex: [0, 1] }],
+  })
+  window.addEventListener('resize', () => klineChart && klineChart.resize())
+}
+
+const destroyKlineChart = () => {
+  if (klineChart) { klineChart.dispose(); klineChart = null }
 }
 
 // 搜索股票（智能搜索：代码/拼音/名称）
@@ -846,12 +993,19 @@ const searchStocksForAdd = async (query) => {
 }
 
 const submitAddStock = async () => {
-  if (!addStockForm.selectedStock) {
+  if (!addStockForm.selectedStockCode) {
     ElMessage.warning('请选择股票')
     return
   }
-  const stockCode = addStockForm.selectedStock.stock_code
-  const stockName = (addStockForm.selectedStock.stock_name || '').trim()
+
+  // 从搜索结果中查找完整股票信息
+  const stock = stockSearchResults.value.find(s => s.stock_code === addStockForm.selectedStockCode)
+  if (!stock) {
+    ElMessage.warning('未找到股票信息，请重新选择')
+    return
+  }
+  const stockCode = stock.stock_code
+  const stockName = (stock.stock_name || '').trim()
 
   addingStock.value = true
   try {
@@ -888,12 +1042,12 @@ const submitAddStock = async () => {
 }
 
 const resetAddStockForm = () => {
-  addStockForm.selectedStock = null
+  addStockForm.selectedStockCode = ''
   addStockForm.status = 'watching'
   addStockForm.buyPrice = null
   addStockForm.stopLoss = null
   addStockForm.takeProfit = null
-  addStockForm.quantity = 100
+  addStockForm.quantity = null
   addStockForm.reason = '手动添加'
 }
 
@@ -1431,12 +1585,12 @@ onUnmounted(() => {
   if (resizeMouseMoveRef.value) document.removeEventListener('mousemove', resizeMouseMoveRef.value)
   if (resizeMouseUpRef.value) document.removeEventListener('mouseup', resizeMouseUpRef.value)
   isResizing.value = false
+  destroyKlineChart()
 })
 
 onMounted(async () => {
   await loadStrategies()
   await loadGroups()
-  // 默认选中第一个组
   if (candidateGroups.value.length > 0) {
     selectedGroupId.value = candidateGroups.value[0].id
     await loadCurrentGroupStocks()
@@ -1468,7 +1622,8 @@ onMounted(async () => {
 }
 
 .group-card { height: 100%; }
-.group-list { min-height: 300px; }
+.group-header { display: flex; align-items: center; justify-content: space-between; }
+.group-list { min-height: 300px; max-height: calc(20 * 42px); overflow-y: auto; }
 .group-item {
   display: flex; align-items: center; padding: 10px 12px; cursor: pointer;
   border-bottom: 1px solid #f0f0f0; transition: background-color 0.2s;
@@ -1497,4 +1652,8 @@ onMounted(async () => {
 .hint code { background: #f5f7fa; padding: 1px 4px; border-radius: 3px; font-family: monospace; color: #606266; }
 .cron-quick-btn { transition: color 0.2s; }
 .cron-quick-btn:hover { color: #66b1ff !important; }
+
+.pagination-bar {
+  display: flex; justify-content: center; padding: 12px 0;
+}
 </style>

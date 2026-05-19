@@ -1037,7 +1037,7 @@ async def add_to_watchlist_manual(
     buy_price: Optional[float] = Body(None, description="买入价格"),
     stop_loss_price: Optional[float] = Body(None, description="止损价格"),
     take_profit_price: Optional[float] = Body(None, description="止盈价格"),
-    target_quantity: Optional[int] = Body(100, description="目标数量"),
+    target_quantity: Optional[int] = Body(None, description="目标数量"),
     reason: Optional[str] = Body("手动添加", description="入选原因"),
 ):
     """手动添加候选股票到指定候选组"""
@@ -1055,13 +1055,13 @@ async def add_to_watchlist_manual(
     if not group:
         raise HTTPException(status_code=404, detail="候选组不存在")
 
-    # 重复检查
+    # 重复检查（同一组内去重，允许不同组存在相同股票）
     existing = await db.fetchone(
-        "SELECT id FROM watchlist WHERE account_id = ? AND stock_code = ? AND status IN ('pending', 'watching')",
-        (account_id, stock_code)
+        "SELECT id FROM watchlist WHERE account_id = ? AND stock_code = ? AND group_id = ? AND status IN ('pending', 'watching')",
+        (account_id, stock_code, group_id)
     )
     if existing:
-        raise HTTPException(status_code=409, detail="该股票已在候选列表中")
+        raise HTTPException(status_code=409, detail="该股票已在当前候选组中")
 
     # 状态校验
     valid_statuses = {"watching", "pending", "bought", "sold", "ignored"}
@@ -1253,7 +1253,7 @@ async def batch_add_to_watchlist(
             "buy_price": None,
             "stop_loss_price": None,
             "take_profit_price": None,
-            "target_quantity": 100,
+            "target_quantity": None,
             "status": "watching",
             "created_at": now,
             "updated_at": now,

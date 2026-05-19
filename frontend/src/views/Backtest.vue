@@ -77,6 +77,14 @@
               </el-form-item>
             </el-col>
             <el-col :span="8">
+              <el-form-item label="动态股票池">
+                <el-switch v-model="form.use_dynamic_pool" active-text="开启" inactive-text="关闭" />
+                <el-tooltip content="开启后可按时间段分别指定不同的候选组，模拟动态调仓" placement="top">
+                  <el-icon style="margin-left: 4px; color: #909399;"><QuestionFilled /></el-icon>
+                </el-tooltip>
+              </el-form-item>
+            </el-col>
+            <el-col :span="8">
               <el-form-item label="止损比例 (%)">
                 <el-tooltip content="买入价下跌超过该比例时触发止损。例如填 5 表示亏损 5% 时卖出" placement="top">
                   <el-input-number v-model="form.stop_loss_pct" :min="0" :max="50" :step="1" :precision="1" style="width: 100%" />
@@ -128,6 +136,44 @@
 
           <el-form-item label="回测说明">
             <el-input v-model="form.description" type="textarea" :rows="2" placeholder="简要记录回测目的、注意事项等（可选）" style="width: 100%" />
+          </el-form-item>
+
+          <!-- 动态股票池配置 -->
+          <el-form-item v-if="form.use_dynamic_pool" label="池调度">
+            <div style="width: 100%">
+              <div style="margin-bottom: 8px; display: flex; gap: 8px;">
+                <el-button size="small" @click="addPoolSegment" :icon="Plus">添加分段</el-button>
+                <el-button size="small" @click="generateQuarterlySegments" :icon="Calendar">按季度生成</el-button>
+                <span class="text-muted" style="font-size: 12px; line-height: 32px;">
+                  共 {{ poolSchedule.length }} 段，覆盖 {{ getPoolDateRange() }}
+                </span>
+              </div>
+              <el-table :data="poolSchedule" border size="small" style="width: 100%">
+                <el-table-column label="起始日期" width="160">
+                  <template #default="{ row }">
+                    <el-date-picker v-model="row.start_date" type="date" value-format="YYYY-MM-DD" size="small" style="width: 100%" />
+                  </template>
+                </el-table-column>
+                <el-table-column label="候选组" min-width="200">
+                  <template #default="{ row }">
+                    <el-select v-model="row.group_ids" multiple placeholder="选择候选组" size="small" style="width: 100%" filterable clearable>
+                      <el-option v-for="g in candidateGroups" :key="g.id" :label="`${g.name} (${g.stock_count}只)`" :value="g.id" />
+                    </el-select>
+                  </template>
+                </el-table-column>
+                <el-table-column label="股票数" width="80">
+                  <template #default="{ row }">
+                    <span v-if="row.stock_pool !== undefined">{{ row.stock_pool.length }}</span>
+                    <span v-else class="text-muted">—</span>
+                  </template>
+                </el-table-column>
+                <el-table-column label="操作" width="60" fixed="right">
+                  <template #default="{ $index }">
+                    <el-button size="small" type="danger" link @click="removePoolSegment($index)">删除</el-button>
+                  </template>
+                </el-table-column>
+              </el-table>
+            </div>
           </el-form-item>
 
           <el-form-item>
@@ -241,6 +287,20 @@
             </template>
           </el-table-column>
         </el-table>
+
+        <div style="display: flex; justify-content: flex-end; align-items: center; margin-top: 16px; gap: 16px">
+          <span style="font-size: 13px; color: #909399">共 {{ totalRuns }} 条</span>
+          <el-select v-model="pageSize" @change="handlePageSizeChange" style="width: 120px">
+            <el-option v-for="size in [5, 10, 20, 50]" :key="size" :label="`${size} 条/页`" :value="size" />
+          </el-select>
+          <el-pagination
+            v-model:current-page="currentPage"
+            :page-size="pageSize"
+            :total="totalRuns"
+            layout="prev, pager, next"
+            @current-change="handlePageChange"
+          />
+        </div>
       </el-card>
 
       <!-- 回测详情对话框 -->
@@ -266,6 +326,35 @@
               <span v-else class="text-muted">全市场</span>
             </el-descriptions-item>
             <el-descriptions-item v-if="currentRun.description" label="回测说明" :span="4">{{ currentRun.description }}</el-descriptions-item>
+            <el-descriptions-item v-if="currentRun.pool_schedule && currentRun.pool_schedule.length > 0" label="动态股票池" :span="4">
+              <el-table :data="currentRun.pool_schedule" border size="small" style="width: 100%">
+                <el-table-column label="时间段" width="220">
+                  <template #default="{ row, $index }">
+                    <template v-if="row.start_date">
+                      {{ row.start_date }} ~
+                      <template v-if="row.end_date">{{ row.end_date }}</template>
+                      <template v-else-if="$index + 1 < currentRun.pool_schedule.length">{{ currentRun.pool_schedule[$index + 1].start_date }}</template>
+                      <template v-else>{{ currentRun.end_date }}</template>
+                    </template>
+                    <span v-else class="text-muted">—</span>
+                  </template>
+                </el-table-column>
+                <el-table-column label="候选组" min-width="200">
+                  <template #default="{ row }">
+                    <span v-if="row.group_ids && row.group_names">
+                      {{ row.group_names.join(', ') }}
+                    </span>
+                    <span v-else-if="row.group_ids" class="text-muted">
+                      候选组 {{ row.group_ids.join(', ') }}
+                    </span>
+                    <span v-else-if="row.stock_pool" class="text-muted">
+                      {{ row.stock_pool.length }} 只
+                    </span>
+                    <span v-else class="text-muted">—</span>
+                  </template>
+                </el-table-column>
+              </el-table>
+            </el-descriptions-item>
             <el-descriptions-item label="止损 / 止盈">
               {{ formatPct(currentRun.stop_loss_pct) }} / {{ formatPct(currentRun.take_profit_pct) }}
             </el-descriptions-item>
@@ -297,8 +386,37 @@
           </el-col>
         </el-row>
 
+        <!-- 分年度统计 -->
+        <el-card style="margin-bottom: 16px">
+          <template #header><span>分年度统计</span></template>
+          <el-table :data="yearlyReturns" stripe>
+            <el-table-column prop="year" label="年份" width="100" />
+            <el-table-column label="收益率" width="120">
+              <template #default="{ row }">
+                <span :class="row.return >= 0 ? 'text-green' : 'text-red'">{{ row.return?.toFixed(2) || '-' }}%</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="最大回撤" width="120">
+              <template #default="{ row }">
+                <span class="text-red">{{ row.max_drawdown?.toFixed(2) || '-' }}%</span>
+              </template>
+            </el-table-column>
+          </el-table>
+        </el-card>
+
+        <!-- 基准对比 -->
+        <el-card style="margin-bottom: 16px" v-if="benchmarkData">
+          <template #header><span>基准对比（沪深300）</span></template>
+          <el-descriptions :column="4" border size="small">
+            <el-descriptions-item label="策略收益">{{ currentRun?.result_summary?.annualized_return ?? '-' }}%</el-descriptions-item>
+            <el-descriptions-item label="基准收益">{{ benchmarkData.benchmark_return }}</el-descriptions-item>
+            <el-descriptions-item label="Alpha" :class="Number(benchmarkData.alpha) >= 0 ? 'text-green' : 'text-red'">{{ benchmarkData.alpha }}</el-descriptions-item>
+            <el-descriptions-item label="Beta">{{ benchmarkData.beta ?? '-' }}</el-descriptions-item>
+          </el-descriptions>
+        </el-card>
+
         <!-- 净值曲线 -->
-        <el-card>
+        <el-card style="margin-top: 16px">
           <template #header><span>净值曲线</span></template>
           <div ref="navChartRef" style="width: 100%; height: 400px"></div>
         </el-card>
@@ -403,7 +521,7 @@
 <script setup>
 import { ref, computed, onMounted, nextTick, onBeforeUnmount } from 'vue'
 import { ElMessage, ElMessageBox, ElTooltip } from 'element-plus'
-import { Refresh } from '@element-plus/icons-vue'
+import { Refresh, Plus, Calendar } from '@element-plus/icons-vue'
 import NavBar from '../components/NavBar.vue'
 import { useAccountStore } from '../stores/account'
 import * as echarts from 'echarts'
@@ -428,6 +546,7 @@ const form = ref({
   commission_rate: 0.0001,
   slippage_pct: 0,
   description: '',
+  use_dynamic_pool: false,
 })
 
 const candidateGroups = ref([])
@@ -436,6 +555,11 @@ const strategies = ref([])
 const history = ref([])
 const running = ref(false)
 const loadingHistory = ref(false)
+
+// 分页
+const currentPage = ref(1)
+const pageSize = ref(10)
+const totalRuns = ref(0)
 
 // 回测详情
 const detailVisible = ref(false)
@@ -464,6 +588,9 @@ const klineChartRef = ref(null)
 const klineStockInfo = ref({ code: '', name: '' })
 let klineChart = null
 
+// 动态股票池
+const poolSchedule = ref([])
+
 // 指标卡片
 const metricCards = computed(() => {
   const r = currentRun.value?.result_summary || {}
@@ -481,6 +608,23 @@ const metricCards = computed(() => {
     { label: '最差交易', value: r.worst_trade != null ? r.worst_trade + '%' : '-', class: 'text-red' },
     { label: '最终净值', value: r.final_nav ?? '-' },
   ]
+})
+
+// 分年度统计
+const yearlyReturns = computed(() => {
+  return currentRun.value?.result_summary?.yearly_returns || []
+})
+
+// 基准对比
+const benchmarkData = computed(() => {
+  const r = currentRun.value?.result_summary || {}
+  if (r.benchmark_return == null) return null
+  return {
+    benchmark_return: r.benchmark_return + '%',
+    benchmark_annualized: r.benchmark_annualized + '%',
+    alpha: r.alpha + '%',
+    beta: r.beta,
+  }
 })
 
 // 加载策略列表
@@ -509,9 +653,10 @@ const loadCandidateGroups = async () => {
 const loadHistory = async (silent = false) => {
   if (!silent) loadingHistory.value = true
   try {
-    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/backtest/runs?limit=50`)
+    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/backtest/runs?page=${currentPage.value}&page_size=${pageSize.value}`)
     const data = await res.json()
     history.value = data.runs || []
+    totalRuns.value = data.pagination?.total || 0
   } catch (e) {
     console.error('加载回测历史失败:', e)
   } finally {
@@ -520,6 +665,71 @@ const loadHistory = async (silent = false) => {
 }
 
 // 开始回测
+// 动态股票池操作
+const addPoolSegment = () => {
+  poolSchedule.value.push({
+    start_date: '',
+    group_ids: [],
+    stock_pool: [],
+  })
+}
+
+const removePoolSegment = (index) => {
+  poolSchedule.value.splice(index, 1)
+}
+
+const generateQuarterlySegments = () => {
+  // 根据 form 的起止日期，按季度生成
+  const start = new Date(form.value.start_date)
+  const end = new Date(form.value.end_date)
+  if (isNaN(start.getTime()) || isNaN(end.getTime())) {
+    ElMessage.warning('请先设置起始和结束日期')
+    return
+  }
+
+  const segments = []
+  let year = start.getFullYear()
+  let quarter = Math.floor(start.getMonth() / 3) + 1
+
+  while (true) {
+    const qStart = new Date(year, (quarter - 1) * 3, 1)
+    const qEnd = new Date(year, quarter * 3, 0)
+    // 截断到用户设置的起止日期范围内
+    const segStart = qStart < start ? new Date(start) : qStart
+    const segEnd = qEnd > end ? new Date(end) : qEnd
+
+    if (segStart >= segEnd) break
+
+    segments.push({
+      start_date: segStart.toISOString().slice(0, 10),
+      group_ids: [],
+      stock_pool: [],
+    })
+
+    quarter++
+    if (quarter > 4) {
+      quarter = 1
+      year++
+    }
+    if (year > end.getFullYear() || (year === end.getFullYear() && (quarter - 1) * 3 > end.getMonth())) {
+      break
+    }
+  }
+
+  poolSchedule.value = segments
+  ElMessage.success(`已生成 ${segments.length} 个季度分段`)
+}
+
+const getPoolDateRange = () => {
+  if (poolSchedule.value.length === 0) return '—'
+  const starts = poolSchedule.value
+    .filter(s => s.start_date)
+    .map(s => s.start_date)
+    .sort()
+  if (starts.length === 0) return '—'
+  return `${starts[0]} 起`
+}
+
 const handleStartBacktest = async () => {
   if (!form.value.start_date || !form.value.end_date) {
     ElMessage.warning('请选择起始和结束日期')
@@ -527,10 +737,11 @@ const handleStartBacktest = async () => {
   }
 
   // 交易时间内禁止全市场回测
+  const hasDynamicPool = form.value.use_dynamic_pool && poolSchedule.value.length > 0
   const hasGroupIds = form.value.group_ids && form.value.group_ids.length > 0
   const hasStockPool = false  // 前端不直接传 stock_pool
   const hasLimitedMarket = form.value.markets && form.value.markets.length > 0 && form.value.markets.length < 2
-  const isFullMarket = !hasGroupIds && !hasStockPool && !hasLimitedMarket
+  const isFullMarket = !hasDynamicPool && !hasGroupIds && !hasStockPool && !hasLimitedMarket
 
   if (isFullMarket) {
     ElMessage.warning('交易时间内禁止全市场回测（占用过多系统资源）。请选择候选组作为股票池，或在非交易时段进行全市场回测。')
@@ -558,6 +769,19 @@ const handleStartBacktest = async () => {
       config: {},
     }
 
+    // 动态股票池
+    if (form.value.use_dynamic_pool && poolSchedule.value.length > 0) {
+      body.pool_schedule = poolSchedule.value.map(s => ({
+        start_date: s.start_date,
+        group_ids: s.group_ids,
+      })).filter(s => s.start_date && s.group_ids.length > 0)
+      if (body.pool_schedule.length === 0) {
+        ElMessage.warning('动态股票池至少需要配置一个有效分段（日期+候选组）')
+        return
+      }
+      // 动态池模式下，跳过全市场检查
+    }
+
     const res = await fetch(`/api/v1/ui/${currentAccountId.value}/backtest/runs`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -581,34 +805,14 @@ const handleStartBacktest = async () => {
 // 重试失败的回测
 const rerunBacktest = async (row) => {
   try {
-    const body = {
-      name: row.name,
-      mode: row.mode || 'simulated',
-      strategy_id: row.strategy_id,
-      start_date: row.start_date,
-      end_date: row.end_date,
-      initial_capital: row.initial_capital || 1000000,
-      stop_loss_pct: row.stop_loss_pct || 0.05,
-      take_profit_pct: row.take_profit_pct || 0.15,
-      trailing_stop_pct: row.trailing_stop_pct,
-      stop_execution_price: row.config?.stop_execution_price || 'close',
-      commission_rate: row.commission_rate || 0.0001,
-      slippage_pct: row.slippage_pct || 0,
-      description: row.description || null,
-      markets: row.markets || null,
-      group_ids: row.config?.group_ids || null,
-      config: row.config || {},
-    }
-
-    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/backtest/runs`, {
+    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/backtest/runs/${row.id}/retry`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
     })
     const data = await res.json()
 
     if (data.success) {
-      ElMessage.success('回测任务已重新启动')
+      ElMessage.success(`回测任务已重新启动 (ID: ${data.run_id})`)
       loadHistory()
     } else {
       ElMessage.error(data.message || data.error || '回测启动失败')
@@ -656,6 +860,23 @@ const viewDetail = async (run) => {
     const res = await fetch(`/api/v1/ui/${currentAccountId.value}/backtest/runs/${run.id}`)
     const data = await res.json()
     currentRun.value = data.run
+
+    // 解析 pool_schedule 中的候选组名称
+    if (currentRun.value?.pool_schedule && currentRun.value.pool_schedule.length > 0) {
+      for (const seg of currentRun.value.pool_schedule) {
+        if (seg.group_ids && seg.group_ids.length > 0) {
+          const ids = seg.group_ids
+          const placeholders = ids.map(() => '?').join(',')
+          const groupRes = await fetch(`/api/v1/ui/${currentAccountId.value}/candidate-groups`)
+          const groupData = await groupRes.json()
+          const groups = groupData.groups || []
+          seg.group_names = ids.map(id => {
+            const g = groups.find(g => g.id === id)
+            return g ? g.name : `ID:${id}`
+          })
+        }
+      }
+    }
   } catch (e) {
     console.error('加载回测详情失败:', e)
   }
@@ -961,9 +1182,21 @@ const getGroupNames = (groupIds, groupNamesMap) => {
   return groupIds.map(id => groupNamesMap[String(id)] || `候选组 ${id}`).join(', ')
 }
 
-// 选中变化
+// 选中变化（仅当前页）
 const handleSelectionChange = (selection) => {
   selectedRuns.value = selection
+}
+
+// 翻页
+const handlePageChange = () => {
+  selectedRuns.value = []
+  loadHistory()
+}
+
+const handlePageSizeChange = () => {
+  currentPage.value = 1
+  selectedRuns.value = []
+  loadHistory()
 }
 
 // 双击列表行，回填参数到配置栏
@@ -992,6 +1225,21 @@ const handleRowDblclick = async (row) => {
     form.value.commission_rate = run.commission_rate || 0.0001
     form.value.slippage_pct = run.slippage_pct ? run.slippage_pct * 100 : 0
     form.value.description = run.description || ''
+
+    // 动态股票池
+    if (run.pool_schedule && run.pool_schedule.length > 0) {
+      form.value.use_dynamic_pool = true
+      poolSchedule.value = run.pool_schedule.map(s => ({
+        start_date: s.start_date || '',
+        group_ids: s.group_ids || [],
+        stock_pool: s.stock_pool || [],
+      }))
+      // 清除普通候选组选择，避免混淆
+      form.value.group_ids = []
+    } else {
+      form.value.use_dynamic_pool = false
+      poolSchedule.value = []
+    }
 
     ElMessage.success('已加载回测参数到配置栏')
   } catch (e) {
@@ -1122,7 +1370,7 @@ onMounted(() => {
     if (hasRunning) {
       await loadHistory(true)
     }
-  }, 3000)
+  }, 5000)
 })
 
 onBeforeUnmount(() => {

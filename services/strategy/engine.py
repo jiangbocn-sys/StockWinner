@@ -313,6 +313,31 @@ class StrategyEngine:
 
         env["query_db"] = _query_db
 
+        # 注入 kline.db 同步查询函数（财务数据、行业分类等）
+        def _query_kline_db(sql: str, params: tuple = None):
+            """同步查询 kline.db（只读）。返回 List[Dict] 或 int。"""
+            import sqlite3
+            kline_path = "data/kline.db"
+            conn = sqlite3.connect(kline_path)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            try:
+                if params:
+                    cursor.execute(sql, params)
+                else:
+                    cursor.execute(sql)
+                if sql.strip().upper().startswith("SELECT"):
+                    rows = [dict(r) for r in cursor.fetchall()]
+                    return rows
+                return cursor.rowcount
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+
+        env["query_kline_db"] = _query_kline_db
+
         # 注入技术指标工具
         env["indicators"] = context.get("indicators", {})
 
@@ -399,6 +424,20 @@ class StrategyEngine:
         )
         bought_codes = {row["stock_code"] for row in bought_today}
 
+        # 1.5. 读取策略配置的最大信号数量限制（仅限制本次执行写入的数量）
+        strategy_config_row = await db.fetchone(
+            "SELECT config FROM strategies WHERE id = ?",
+            (strategy_id,)
+        )
+        max_signal_count = 0  # 0 = 不限制
+        if strategy_config_row and strategy_config_row.get("config"):
+            try:
+                import json
+                sconfig = json.loads(strategy_config_row["config"]) if isinstance(strategy_config_row["config"], str) else strategy_config_row["config"]
+                max_signal_count = int(sconfig.get("max_buy_count", 0))
+            except Exception:
+                pass
+
         # 2. 查询账户下所有待交易/监控中的股票（不限组，用于跨组去重）
         existing_rows = await db.fetchall(
             "SELECT stock_code, buy_price, stop_loss_price, take_profit_price FROM watchlist WHERE account_id = ? AND status IN ('pending', 'watching')",
@@ -454,7 +493,11 @@ class StrategyEngine:
                     # 价格更高或无新价格 → 保留原信号
                     skipped += 1
             else:
-                # 全新信号 → 插入
+                # 全新信号 → 检查是否达到本次执行的数量上限
+                if max_signal_count > 0 and (added + updated) >= max_signal_count:
+                    skipped += 1
+                    continue
+
                 await db.insert("watchlist", {
                     "account_id": account_id,
                     "strategy_id": strategy_id,

@@ -57,7 +57,10 @@ def _get_latest_price(stock_code: str) -> Optional[float]:
 async def refresh_position_prices(
     account_id: str = Path(..., description="账户 ID"),
 ):
-    """刷新持仓当前价为最新行情，并返回更新后的持仓列表"""
+    """刷新持仓当前价为最新行情，并返回更新后的持仓列表
+
+    使用 gateway 批量获取行情（一次 SDK 调用），替代逐个查询。
+    """
     db = get_db_manager()
 
     account = await db.fetchone(
@@ -72,22 +75,56 @@ async def refresh_position_prices(
         (account_id,)
     )
 
-    updated = []
+    if not positions:
+        account_data = await db.fetchone(
+            "SELECT available_cash FROM accounts WHERE account_id = ?",
+            (account_id,)
+        )
+        available_cash = float(account_data["available_cash"]) if account_data else 0.0
+        return {
+            "success": True,
+            "account_id": account_id,
+            "positions": [],
+            "available_cash": available_cash
+        }
+
+    # 批量获取所有持仓股票的行情（一次 SDK 调用）
+    stock_codes = [pos["stock_code"] for pos in positions]
+    try:
+        from services.trading.gateway import get_gateway
+        gateway = await get_gateway()
+        market_data = await gateway.get_batch_market_data(stock_codes)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"批量获取行情失败: {e}")
+
+    # 更新每个持仓的价格
+    update_list = []
+    price_map = {}
     for pos in positions:
-        price = _get_latest_price(pos["stock_code"])
+        code = pos["stock_code"]
+        md = market_data.get(code)
+        price = md.current_price if md and md.current_price and md.current_price > 0 else None
+
         if price and price > 0:
-            # 更新数据库中的 current_price 及相关字段
             quantity = pos["quantity"]
             avg_cost = pos["avg_cost"]
             new_market_value = price * quantity
             new_profit_loss = new_market_value - (avg_cost * quantity)
-            await db.execute(
-                "UPDATE stock_positions SET current_price = ?, market_value = ?, profit_loss = ?, updated_at = ? WHERE id = ?",
-                (price, new_market_value, new_profit_loss, datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8))).isoformat(), pos["id"])
-            )
-            updated.append({**pos, "current_price": price, "market_value": new_market_value, "profit_loss": new_profit_loss})
+            update_list.append((
+                price, new_market_value, new_profit_loss,
+                datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8))).isoformat(),
+                pos["id"]
+            ))
+            price_map[code] = price
         else:
-            updated.append(pos)
+            price_map[code] = pos.get("current_price")
+
+    # 批量更新数据库
+    if update_list:
+        await db.executemany(
+            "UPDATE stock_positions SET current_price = ?, market_value = ?, profit_loss = ?, updated_at = ? WHERE id = ?",
+            update_list
+        )
 
     # 重新读取最新数据返回
     positions = await db.fetchall(
