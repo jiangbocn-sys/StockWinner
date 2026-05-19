@@ -8,10 +8,14 @@ from typing import List, Optional, Dict, Any
 from services.common.database import get_db_manager
 from services.trading.gateway import get_gateway
 
+import sqlite3
+import os
+
 router = APIRouter()
 
-
 import asyncio
+
+KLINE_DB_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "data", "kline.db")
 
 @router.get("/api/v1/ui/{account_id}/market/test-query-kline")
 async def test_query_kline_batch(
@@ -329,6 +333,64 @@ async def get_kline_data(
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"获取 K 线数据失败：{str(e)}")
+
+
+@router.get("/api/v1/ui/{account_id}/stocks/{stock_code}/kline-local")
+async def get_local_kline(
+    account_id: str = Path(..., description="账户 ID"),
+    stock_code: str = Path(..., description="股票代码，如 600519 或 600519.SH"),
+    months: int = Query(6, ge=1, le=24, description="回溯月数，默认 6 个月"),
+):
+    """
+    从本地 kline.db 读取 K 线数据（快速，不占用 SDK 连接）
+    用于 Watchlist 弹窗、回测弹窗等需要频繁切换查看的场景
+    """
+    db = get_db_manager()
+    account = await db.fetchone(
+        "SELECT 1 FROM accounts WHERE account_id = ? AND is_active = 1", (account_id,)
+    )
+    if not account:
+        raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
+
+    # 规范化股票代码
+    if "." not in stock_code:
+        stock_code = f"{stock_code}.SH" if stock_code.startswith("6") else f"{stock_code}.SZ"
+
+    from datetime import datetime, timedelta
+    from services.common.timezone import get_china_time
+    end_dt = get_china_time()
+    start_dt = end_dt - timedelta(days=months * 30)
+    start_str = start_dt.strftime("%Y-%m-%d")
+    end_str = end_dt.strftime("%Y-%m-%d")
+
+    try:
+        conn = sqlite3.connect(KLINE_DB_PATH, timeout=10)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT trade_date, open, close, low, high, volume, amount
+            FROM kline_data
+            WHERE stock_code = ? AND trade_date >= ? AND trade_date <= ?
+            ORDER BY trade_date ASC
+        """, (stock_code, start_str, end_str))
+        rows = cursor.fetchall()
+        conn.close()
+
+        kline = []
+        for r in rows:
+            kline.append({
+                "trade_date": str(r["trade_date"]).replace("-", ""),
+                "open": float(r["open"]),
+                "close": float(r["close"]),
+                "low": float(r["low"]),
+                "high": float(r["high"]),
+                "volume": float(r["volume"]) if r["volume"] else 0,
+                "amount": float(r["amount"]) if r["amount"] else 0,
+            })
+
+        return {"success": True, "stock_code": stock_code, "kline": kline, "count": len(kline)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"读取本地 K 线数据失败：{str(e)}")
 
 
 @router.get("/api/v1/ui/{account_id}/market/kline/latest")

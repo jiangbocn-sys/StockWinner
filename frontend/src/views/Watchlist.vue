@@ -125,8 +125,7 @@
               </div>
             </template>
 
-            <el-table :data="paginatedStocks" stripe style="width: 100%" v-loading="stocksLoading" @selection-change="handleStockSelectionChange" @row-dblclick="showKline"
-              :default-sort="{ prop: 'updated_at', order: 'descending' }">
+            <el-table :data="paginatedStocks" stripe style="width: 100%" v-loading="stocksLoading" @selection-change="handleStockSelectionChange" @row-dblclick="showKline">
               <el-table-column type="selection" width="50" />
               <el-table-column prop="stock_code" label="股票代码" width="120" sortable />
               <el-table-column prop="stock_name" label="股票名称" width="120" sortable />
@@ -512,6 +511,15 @@
 
       <!-- K 线图弹窗 -->
       <el-dialog v-model="klineVisible" :title="`${klineStockInfo.name} (${klineStockInfo.code}) K线走势`" width="85%" top="5vh" @close="destroyKlineChart">
+        <div class="kline-nav">
+          <el-button size="small" @click="prevStock" :disabled="!hasPrevStock">
+            <el-icon><ArrowLeft /></el-icon> 上一只
+          </el-button>
+          <span class="kline-nav-text">{{ klineNavText }}</span>
+          <el-button size="small" @click="nextStock" :disabled="!hasNextStock">
+            下一只 <el-icon><ArrowRight /></el-icon>
+          </el-button>
+        </div>
         <div ref="klineChartRef" style="width: 100%; height: 550px"></div>
       </el-dialog>
     </el-main>
@@ -521,7 +529,7 @@
 <script setup>
 import { ref, reactive, onMounted, computed, watch, nextTick } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Search, Refresh, Plus, MoreFilled, Upload, Loading, WarningFilled, Edit, Delete } from '@element-plus/icons-vue'
+import { Search, Refresh, Plus, MoreFilled, Upload, Loading, WarningFilled, Edit, Delete, ArrowLeft, ArrowRight } from '@element-plus/icons-vue'
 import { useAccountStore } from '../stores/account'
 import NavBar from '../components/NavBar.vue'
 import * as echarts from 'echarts'
@@ -557,16 +565,40 @@ const filterStatus = ref('')
 // 分页
 const currentPage = ref(1)
 const pageSize = 20
+
+// 当前组股票（含排序，与表格 default-sort 一致）
+const sortedCurrentStocks = computed(() => {
+  const sorted = [...currentStocks.value]
+  sorted.sort((a, b) => {
+    const aVal = a.updated_at || ''
+    const bVal = b.updated_at || ''
+    // 默认降序（descending）
+    return bVal.localeCompare(aVal)
+  })
+  return sorted
+})
+
 const paginatedStocks = computed(() => {
+  const sorted = sortedCurrentStocks.value
   const start = (currentPage.value - 1) * pageSize
-  return currentStocks.value.slice(start, start + pageSize)
+  return sorted.slice(start, start + pageSize)
 })
 
 // K 线图
 const klineVisible = ref(false)
 const klineChartRef = ref(null)
 const klineStockInfo = ref({ code: '', name: '' })
+const klineStockIndex = ref(-1)
 let klineChart = null
+
+const hasPrevStock = computed(() => klineStockIndex.value > 0)
+const hasNextStock = computed(() => klineStockIndex.value >= 0 && klineStockIndex.value < sortedCurrentStocks.value.length - 1)
+const klineNavText = computed(() => {
+  const total = sortedCurrentStocks.value.length
+  const idx = klineStockIndex.value
+  if (idx < 0 || total === 0) return ''
+  return `${idx + 1} / ${total}`
+})
 
 // 策略
 const strategies = ref([])
@@ -880,24 +912,63 @@ const loadCurrentGroupStocks = async () => {
 // ========== K 线图 ==========
 
 const showKline = async (row) => {
-  klineStockInfo.value = { code: row.stock_code, name: row.stock_name }
+  const idx = sortedCurrentStocks.value.findIndex(s => s.stock_code === row.stock_code)
+  klineStockIndex.value = idx
   klineVisible.value = true
+  await loadKlineData(row.stock_code, row.stock_name)
+}
 
-  // 计算日期：最近三个月
+const loadKlineData = async (code, name) => {
+  klineStockInfo.value = { code, name }
+
+  // 优先从本地 kline.db 读取（避免 SDK 串行锁竞争导致越切越慢）
+  try {
+    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/stocks/${code}/kline-local?months=6`)
+    if (res.ok) {
+      const data = await res.json()
+      await nextTick()
+      if (data.success && data.kline && data.kline.length > 0) {
+        renderKlineChart(data.kline)
+        return
+      }
+    }
+  } catch (e) {
+    console.warn('本地 K 线数据读取失败，回退 SDK:', e.message)
+  }
+
+  // 回退：SDK 查询
   const endDt = new Date()
   const startDt = new Date()
-  startDt.setMonth(startDt.getMonth() - 3)
+  startDt.setMonth(startDt.getMonth() - 6)
   const start = startDt.toISOString().slice(0, 10).replace(/-/g, '')
   const end = endDt.toISOString().slice(0, 10).replace(/-/g, '')
 
   try {
-    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/market/kline?stock_code=${row.stock_code}&period=day&start_date=${start}&end_date=${end}`)
+    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/market/kline?stock_code=${code}&period=day&start_date=${start}&end_date=${end}`)
     const data = await res.json()
     await nextTick()
     renderKlineChart(data.data?.kline || [])
   } catch (e) {
     console.error('加载 K 线数据失败:', e)
   }
+}
+
+const prevStock = async () => {
+  if (!hasPrevStock.value) return
+  const idx = klineStockIndex.value - 1
+  const row = sortedCurrentStocks.value[idx]
+  if (!row) return
+  klineStockIndex.value = idx
+  await loadKlineData(row.stock_code, row.stock_name)
+}
+
+const nextStock = async () => {
+  if (!hasNextStock.value) return
+  const idx = klineStockIndex.value + 1
+  const row = sortedCurrentStocks.value[idx]
+  if (!row) return
+  klineStockIndex.value = idx
+  await loadKlineData(row.stock_code, row.stock_name)
 }
 
 const renderKlineChart = (klineData) => {
@@ -962,8 +1033,13 @@ const renderKlineChart = (klineData) => {
       },
     ],
     dataZoom: [{ type: 'inside' }, { type: 'slider', xAxisIndex: [0, 1] }],
-  })
-  window.addEventListener('resize', () => klineChart && klineChart.resize())
+  }, true)
+  // resize 监听器只注册一次（在初始化时）
+  if (!klineChart._resizeBound) {
+    const handler = () => klineChart && klineChart.resize()
+    window.addEventListener('resize', handler)
+    klineChart._resizeBound = true
+  }
 }
 
 const destroyKlineChart = () => {
@@ -1655,5 +1731,21 @@ onMounted(async () => {
 
 .pagination-bar {
   display: flex; justify-content: center; padding: 12px 0;
+}
+
+.kline-nav {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+
+.kline-nav-text {
+  font-size: 14px;
+  color: #606266;
+  min-width: 80px;
+  text-align: center;
+  font-family: monospace;
 }
 </style>
