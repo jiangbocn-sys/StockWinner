@@ -52,7 +52,25 @@
 
       <!-- 全部策略排行榜（未选择单策略时显示） -->
       <el-card v-if="!selectedStrategyId && allStats.length > 0" style="margin-bottom: 20px">
-        <template #header><span>策略排行榜</span></template>
+        <template #header>
+          <div class="card-header">
+            <span>策略排行榜</span>
+            <el-dropdown @command="(fmt) => handleExportAllStats(fmt)">
+              <el-button type="success" size="small">
+                <el-icon><Download /></el-icon>导出
+              </el-button>
+              <template #dropdown>
+                <el-dropdown-menu>
+                  <el-dropdown-item command="csv">CSV</el-dropdown-item>
+                  <el-dropdown-item command="json">JSON</el-dropdown-item>
+                  <el-dropdown-item command="md">Markdown</el-dropdown-item>
+                  <el-dropdown-item command="txt">TXT</el-dropdown-item>
+                  <el-dropdown-item command="excel">Excel</el-dropdown-item>
+                </el-dropdown-menu>
+              </template>
+            </el-dropdown>
+          </div>
+        </template>
         <el-table :data="allStats" stripe>
           <el-table-column label="策略名" width="200">
             <template #default="{ row }">{{ row.name }}</template>
@@ -92,7 +110,23 @@
         <template #header>
           <div class="card-header">
             <span>选股明细</span>
-            <el-button type="primary" size="small" @click="loadPerformance"><el-icon><Refresh /></el-icon>刷新</el-button>
+            <el-space>
+              <el-dropdown @command="(fmt) => handleExportSelections(fmt)">
+                <el-button type="success" size="small">
+                  <el-icon><Download /></el-icon>导出
+                </el-button>
+                <template #dropdown>
+                  <el-dropdown-menu>
+                    <el-dropdown-item command="csv">CSV</el-dropdown-item>
+                    <el-dropdown-item command="json">JSON</el-dropdown-item>
+                    <el-dropdown-item command="md">Markdown</el-dropdown-item>
+                    <el-dropdown-item command="txt">TXT</el-dropdown-item>
+                    <el-dropdown-item command="excel">Excel</el-dropdown-item>
+                  </el-dropdown-menu>
+                </template>
+              </el-dropdown>
+              <el-button type="primary" size="small" @click="loadPerformance"><el-icon><Refresh /></el-icon>刷新</el-button>
+            </el-space>
           </div>
         </template>
         <el-table :data="selections" stripe>
@@ -137,9 +171,10 @@
 
 <script setup>
 import { ref, onMounted } from 'vue'
-import { Refresh } from '@element-plus/icons-vue'
+import { Refresh, Download } from '@element-plus/icons-vue'
 import { useAccountStore } from '../stores/account'
 import NavBar from '../components/NavBar.vue'
+import { exportTable as doExport } from '@/utils/exportHelper'
 import * as echarts from 'echarts'
 
 const accountStore = useAccountStore()
@@ -161,6 +196,50 @@ const stats = ref({
 
 const equityChartRef = ref(null)
 let equityChart = null
+
+const allStatsColumns = [
+  { label: '策略名', prop: 'name' },
+  { label: '选出', prop: 'total_selections' },
+  { label: '买入', prop: 'bought_count' },
+  { label: '交易', prop: 'total_trades' },
+  { label: '胜率', prop: 'win_rate' },
+  { label: '总盈亏', prop: 'total_pnl' },
+  { label: '执行率', prop: 'execution_rate' },
+]
+
+const selectionColumns = [
+  { label: '代码', prop: 'stock_code' },
+  { label: '名称', prop: 'stock_name' },
+  { label: '选出日期', prop: 'selected_at' },
+  { label: '选出价', prop: 'buy_price' },
+  { label: '买入价', prop: 'buy_price_actual' },
+  { label: '卖出价', prop: 'sell_price' },
+  { label: '盈亏', prop: 'profit_loss' },
+  { label: '状态', prop: 'bought' },
+]
+
+const handleExportAllStats = (format) => {
+  const data = allStats.value.map(s => ({
+    ...s,
+    win_rate: s.win_rate + '%',
+    total_pnl: '¥' + formatNumber(s.total_pnl),
+    execution_rate: s.execution_rate + '%',
+  }))
+  doExport(allStatsColumns, data, '策略排行榜', format)
+}
+
+const handleExportSelections = (format) => {
+  const data = selections.value.map(s => ({
+    ...s,
+    selected_at: (s.selected_at || '').split('T')[0],
+    buy_price: s.buy_price != null ? '¥' + s.buy_price : '-',
+    buy_price_actual: s.buy_price_actual != null ? '¥' + s.buy_price_actual : '-',
+    sell_price: s.sell_price != null ? '¥' + s.sell_price : '-',
+    profit_loss: s.profit_loss != null ? (s.profit_loss >= 0 ? '+' : '') + '¥' + formatNumber(Math.abs(s.profit_loss)) : '-',
+    bought: s.bought ? '已买' : '未买',
+  }))
+  doExport(selectionColumns, data, '选股明细', format)
+}
 
 const formatNumber = (num) => {
   return Number(num || 0).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })

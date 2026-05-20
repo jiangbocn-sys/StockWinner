@@ -5,6 +5,20 @@
       <div class="page-header">
         <h2>交易信号 - {{ currentAccount?.display_name }}</h2>
         <el-space>
+          <el-dropdown @command="(fmt) => handleExportSignals(fmt)">
+            <el-button type="success" size="small">
+              <el-icon><Download /></el-icon>导出
+            </el-button>
+            <template #dropdown>
+              <el-dropdown-menu>
+                <el-dropdown-item command="csv">CSV</el-dropdown-item>
+                <el-dropdown-item command="json">JSON</el-dropdown-item>
+                <el-dropdown-item command="md">Markdown</el-dropdown-item>
+                <el-dropdown-item command="txt">TXT</el-dropdown-item>
+                <el-dropdown-item command="excel">Excel</el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
           <el-button @click="loadSignals">
             <el-icon><Refresh /></el-icon>
             刷新
@@ -247,8 +261,10 @@
 <script setup>
 import { ref, computed, onMounted, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { Refresh, Download } from '@element-plus/icons-vue'
 import { useAccountStore } from '../stores/account'
 import NavBar from '../components/NavBar.vue'
+import { exportTable as doExport } from '@/utils/exportHelper'
 
 const accountStore = useAccountStore()
 const currentAccountId = computed(() => accountStore.currentAccountId)
@@ -551,6 +567,31 @@ function startDrag(e) {
 // ============================================================
 // 信号列表（原有逻辑）
 // ============================================================
+
+const signalColumns = [
+  { label: '生成时间', prop: 'created_at' },
+  { label: '股票代码', prop: 'stock_code' },
+  { label: '股票名称', prop: 'stock_name' },
+  { label: '信号类型', prop: 'signal_type' },
+  { label: '委托价', prop: 'price' },
+  { label: '现价', prop: 'current_price' },
+  { label: '数量', prop: 'target_quantity' },
+  { label: '状态', prop: 'status' },
+  { label: '执行时间', prop: 'executed_at' },
+]
+
+const handleExportSignals = (format) => {
+  const data = signals.value.map(s => ({
+    ...s,
+    signal_type: getSignalText(s.signal_type),
+    status: getStatusText(s.status),
+    created_at: formatTime(s.created_at),
+    executed_at: formatTime(s.executed_at),
+    price: s.price != null ? '¥' + s.price.toFixed(2) : '-',
+    current_price: s.current_price != null ? '¥' + s.current_price.toFixed(2) : '-',
+  }))
+  doExport(signalColumns, data, '交易信号', format)
+}
 
 const loadSignals = async () => {
   loading.value = true

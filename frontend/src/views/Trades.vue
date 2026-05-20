@@ -164,6 +164,18 @@
                         <el-icon><Refresh /></el-icon>
                         刷新
                       </el-button>
+                      <el-dropdown @command="handleExportTrades">
+                        <el-button type="success" size="small"><el-icon><Download /></el-icon>导出</el-button>
+                        <template #dropdown>
+                          <el-dropdown-menu>
+                            <el-dropdown-item command="csv">CSV</el-dropdown-item>
+                            <el-dropdown-item command="json">JSON</el-dropdown-item>
+                            <el-dropdown-item command="md">Markdown</el-dropdown-item>
+                            <el-dropdown-item command="txt">TXT</el-dropdown-item>
+                            <el-dropdown-item command="excel">Excel</el-dropdown-item>
+                          </el-dropdown-menu>
+                        </template>
+                      </el-dropdown>
                     </el-space>
                   </div>
                 </template>
@@ -261,7 +273,8 @@
 import { ref, reactive, onMounted, computed, watch } from 'vue'
 import { useAccountStore } from '../stores/account'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Refresh } from '@element-plus/icons-vue'
+import { Refresh, Download } from '@element-plus/icons-vue'
+import { exportTable as doExport } from '@/utils/exportHelper'
 import NavBar from '../components/NavBar.vue'
 
 const accountStore = useAccountStore()
@@ -482,6 +495,23 @@ const stats = reactive({
   sellCount: 0,
   winRate: 0
 })
+
+const tradeColumns = [
+  { label: '时间', prop: 'trade_time' },
+  { label: '代码', prop: 'stock_code' },
+  { label: '名称', prop: 'stock_name' },
+  { label: '操作', prop: 'trade_type' },
+  { label: '数量', prop: 'quantity' },
+  { label: '价格', prop: 'price' },
+  { label: '金额', prop: 'amount' },
+  { label: '手续费', prop: 'commission' },
+  { label: '触发来源', prop: 'trigger_source' },
+  { label: '状态', prop: 'status' },
+]
+
+const handleExportTrades = (format) => {
+  doExport(tradeColumns, trades.value, '交易记录', format)
+}
 
 const loadTrades = async () => {
   try {

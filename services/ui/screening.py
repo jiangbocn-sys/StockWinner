@@ -450,7 +450,8 @@ async def run_screening_once(
     strategy_id: Optional[int] = Body(None, description="策略 ID（可选，不传则扫描所有激活策略）"),
     use_local: bool = Body(True, description="是否使用本地数据源（默认 True，速度快）"),
     pending_to_temp: bool = Body(False, description="是否暂存到临时表待确认（默认 False）"),
-    allow_draft: bool = Body(False, description="是否允许执行 draft/inactive 状态的策略（默认 False）")
+    allow_draft: bool = Body(False, description="是否允许执行 draft/inactive 状态的策略（默认 False）"),
+    stock_scope: Optional[str] = Body(None, description="选股范围：market=全市场, group=候选组（仅代码型策略有效）")
 ):
     """立即执行一次选股扫描"""
     db = get_db_manager()
@@ -469,7 +470,8 @@ async def run_screening_once(
             strategy_id,
             use_local=use_local,
             pending_to_temp=pending_to_temp,
-            require_active=not allow_draft
+            require_active=not allow_draft,
+            override_stock_scope=stock_scope,
         )
         return {
             "success": True,

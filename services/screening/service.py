@@ -12,7 +12,7 @@ import asyncio
 from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional, Any
 from pathlib import Path
-from services.common.database import get_db_manager, configure_kline_connection
+from services.common.database import get_db_manager, configure_kline_connection, get_sync_connection
 from services.common.account_manager import get_account_manager
 from services.common.timezone import get_china_time, format_china_time, CHINA_TZ
 from services.common.technical_indicators import calculate_indicators_for_screening, calculate_rsi
@@ -121,7 +121,8 @@ class ScreeningService:
         strategy_id: Optional[int],
         use_local: bool = True,
         pending_to_temp: bool = False,  # 新参数：是否暂存到临时表
-        require_active: bool = True     # 是否要求策略必须是 active 状态
+        require_active: bool = True,     # 是否要求策略必须是 active 状态
+        override_stock_scope: Optional[str] = None  # 选股范围覆盖（market=全市场, group=候选组）
     ):
         """执行一次选股扫描
 
@@ -131,6 +132,7 @@ class ScreeningService:
             use_local: 是否使用本地数据源（默认 True，速度更快）
             pending_to_temp: 是否暂存到临时表待确认（默认 False）
             require_active: 是否要求策略必须是 active 状态（默认 True，手动执行时可为 False）
+            override_stock_scope: 选股范围覆盖（可选，前端选股弹窗传入）
         """
         db = get_db_manager()
         account_manager = get_account_manager()
@@ -176,6 +178,16 @@ class ScreeningService:
                 continue
 
             print(f"[Screening] 执行策略 {strategy_idx + 1}/{total_strategies}: {strategy.get('name')}")
+
+            # 检测代码型策略 — 使用策略引擎执行
+            strategy_type = strategy.get('strategy_type', 'screening')
+            if strategy_type == 'python':
+                self._progress["current_phase"] = "scanning"
+                stock_scope = override_stock_scope or 'market'
+                await self._run_python_strategy(
+                    account_id, strategy, stock_scope, pending_to_temp
+                )
+                continue
 
             # 解析策略配置
             config = self._parse_config(strategy.get('config'))
@@ -815,6 +827,183 @@ class ScreeningService:
             print(f"[Screening] 错误列表：{errors[:5]}...")
 
         return candidates
+
+    async def _get_market_stock_list(self) -> list:
+        """获取全市场股票列表（从 stock_daily_factors 表，有因子数据的股票）"""
+        import sqlite3
+        conn = sqlite3.connect(str(KLINE_DB), timeout=60)
+        configure_kline_connection(conn)
+        cursor = conn.cursor()
+        cursor.execute("SELECT MAX(trade_date) FROM stock_daily_factors")
+        latest_date = cursor.fetchone()[0]
+        if not latest_date:
+            conn.close()
+            return []
+        cursor.execute(
+            "SELECT DISTINCT stock_code FROM stock_daily_factors WHERE trade_date = ?",
+            (latest_date,)
+        )
+        codes = [row[0] for row in cursor.fetchall()]
+        conn.close()
+
+        stock_name_map = _load_stock_names()
+        return [{"stock_code": c, "stock_name": stock_name_map.get(c, c)} for c in codes]
+
+    async def _run_python_strategy(
+        self,
+        account_id: str,
+        strategy: Dict,
+        stock_scope: str,
+        pending_to_temp: bool
+    ):
+        """
+        执行代码型策略 — 选股服务版本
+
+        参考 scheduler_service.py 的 _execute_strategy_task 实现，
+        构建相同的执行上下文，但选股范围可配置（全市场 / 候选组）。
+        """
+        from services.strategy.engine import get_strategy_engine
+        from services.data.local_data_service import get_local_data_service
+        from services.common import technical_indicators
+        from services.common.timezone import get_china_time
+
+        db = get_db_manager()
+
+        # 1. 构建股票列表
+        group_id = None
+        if stock_scope == 'market':
+            stocks = await self._get_market_stock_list()
+            print(f"[Screening] 代码策略选股范围：全市场，共 {len(stocks)} 只股票")
+        elif stock_scope == 'group':
+            group_id = await self._ensure_candidate_group(
+                account_id, strategy.get('id'), strategy.get('name')
+            )
+            stocks = await db.fetchall(
+                "SELECT * FROM watchlist WHERE account_id = ? AND group_id = ? AND status IN ('pending', 'watching')",
+                (account_id, group_id)
+            )
+            print(f"[Screening] 代码策略选股范围：候选组 #{group_id}，共 {len(stocks)} 只股票")
+        else:
+            print(f"[Screening] 不支持的选股范围: {stock_scope}")
+            return
+
+        if not stocks:
+            print(f"[Screening] 股票列表为空 ({stock_scope})，跳过策略执行")
+            return
+
+        # 2. 构建数据获取函数
+        def _get_factors(stock_code: str, date: str = None):
+            lds = get_local_data_service()
+            target_date = date or get_china_time().strftime("%Y-%m-%d")
+            return lds.get_daily_factors(stock_code, target_date)
+
+        def _get_factors_batch(codes: list, date: str = None):
+            lds = get_local_data_service()
+            target_date = date or get_china_time().strftime("%Y-%m-%d")
+            return lds.get_daily_factors_batch(codes, target_date)
+
+        def _get_kline_local(stock_code: str, limit: int = 100, start_date: str = None):
+            lds = get_local_data_service()
+            return lds.get_kline_data(stock_code, start_date=start_date, limit=limit)
+
+        def _get_batch_kline(codes: list, limit: int = 100):
+            lds = get_local_data_service()
+            return lds.get_batch_kline(codes, limit=limit)
+
+        def _get_kline_smart(codes: list, lookback: int = 100):
+            lds = get_local_data_service()
+            return lds.get_kline_smart(codes, lookback=lookback)
+
+        import sqlite3 as _sqlite3
+
+        def _query_kline_db(sql: str, params: tuple = None):
+            conn = _sqlite3.connect(str(KLINE_DB), timeout=60)
+            configure_kline_connection(conn)
+            conn.row_factory = _sqlite3.Row
+            cursor = conn.cursor()
+            try:
+                if params:
+                    cursor.execute(sql, params)
+                else:
+                    cursor.execute(sql)
+                if sql.strip().upper().startswith("SELECT"):
+                    return [dict(r) for r in cursor.fetchall()]
+                return cursor.rowcount
+            finally:
+                conn.close()
+
+        def _query_db(sql: str, params: tuple = None):
+            conn = get_sync_connection()
+            cursor = conn.cursor()
+            try:
+                if params:
+                    cursor.execute(sql, params)
+                else:
+                    cursor.execute(sql)
+                if sql.strip().upper().startswith("SELECT"):
+                    return [dict(r) for r in cursor.fetchall()]
+                else:
+                    conn.commit()
+                    return cursor.rowcount
+            except Exception:
+                conn.rollback()
+                raise
+
+        # 3. 构建 context
+        context = {
+            "stocks": [dict(s) for s in stocks],
+            "account_id": account_id,
+            "today": get_china_time().strftime("%Y-%m-%d"),
+            "strategy": strategy,
+            "indicators": {
+                "calculate_ma": technical_indicators.calculate_ma,
+                "calculate_rsi": technical_indicators.calculate_rsi,
+                "calculate_macd": technical_indicators.calculate_macd,
+                "calculate_kdj": technical_indicators.calculate_kdj,
+                "calculate_bollinger_bands": technical_indicators.calculate_bollinger_bands,
+                "calculate_adx": technical_indicators.calculate_adx,
+                "calculate_atr": technical_indicators.calculate_atr,
+                "calculate_ema": technical_indicators.calculate_ema,
+            },
+            "get_factors": _get_factors,
+            "get_factors_batch": _get_factors_batch,
+            "get_kline_local": _get_kline_local,
+            "get_batch_kline": _get_batch_kline,
+            "get_kline_smart": _get_kline_smart,
+            "query_kline_db": _query_kline_db,
+            "query_db": _query_db,
+        }
+
+        # 4. 执行策略
+        engine = get_strategy_engine()
+        signals = engine.execute_strategy(strategy, context)
+        print(f"[Screening] 策略 '{strategy['name']}' 返回 {len(signals)} 个信号")
+
+        # 5. 确保有候选组（全市场和候选组模式都需要）
+        if not group_id:
+            group_id = await self._ensure_candidate_group(
+                account_id, strategy['id'], strategy.get('name', '')
+            )
+
+        # 6. 写入 watchlist 或 temp_candidates
+        if pending_to_temp:
+            for signal in signals:
+                await self._add_to_temp_candidates(
+                    account_id, strategy['id'], {
+                        'stock_code': signal['stock_code'],
+                        'stock_name': signal['stock_name'],
+                        'reason': signal.get('reason', ''),
+                        'current_price': signal.get('buy_price') or 0,
+                        'match_score': 1.0,
+                    },
+                    strategy_config={},
+                    group_id=group_id,
+                )
+        else:
+            await engine.write_signals_to_watchlist(
+                signals, account_id, strategy['id'], group_id,
+                strategy_name=strategy.get('name', ''),
+            )
 
     async def _ensure_candidate_group(
         self,

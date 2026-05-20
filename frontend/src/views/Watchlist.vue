@@ -121,6 +121,18 @@
                   <el-button type="warning" size="small" :disabled="selectedStocks.length === 0" @click="showBatchStatusDialog = true">
                     改状态{{ selectedStocks.length > 0 ? ` (${selectedStocks.length})` : '' }}
                   </el-button>
+                  <el-dropdown @command="handleExportWatchlist">
+                    <el-button type="success" size="small"><el-icon><Download /></el-icon>导出</el-button>
+                    <template #dropdown>
+                      <el-dropdown-menu>
+                        <el-dropdown-item command="csv">CSV</el-dropdown-item>
+                        <el-dropdown-item command="json">JSON</el-dropdown-item>
+                        <el-dropdown-item command="md">Markdown</el-dropdown-item>
+                        <el-dropdown-item command="txt">TXT</el-dropdown-item>
+                        <el-dropdown-item command="excel">Excel</el-dropdown-item>
+                      </el-dropdown-menu>
+                    </template>
+                  </el-dropdown>
                 </el-space>
               </div>
             </template>
@@ -316,6 +328,12 @@
             <el-radio-group v-model="strategySelectForm.useLocal">
               <el-radio :value="true">本地数据（快）</el-radio>
               <el-radio :value="false">SDK 实时（慢）</el-radio>
+            </el-radio-group>
+          </el-form-item>
+          <el-form-item v-if="selectedStrategy?.strategy_type === 'python'" label="选股范围">
+            <el-radio-group v-model="strategySelectForm.stockScope">
+              <el-radio value="market">全市场</el-radio>
+              <el-radio value="group">候选组内股票</el-radio>
             </el-radio-group>
           </el-form-item>
         </el-form>
@@ -529,7 +547,7 @@
 <script setup>
 import { ref, reactive, onMounted, computed, watch, nextTick } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Search, Refresh, Plus, MoreFilled, Upload, Loading, WarningFilled, Edit, Delete, ArrowLeft, ArrowRight } from '@element-plus/icons-vue'
+import { Search, Refresh, Plus, MoreFilled, Upload, Loading, WarningFilled, Edit, Delete, ArrowLeft, ArrowRight, Download } from '@element-plus/icons-vue'
 import { useAccountStore } from '../stores/account'
 import NavBar from '../components/NavBar.vue'
 import * as echarts from 'echarts'
@@ -600,6 +618,26 @@ const klineNavText = computed(() => {
   return `${idx + 1} / ${total}`
 })
 
+// 导出功能
+import { exportTable as doExport } from '@/utils/exportHelper'
+
+const watchlistColumns = [
+  { label: '股票代码', prop: 'stock_code' },
+  { label: '股票名称', prop: 'stock_name' },
+  { label: '入选原因', prop: 'reason' },
+  { label: '买入价', prop: 'buy_price' },
+  { label: '现价', prop: 'current_price' },
+  { label: '止损价', prop: 'stop_loss_price' },
+  { label: '止盈价', prop: 'take_profit_price' },
+  { label: '目标数量', prop: 'target_quantity' },
+  { label: '状态', prop: 'status' },
+  { label: '更新时间', prop: 'updated_at' },
+]
+
+const handleExportWatchlist = (format) => {
+  doExport(watchlistColumns, currentStocks.value, '候选股票', format)
+}
+
 // 策略
 const strategies = ref([])
 // 关联策略：配置型选股策略 + 代码型选股策略（code_scope=screening）
@@ -607,6 +645,12 @@ const screeningStrategies = computed(() => strategies.value.filter(s =>
   (s.strategy_type === 'screening' && s.code_type !== 'python') ||
   (s.strategy_type === 'python' && s.code_scope === 'screening')
 ))
+
+// 当前选中的策略（用于条件显示选股范围选择器）
+const selectedStrategy = computed(() => {
+  if (!strategySelectForm.strategyId) return null
+  return screeningStrategies.value.find(s => s.id === strategySelectForm.strategyId) || null
+})
 
 // 调度：仅显示当前组的任务（只读）
 const groupStrategyTasks = computed(() => {
@@ -664,7 +708,7 @@ const addStockForm = reactive({
   quantity: null,
   reason: '手动添加'
 })
-const strategySelectForm = reactive({ strategyId: null, useLocal: true })
+const strategySelectForm = reactive({ strategyId: null, useLocal: true, stockScope: 'group' })
 const editingStock = reactive({ stock_code: '', stock_name: '', buy_price: 0, stop_loss_price: 0, take_profit_price: 0, target_quantity: null, status: 'pending' })
 
 // 候选
@@ -1506,7 +1550,8 @@ const runScreeningWithStrategy = async () => {
       body: JSON.stringify({
         strategy_id: strategySelectForm.strategyId,
         use_local: strategySelectForm.useLocal,
-        pending_to_temp: true
+        pending_to_temp: true,
+        stock_scope: strategySelectForm.stockScope
       })
     })
     const data = await res.json()

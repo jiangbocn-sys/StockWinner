@@ -191,6 +191,20 @@
           <div class="card-header">
             <span>回测历史</span>
             <div>
+              <el-dropdown v-if="history.length > 0" @command="(fmt) => handleExportHistory(fmt)">
+                <el-button type="success" size="small">
+                  <el-icon><Download /></el-icon>导出
+                </el-button>
+                <template #dropdown>
+                  <el-dropdown-menu>
+                    <el-dropdown-item command="csv">CSV</el-dropdown-item>
+                    <el-dropdown-item command="json">JSON</el-dropdown-item>
+                    <el-dropdown-item command="md">Markdown</el-dropdown-item>
+                    <el-dropdown-item command="txt">TXT</el-dropdown-item>
+                    <el-dropdown-item command="excel">Excel</el-dropdown-item>
+                  </el-dropdown-menu>
+                </template>
+              </el-dropdown>
               <el-button v-if="selectedRuns.length >= 2" size="small" type="success" @click="handleCompare">
                 对比 ({{ selectedRuns.length }})
               </el-button>
@@ -423,7 +437,25 @@
 
         <!-- 交易记录 -->
         <el-card style="margin-top: 16px">
-          <template #header><span>交易记录 ({{ trades.length }} 笔)</span></template>
+          <template #header>
+            <div class="card-header">
+              <span>交易记录 ({{ trades.length }} 笔)</span>
+              <el-dropdown v-if="trades.length > 0" @command="(fmt) => handleExportTrades(fmt)">
+                <el-button type="success" size="small">
+                  <el-icon><Download /></el-icon>导出
+                </el-button>
+                <template #dropdown>
+                  <el-dropdown-menu>
+                    <el-dropdown-item command="csv">CSV</el-dropdown-item>
+                    <el-dropdown-item command="json">JSON</el-dropdown-item>
+                    <el-dropdown-item command="md">Markdown</el-dropdown-item>
+                    <el-dropdown-item command="txt">TXT</el-dropdown-item>
+                    <el-dropdown-item command="excel">Excel</el-dropdown-item>
+                  </el-dropdown-menu>
+                </template>
+              </el-dropdown>
+            </div>
+          </template>
           <el-table :data="trades" stripe max-height="400" @row-dblclick="showTradeKline">
             <el-table-column prop="stock_code" label="股票代码" width="110" />
             <el-table-column prop="stock_name" label="股票名称" width="100" />
@@ -521,9 +553,10 @@
 <script setup>
 import { ref, computed, onMounted, nextTick, onBeforeUnmount } from 'vue'
 import { ElMessage, ElMessageBox, ElTooltip } from 'element-plus'
-import { Refresh, Plus, Calendar } from '@element-plus/icons-vue'
+import { Refresh, Plus, Calendar, Download } from '@element-plus/icons-vue'
 import NavBar from '../components/NavBar.vue'
 import { useAccountStore } from '../stores/account'
+import { exportTable as doExport } from '@/utils/exportHelper'
 import * as echarts from 'echarts'
 
 const accountStore = useAccountStore()
@@ -665,6 +698,65 @@ const loadHistory = async (silent = false) => {
 }
 
 // 开始回测
+const historyColumns = [
+  { label: '回测名称', prop: 'name' },
+  { label: '策略', prop: 'strategy_name' },
+  { label: '模式', prop: 'mode' },
+  { label: '起始日', prop: 'start_date' },
+  { label: '结束日', prop: 'end_date' },
+  { label: '初始资金', prop: 'initial_capital' },
+  { label: '总收益', prop: 'total_return' },
+  { label: '年化', prop: 'annualized_return' },
+  { label: '最大回撤', prop: 'max_drawdown' },
+  { label: '夏普', prop: 'sharpe_ratio' },
+  { label: '胜率', prop: 'win_rate' },
+  { label: '状态', prop: 'status' },
+]
+
+const handleExportHistory = (format) => {
+  const data = history.value.map(row => ({
+    ...row,
+    mode: row.mode === 'simulated' ? '撮合模拟盘' : '收益率累积',
+    initial_capital: formatMoney(row.initial_capital),
+    total_return: row.result_summary ? row.result_summary.total_return + '%' : '-',
+    annualized_return: row.result_summary ? row.result_summary.annualized_return + '%' : '-',
+    max_drawdown: row.result_summary ? row.result_summary.max_drawdown + '%' : '-',
+    sharpe_ratio: row.result_summary ? row.result_summary.sharpe_ratio : '-',
+    win_rate: row.result_summary ? row.result_summary.win_rate + '%' : '-',
+    status: row.status === 'completed' ? '完成' : row.status === 'running' ? `运行中 ${row.progress}%` : row.status,
+  }))
+  doExport(historyColumns, data, '回测历史', format)
+}
+
+const tradeColumns = [
+  { label: '股票代码', prop: 'stock_code' },
+  { label: '股票名称', prop: 'stock_name' },
+  { label: '买入日期', prop: 'buy_date' },
+  { label: '买入价格', prop: 'buy_price' },
+  { label: '卖出日期', prop: 'sell_date' },
+  { label: '卖出价格', prop: 'sell_price' },
+  { label: '买入佣金', prop: 'buy_commission' },
+  { label: '卖出费用', prop: 'sell_commission' },
+  { label: '盈亏(%)', prop: 'pnl_pct' },
+  { label: '持仓天数', prop: 'holding_days' },
+  { label: '卖出原因', prop: 'sell_reason' },
+]
+
+const handleExportTrades = (format) => {
+  const data = trades.value.map(row => ({
+    ...row,
+    buy_price: row.buy_price != null ? row.buy_price.toFixed(2) : '-',
+    sell_price: row.sell_price != null ? row.sell_price.toFixed(2) : '-',
+    buy_commission: row.buy_commission != null ? row.buy_commission.toFixed(2) : '-',
+    sell_commission: row.sell_commission != null ? row.sell_commission.toFixed(2) : '-',
+    pnl_pct: row.pnl_pct != null ? row.pnl_pct.toFixed(2) + '%' : '0.00%',
+    sell_date: row.sell_date || '-',
+    holding_days: row.holding_days || '-',
+    sell_reason: row.sell_reason || '-',
+  }))
+  doExport(tradeColumns, data, '回测交易记录', format)
+}
+
 // 动态股票池操作
 const addPoolSegment = () => {
   poolSchedule.value.push({

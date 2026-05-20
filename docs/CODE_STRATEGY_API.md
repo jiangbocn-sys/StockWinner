@@ -85,8 +85,14 @@ Body:
 | `get_kline_spliced` | `(codes: list, lookback: int = 100) -> dict` | 获取拼接后的 K 线数据（本地+实时） | `{stock_code: [kline_records]}` |
 | `get_kline_smart` | `(codes: list, lookback: int = 100) -> dict` | 智能获取 K 线（自动判断盘中/盘后） | `{stock_code: [kline_records]}` |
 | `get_realtime_quote` | `(stock_code: str) -> MarketData` | 获取实时行情（异步函数，需 await） | MarketData 对象 |
-| `query_kline_db` | `(sql: str, params: tuple = None) -> list[dict]` | 直接查询 kline.db（只读） | SQL 结果列表 |
+| `query_kline_db` | `(sql: str, params: tuple = None) -> list[dict]` | 直接查询 kline.db（只读，**推荐用于取最近 K 线**） | SQL 结果列表 |
 | `query_db` | `(sql: str, params: tuple = None) -> list[dict]` | 直接查询 stockwinner.db（只读） | SQL 结果列表 |
+
+> **注意**：`get_kline_local` 按日期升序返回最早的 N 条记录。如需获取**最近**的 K 线数据（如计算前一日均线），请使用 `query_kline_db`：
+> ```python
+> rows = query_kline_db("SELECT close FROM kline_data WHERE stock_code = ? ORDER BY trade_date DESC LIMIT 300", (code,))
+> closes = [r["close"] for r in reversed(rows)]  # 从旧到新
+> ```
 
 ### 技术指标计算函数
 
@@ -109,7 +115,8 @@ ma120 = calculate_ma(closes, 120)
 | `calculate_adx` | `(highs: list, lows: list, closes: list, period: int = 14) -> float` | 平均趋向指标 |
 
 > **重要提示**：`stock_daily_factors` 表中仅包含 ma5/ma10/ma20/ma60 等短周期均线。
-> 如需 MA120、MA250 等长周期均线，请通过 `get_kline_local` 获取 K 线后使用 `calculate_ma(closes, period)` 自行计算。
+> 如需 MA120、MA250 等长周期均线，请通过 `query_kline_db` 获取 K 线后使用 `calculate_ma(closes, period)` 自行计算。
+> MACD 字段名为 `macd`、`dif`、`dea`（非 macd_hist/macd_dif/macd_dea）。
 
 ## 返回值格式
 

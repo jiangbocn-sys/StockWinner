@@ -1543,7 +1543,6 @@ const saveCodeStrategy = async () => {
       code_scope: codeStrategyForm.code_scope,
       code: codeStrategyForm.code,
       function_name: codeStrategyForm.function_name,
-      target_scope: 'group',
       status: 'draft',
     }
     const res = await fetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })

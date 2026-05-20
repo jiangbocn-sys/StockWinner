@@ -5,6 +5,20 @@
       <div class="page-header">
         <h1>数据浏览器</h1>
         <div class="header-actions">
+          <el-dropdown v-if="selectedTable && tableData.length > 0" @command="(fmt) => handleExportData(fmt)">
+            <el-button type="success" size="small">
+              <el-icon><Download /></el-icon>导出
+            </el-button>
+            <template #dropdown>
+              <el-dropdown-menu>
+                <el-dropdown-item command="csv">CSV</el-dropdown-item>
+                <el-dropdown-item command="json">JSON</el-dropdown-item>
+                <el-dropdown-item command="md">Markdown</el-dropdown-item>
+                <el-dropdown-item command="txt">TXT</el-dropdown-item>
+                <el-dropdown-item command="excel">Excel</el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
           <el-button type="primary" @click="loadData">
             <el-icon><Refresh /></el-icon> 刷新
           </el-button>
@@ -209,6 +223,7 @@ import { ref, reactive, onMounted, computed } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Refresh, Search, RefreshLeft, Download } from '@element-plus/icons-vue'
 import NavBar from '../components/NavBar.vue'
+import { exportTable as doExport } from '@/utils/exportHelper'
 
 const loading = ref(false)
 const selectedDb = ref('')
@@ -614,6 +629,11 @@ const getColumnWidth = (type) => {
   if (type === 'REAL' || type === 'FLOAT') return 120
   if (type === 'TEXT') return 150
   return 120
+}
+
+const handleExportData = (format) => {
+  const columns = visibleColumns.value.map(col => ({ label: col.field, prop: col.field }))
+  doExport(columns, tableData.value, `${selectedDb.value}_${selectedTable.value}`, format)
 }
 
 // 获取当前账户 ID
