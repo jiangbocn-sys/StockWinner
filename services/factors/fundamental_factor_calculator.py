@@ -28,7 +28,9 @@ class FundamentalFactorCalculator:
 
     def _get_connection(self) -> sqlite3.Connection:
         """获取数据库连接"""
+        from services.common.database import configure_kline_connection
         conn = sqlite3.connect(str(self.db_path), timeout=60)
+        configure_kline_connection(conn)
         conn.row_factory = sqlite3.Row
         return conn
 

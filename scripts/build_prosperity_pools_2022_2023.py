@@ -4,14 +4,12 @@
 
 逻辑：
   1. 按申万一级行业聚合，计算平均净利同比增速
-  2. 选出当季平均净利同比 > 0 的增长行业，按增速降序排名
+  2. 选出当季平均净利同比 >= 1% 的增长行业，按增速降序排名
   3. 根据排名分档取股票：
-     - 增长行业 < 5个：所有增长行业的全部股票
-     - 增长行业 >= 5个：
-       前3名 → 全部股票
-       第4-7名 → 按净利同比排名取前75%
-       第7名之后 → 按净利同比排名取前30%
-  4. 剔除问题股：ST（名称含ST）、退市（delist_date非空）
+     前3名 → 全部股票
+     第3-7名 → 按净利同比排名取前50%
+     第7名之后 → 按净利同比排名取前25%
+  4. 剔除问题股：ST（名称含ST）、拟退市（delist_date非空）
 
 存储：stockwinner.db 的 candidate_groups + watchlist
 """
@@ -28,15 +26,21 @@ load_dotenv()
 QUARTERS = [
     (2022, 1), (2022, 2), (2022, 3), (2022, 4),
     (2023, 1), (2023, 2), (2023, 3), (2023, 4),
+    (2024, 1), (2024, 2), (2024, 3), (2024, 4),
+    (2025, 1), (2025, 2), (2025, 3), (2025, 4),
+    (2026, 1),
 ]
 
 ACCOUNT_ID = "8229DE7E"
 KLINE_DB = "data/kline.db"
 STOCK_DB = "data/stockwinner.db"
 
+# 景气度门槛：行业平均净利同比增速不低于此值
+PROSPERITY_THRESHOLD = 1.0  # 1%
+
 
 def get_growing_industries(kline_cur, year, quarter):
-    """选出当季平均净利同比为正的行业，按增速降序"""
+    """选出当季平均净利同比 >= 1% 的行业，按增速降序"""
     kline_cur.execute('''
     SELECT im.sw_level1 AS industry,
            COUNT(*) as cnt,
@@ -56,7 +60,7 @@ def get_growing_industries(kline_cur, year, quarter):
 
     result = []
     for r in kline_cur.fetchall():
-        if r[2] > 0:
+        if r[2] >= PROSPERITY_THRESHOLD:
             result.append(r)
     return result
 
@@ -92,7 +96,7 @@ def get_problem_stocks_set(kline_cur):
 
 
 def pick_stocks_by_rank(stocks, rank, problem_stocks):
-    """按排名分档取股票，剔除问题股"""
+    """按排名分档取股票，剔除问题股和亏损股"""
     seen = set()
     picked = []
 
@@ -104,17 +108,22 @@ def pick_stocks_by_rank(stocks, rank, problem_stocks):
         if s[0] in problem_stocks:
             continue
 
+        # 剔除亏损股（净利同比 <= 0）
+        yoy = s[3]
+        if yoy is not None and yoy <= 0:
+            continue
+
         if rank <= 3:
             # 前3名：全部
             picked.append(s)
         elif rank <= 7:
-            # 第4-7名：前75%
-            cutoff = max(1, int(math.ceil(len(stocks) * 0.75)))
+            # 第3-7名：前50%
+            cutoff = max(1, int(math.ceil(len(stocks) * 0.50)))
             if len(picked) < cutoff:
                 picked.append(s)
         else:
-            # 第7名之后：前30%
-            cutoff = max(1, int(math.ceil(len(stocks) * 0.30)))
+            # 第7名之后：前25%
+            cutoff = max(1, int(math.ceil(len(stocks) * 0.25)))
             if len(picked) < cutoff:
                 picked.append(s)
 
@@ -167,7 +176,8 @@ def save_to_stockwinner_db(stock_cur, quarter_name, stocks, account_id):
 
 def main():
     print("=" * 60)
-    print("行业景气度股票池建立 (2022Q1 - 2023Q4)")
+    print("行业景气度股票池建立 (2022Q1 - 2026Q1)")
+    print(f"景气度门槛: 行业平均净利同比 >= {PROSPERITY_THRESHOLD}%")
     print("=" * 60)
 
     kline_conn = sqlite3.connect(KLINE_DB)
@@ -180,6 +190,7 @@ def main():
     print(f"\n问题股(ST/退市): {len(problem_stocks)} 只")
 
     total_stocks = 0
+    quarter_count = 0
 
     for year, quarter in QUARTERS:
         quarter_name = f"{year}Q{quarter}"
@@ -187,10 +198,12 @@ def main():
 
         growing = get_growing_industries(kline_cur, year, quarter)
         if not growing:
-            print(f"    无正增长行业，跳过")
+            print(f"    无满足条件的行业，跳过")
             continue
 
-        print(f"    增长行业({len(growing)}): {', '.join(r[0] for r in growing)}")
+        print(f"    增长行业({len(growing)}):")
+        for i, ind in enumerate(growing):
+            print(f"      第{i+1}名 {ind[0]}: 平均净利同比{ind[2]:.1f}%")
 
         # 分档取股票
         all_picked = []
@@ -198,11 +211,7 @@ def main():
             rank = i + 1
             stocks = get_industry_stocks_sorted(kline_cur, year, quarter, ind[0])
 
-            if len(growing) < 5:
-                # 增长行业不足5个：全部纳入
-                picked = [s for s in stocks if s[0] not in problem_stocks]
-            else:
-                picked = pick_stocks_by_rank(stocks, rank, problem_stocks)
+            picked = pick_stocks_by_rank(stocks, rank, problem_stocks)
 
             if picked:
                 print(f"    第{rank}名 {ind[0]}: 总{len(stocks)}只, 入选{len(picked)}只")
@@ -215,11 +224,12 @@ def main():
         print(f"    本季共入选 {len(all_picked)} 只")
         group_id = save_to_stockwinner_db(stock_cur, quarter_name, all_picked, ACCOUNT_ID)
         total_stocks += len(all_picked)
+        quarter_count += 1
 
     stock_conn.commit()
 
     print("\n" + "=" * 60)
-    print(f"完成：共 {total_stocks} 只股票纳入 {len(QUARTERS)} 个季度的景气度股票池")
+    print(f"完成：共 {total_stocks} 只股票纳入 {quarter_count} 个季度的景气度股票池")
     print("=" * 60)
 
     kline_conn.close()

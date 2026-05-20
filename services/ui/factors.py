@@ -115,10 +115,12 @@ async def get_monthly_factors_stats():
     """
     import sqlite3
     from pathlib import Path
+    from services.common.database import configure_kline_connection
 
     db_path = Path(__file__).parent.parent.parent / "data" / "kline.db"
 
     conn = sqlite3.connect(str(db_path), timeout=30)
+    configure_kline_connection(conn)
     cursor = conn.cursor()
 
     # 总记录数
@@ -304,8 +306,10 @@ async def fill_daily_factors_empty(
                 # 自动检测最早K线日期
                 import sqlite3
                 from pathlib import Path
+                from services.common.database import configure_kline_connection
                 db_path = Path(__file__).parent.parent.parent / "data" / "kline.db"
                 conn = sqlite3.connect(str(db_path), timeout=30)
+                configure_kline_connection(conn)
                 cursor = conn.cursor()
                 cursor.execute("SELECT MIN(trade_date) FROM kline_data")
                 row = cursor.fetchone()

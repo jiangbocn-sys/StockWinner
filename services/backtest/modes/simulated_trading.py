@@ -40,6 +40,9 @@ class SimulatedTradingEngine:
         take_profit_pct: Optional[float] = None,
         trailing_stop_pct: Optional[float] = None,
         stop_execution_price: str = "close",
+        initial_positions: Optional[List[Dict]] = None,
+        initial_cash: Optional[float] = None,
+        liquidate_at_end: bool = True,
     ):
         self.strategy_config = strategy_config
         self.initial_capital = initial_capital
@@ -50,6 +53,9 @@ class SimulatedTradingEngine:
         self.take_profit_pct = take_profit_pct
         self.trailing_stop_pct = trailing_stop_pct
         self.stop_execution_price = stop_execution_price  # "close" | "trigger"
+        self.initial_positions = initial_positions  # 分段回测用：上一段继承的持仓
+        self.initial_cash = initial_cash  # 分段回测用：上一段继承的现金
+        self.liquidate_at_end = liquidate_at_end  # 是否在段末清仓
 
         # 策略类型检测
         self.is_code_strategy = strategy_config.get("strategy_type") == "python"
@@ -93,15 +99,57 @@ class SimulatedTradingEngine:
     def _load_stock_names(self):
         """从 kline.db 的 stock_base_info 表加载股票名称"""
         import sqlite3
-        from services.common.database import KLINE_DB_PATH
+        from services.common.database import KLINE_DB_PATH, configure_kline_connection
         try:
             conn = sqlite3.connect(str(KLINE_DB_PATH), timeout=30)
+            configure_kline_connection(conn)
             cursor = conn.cursor()
             cursor.execute("SELECT stock_code, stock_name FROM stock_base_info")
             self._stock_name_map = {row[0]: row[1].strip() for row in cursor.fetchall()}
             conn.close()
         except Exception:
             pass
+
+    def _inject_initial_positions(self, positions: List[Dict]):
+        """注入初始持仓（分段回测用：上一段继承的持仓）
+
+        关键点：
+        - buy_date 设为 start_date 之前的一个虚拟日期，使 T+1 检查在第一天就能通过
+        - highest_price 重置为 avg_cost，新段从头追踪最高点
+        - total_cost 设为 quantity * avg_cost（假设上一段已含手续费）
+        """
+        from datetime import datetime, timedelta
+        # 虚拟买入日期：段开始日期的前一天
+        try:
+            start_dt = datetime.strptime(self.start_date, "%Y-%m-%d")
+            virtual_date = (start_dt - timedelta(days=1)).strftime("%Y-%m-%d")
+        except (ValueError, TypeError):
+            virtual_date = "2000-01-01"
+
+        for pos_data in positions:
+            code = pos_data.get("stock_code", "")
+            if not code:
+                continue
+            qty = pos_data.get("quantity", 0)
+            avg_cost = pos_data.get("avg_cost", 0)
+            if qty <= 0 or avg_cost <= 0:
+                continue
+
+            self.execution.positions[code] = Position(
+                stock_code=code,
+                stock_name=pos_data.get("stock_name", ""),
+                quantity=qty,
+                avg_cost=avg_cost,
+                buy_date=pos_data.get("buy_date", virtual_date),
+                highest_price=avg_cost,  # 新段从头追踪
+                total_cost=pos_data.get("total_cost", qty * avg_cost),
+            )
+
+            logger.warn("backtest", f"注入初始持仓: {code} × {qty} @ {avg_cost:.2f}")
+
+        # 如果指定了 initial_cash，覆盖默认现金
+        if hasattr(self, 'initial_cash') and self.initial_cash is not None:
+            self.execution.cash = self.initial_cash
 
     def run(self, progress_callback=None) -> Dict:
         """
@@ -123,6 +171,10 @@ class SimulatedTradingEngine:
         if not self.stock_pool:
             self.stock_pool = self.km.get_all_stocks()
 
+        # 2.5. 注入初始持仓（分段回测用）
+        if self.initial_positions:
+            self._inject_initial_positions(self.initial_positions)
+
         # 3. 预加载所有交易日的因子数据（加速）
         self._prefetch_factors(trade_dates)
 
@@ -137,15 +189,16 @@ class SimulatedTradingEngine:
             if progress_callback:
                 progress_callback(i + 1, total_days, trade_date)
 
-        # 4. 回测结束，清仓所有持仓（按最后一天收盘价卖出）
-        last_date = trade_dates[-1]
-        ohlc_last = self._get_daily_ohlc(last_date)
-        for code, pos in list(self.execution.positions.items()):
-            close_price = ohlc_last.get(code, {}).get("close", pos.avg_cost)
-            prev_close = self._get_prev_close(code, last_date)
-            self.execution.sell(code, close_price, last_date, reason="回测清仓", prev_close=prev_close)
-        # 同步清仓交易记录
-        self._sync_trades()
+        # 4. 回测结束，清仓所有持仓（仅最后一段需要清仓）
+        if self.liquidate_at_end:
+            last_date = trade_dates[-1]
+            ohlc_last = self._get_daily_ohlc(last_date)
+            for code, pos in list(self.execution.positions.items()):
+                close_price = ohlc_last.get(code, {}).get("close", pos.avg_cost)
+                prev_close = self._get_prev_close(code, last_date)
+                self.execution.sell(code, close_price, last_date, reason="回测清仓", prev_close=prev_close)
+            # 同步清仓交易记录
+            self._sync_trades()
 
         # 5. 计算绩效指标
         result = PerformanceMetrics.compute(
@@ -243,9 +296,8 @@ class SimulatedTradingEngine:
             if ohlc and self.stop_execution_price == "trigger":
                 low = ohlc.get("low", price)
                 if low <= stop_price:
-                    # 按触发价成交（止损价 + 滑点）
-                    fill_price = stop_price
-                    self.execution.sell(code, fill_price, date, reason="止损", prev_close=prev_close)
+                    # 按当日最低价成交（滑点在 sell() 内部自动扣除）
+                    self.execution.sell(code, low, date, reason="止损", prev_close=prev_close)
                     return True
             elif price <= stop_price:
                 self.execution.sell(code, price, date, reason="止损", prev_close=prev_close)
@@ -257,9 +309,8 @@ class SimulatedTradingEngine:
             if ohlc and self.stop_execution_price == "trigger":
                 high = ohlc.get("high", price)
                 if high >= take_price:
-                    # 按触发价成交（止盈价 + 滑点）
-                    fill_price = take_price
-                    self.execution.sell(code, fill_price, date, reason="止盈", prev_close=prev_close)
+                    # 按当日最高价成交（滑点在 sell() 内部自动扣除）
+                    self.execution.sell(code, high, date, reason="止盈", prev_close=prev_close)
                     return True
             elif price >= take_price:
                 self.execution.sell(code, price, date, reason="止盈", prev_close=prev_close)
@@ -290,14 +341,13 @@ class SimulatedTradingEngine:
 
         # 从最高点回撤超过阈值则卖出
         trigger_price = pos.highest_price * (1 - self.trailing_stop_pct)
-        fill_price = trigger_price if ohlc and self.stop_execution_price == "trigger" else price
         if ohlc:
             low = ohlc.get("low", price)
             if low <= trigger_price:
-                self.execution.sell(code, fill_price, date, reason="移动止盈", prev_close=prev_close)
+                self.execution.sell(code, low, date, reason="移动止盈", prev_close=prev_close)
                 return True
-        elif drawdown >= self.trailing_stop_pct:
-            self.execution.sell(code, fill_price, date, reason="移动止盈", prev_close=prev_close)
+        elif (pos.highest_price - price) / pos.highest_price >= self.trailing_stop_pct:
+            self.execution.sell(code, price, date, reason="移动止盈", prev_close=prev_close)
             return True
 
         return False
@@ -348,7 +398,7 @@ class SimulatedTradingEngine:
         try:
             signals = self.strategy_engine.execute_strategy(strategy, context)
         except Exception as e:
-            logger.warning(f"策略执行失败 ({date}, {code}): {e}")
+            logger.warn("backtest", f"策略执行失败 ({date}, {code}): {e}")
             return False
 
         for signal in signals:
@@ -459,7 +509,7 @@ class SimulatedTradingEngine:
         try:
             signals = self.strategy_engine.execute_strategy(strategy, context)
         except Exception as e:
-            logger.warning(f"策略执行失败 ({trade_date}): {e}")
+            logger.warn("backtest", f"策略执行失败 ({trade_date}): {e}")
             return []
 
         # 将信号转换为候选列表
@@ -568,7 +618,7 @@ class SimulatedTradingEngine:
                     "volume_ratio": row[9],
                 }
         except Exception as e:
-            logger.warning(f"因子预加载失败: {e}")
+            logger.warn("backtest", f"因子预加载失败: {e}")
 
     def _get_prev_close(self, stock_code: str, trade_date: str) -> float:
         """获取前一日收盘价"""

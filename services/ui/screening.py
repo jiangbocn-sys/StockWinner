@@ -6,7 +6,7 @@ from fastapi import APIRouter, HTTPException, Path, Body, Query
 from typing import List, Optional, Dict, Any
 from fastapi.background import BackgroundTasks
 import os
-from services.common.database import get_db_manager
+from services.common.database import get_db_manager, configure_kline_connection
 from services.screening.service import get_screening_service
 from services.common.timezone import get_china_time, format_china_time
 
@@ -77,6 +77,7 @@ async def get_factor_stats(account_id: str = Path(..., description="账户 ID"))
         return {"success": True, "stats": {"latest_date": None, "pending_count": 0}}
 
     conn = sqlite3.connect(str(db_path), timeout=30)
+    configure_kline_connection(conn)
     cursor = conn.cursor()
 
     # 获取因子数据最新日期
@@ -569,6 +570,18 @@ async def get_watchlist(
 
     watchlist = await db.fetchall(base_sql, tuple(params))
 
+    # 从内存价格缓存注入实时现价
+    try:
+        from services.common.price_cache import get_price_cache
+        cache = get_price_cache()
+        cached_prices = cache.get_all_for_account(account_id)
+        for item in watchlist:
+            code = item.get("stock_code")
+            if code and code in cached_prices:
+                item["current_price"] = cached_prices[code]
+    except Exception:
+        pass
+
     if grouped:
         # 返回分组结构
         groups = {}
@@ -847,9 +860,15 @@ async def update_watchlist_stock(
 @router.post("/api/v1/ui/{account_id}/watchlist/clear")
 async def clear_watchlist(
     account_id: str = Path(..., description="账户 ID"),
-    status: Optional[str] = Body(None, description="可选，只清除指定状态的记录")
+    status: Optional[str] = Body(None, description="可选，只清除指定状态的记录"),
+    confirm: str = Body(..., description="必须传入 'CONFIRM' 才执行删除"),
 ):
-    """清空 watchlist"""
+    """清空 watchlist（需要确认参数）"""
+    if confirm != "CONFIRM":
+        raise HTTPException(
+            status_code=400,
+            detail="此操作为危险操作，必须在请求体中传入 confirm='CONFIRM' 才允许执行"
+        )
     db = get_db_manager()
 
     # 从数据库验证账户
@@ -1135,6 +1154,7 @@ async def preview_watchlist_import(
     name_map = {}
     try:
         conn = sqlite3.connect(kline_path, timeout=30)
+        configure_kline_connection(conn)
         conn.row_factory = sqlite3.Row
         codes_to_lookup = []
         for item in items:

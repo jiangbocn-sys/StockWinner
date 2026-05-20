@@ -5,7 +5,7 @@
 from fastapi import APIRouter, HTTPException, Path, Query, Body
 from typing import List, Optional
 from datetime import datetime
-from services.common.database import get_db_manager
+from services.common.database import get_db_manager, configure_kline_connection
 from services.monitoring.service import get_trading_monitor
 from services.common.timezone import get_china_time, format_china_time
 
@@ -73,6 +73,7 @@ async def get_signals(
         kline_path = '/home/bobo/StockWinner/data/kline.db'
         try:
             conn = sqlite3.connect(kline_path, timeout=5)
+            configure_kline_connection(conn)
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             placeholders = ','.join(['?' for _ in stock_codes])
@@ -178,7 +179,7 @@ async def execute_signal(
             stock_code=stock_code,
             stock_name=signal.get('stock_name', ''),
             price=signal.get('price', 0),
-            target_quantity=signal.get('quantity', 100),
+            target_quantity=signal.get('quantity') or 0,
             strategy_id=signal.get('strategy_id'),
             signal_id=wl['id'] if wl else None,
         )
@@ -187,7 +188,7 @@ async def execute_signal(
             stock_code=stock_code,
             stock_name=signal.get('stock_name', ''),
             price=signal.get('price', 0),
-            target_quantity=signal.get('quantity', 100)
+            target_quantity=signal.get('quantity') or 0,
         )
     else:
         return {"success": False, "message": "未知的信号类型"}

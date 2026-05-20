@@ -19,6 +19,8 @@ EVENT_COLOR_MAP = {
     "trade_failed": "red",         # 交易失败
     "order_rejected": "red",       # 券商拒绝
     "post_market_analysis": "purple",  # 盘后分析
+    "scheduler_down": "red",       # 调度服务异常
+    "monitor_interrupted": "red",  # 交易监控中断
 }
 
 # 事件类型到飞书标题的映射
@@ -30,6 +32,8 @@ EVENT_TITLE_MAP = {
     "trade_failed": "交易失败",
     "order_rejected": "委托被拒",
     "post_market_analysis": "盘后分析",
+    "scheduler_down": "调度服务异常",
+    "monitor_interrupted": "交易监控中断",
 }
 
 
@@ -88,6 +92,8 @@ class NotificationService:
             "task_completed": "notify_on_task",
             "task_failed": "notify_on_task",
             "post_market_analysis": "notify_on_task",
+            "scheduler_down": "notify_on_task",
+            "monitor_interrupted": "notify_on_task",
         }
         flag_key = event_flag_map.get(event_type)
         if flag_key and not config.get(flag_key, 1):
@@ -213,6 +219,25 @@ class NotificationService:
                 f"**理想买入：** {payload.get('ideal_buy', '-')}",
                 f"**止损价：** {payload.get('stop_loss', '-')}",
                 f"**止盈价：** {payload.get('take_profit', '-')}",
+            ]
+            return "\n".join(lines)
+
+        elif event_type == "scheduler_down":
+            lines = [
+                f"**异常类型：** 调度服务异常",
+                f"**检测时间：** {payload.get('detected_at', '-')}",
+                f"**异常信息：** {payload.get('detail', '-')}",
+                f"**建议操作：** 重启后端服务",
+            ]
+            return "\n".join(lines)
+
+        elif event_type == "monitor_interrupted":
+            lines = [
+                f"**异常类型：** 交易监控中断",
+                f"**检测时间：** {payload.get('detected_at', '-')}",
+                f"**账户：** {payload.get('account_id', '-')}",
+                f"**持仓股数：** {payload.get('position_count', '-')}",
+                f"**建议操作：** 手动启动交易监控或重启后端",
             ]
             return "\n".join(lines)
 

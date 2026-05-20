@@ -186,6 +186,16 @@ class DataCompletenessChecker:
             dates = self.km.get_stocks_earliest_dates_batch(batch)
             earliest_dates.update(dates)
 
+        # 一次性获取所有交易日期（避免循环内逐只查询）
+        all_trade_dates = self.km.get_all_trade_dates()
+
+        # 构建日期索引：trade_date -> 序号，用于快速计算区间内交易日数
+        date_index = {d: i for i, d in enumerate(all_trade_dates)}
+        start_idx = date_index.get(start_date)
+        if start_idx is None:
+            # 找不到 start_date，跳过预热检查
+            return
+
         # 获取从最早到 start_date 之间的交易日数
         for code in stock_codes:
             if code not in earliest_dates:
@@ -201,9 +211,12 @@ class DataCompletenessChecker:
                 ))
                 continue
 
-            # 计算 start_date 之前有多少交易日
-            pre_trade_dates = self.km.get_all_trade_dates(earliest, start_date)
-            pre_days = len(pre_trade_dates) - 1  # 减去 start_date 本身
+            # 用日期索引快速计算 start_date 之前的交易日数
+            earliest_idx = date_index.get(earliest)
+            if earliest_idx is not None:
+                pre_days = start_idx - earliest_idx
+            else:
+                pre_days = 0
 
             if pre_days < self.INDICATOR_WARMUP_DAYS:
                 report.warning_gaps.append(DataGap(
@@ -240,7 +253,7 @@ class DataCompletenessChecker:
                     reason=f"stock_daily_factors 表缺少因子: {', '.join(missing_factors[:5])}",
                 ))
         except Exception as e:
-            logger.warning(f"因子覆盖检查失败: {e}")
+            logger.warn("backtest", f"因子覆盖检查失败: {e}")
 
     @staticmethod
     def _extract_columns(sql: str) -> List[str]:

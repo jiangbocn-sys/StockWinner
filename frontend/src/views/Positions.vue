@@ -22,15 +22,20 @@
       <el-card>
         <template #header>
           <div class="card-header">
-            <span>持仓明细</span>
-            <el-button type="primary" size="small" @click="refreshPrices" :loading="refreshing">
+            <el-tabs v-model="activeTab" class="detail-tabs">
+              <el-tab-pane label="当前持仓" name="holding" />
+              <el-tab-pane :label="`已清仓 (${closedCount})`" name="closed" />
+            </el-tabs>
+            <el-button v-if="activeTab === 'holding'" type="primary" size="small" @click="refreshPrices" :loading="refreshing">
               <el-icon><Refresh /></el-icon>
               刷新行情
             </el-button>
           </div>
         </template>
 
-        <el-table :data="positions" stripe style="width: 100%">
+        <!-- 当前持仓表格 -->
+        <el-table v-show="activeTab === 'holding'" :data="paginatedPositions" stripe style="width: 100%" @row-dblclick="showKline">
+          <el-table-column type="index" label="序号" width="60" align="center" :index="indexMethod" />
           <el-table-column prop="stock_code" label="股票代码" width="100" />
           <el-table-column prop="stock_name" label="股票名称" width="120" />
           <el-table-column prop="quantity" label="数量" width="100" align="right" />
@@ -66,6 +71,73 @@
             </template>
           </el-table-column>
         </el-table>
+
+        <div class="pagination-bar" v-if="activeTab === 'holding' && positions.length > posPageSize">
+          <el-pagination
+            v-model:current-page="posCurrentPage"
+            v-model:page-size="posPageSize"
+            :total="positions.length"
+            :page-sizes="[10, 20, 50, 100]"
+            layout="sizes, prev, pager, next, total"
+            small
+          />
+        </div>
+
+        <!-- 已清仓明细表格 -->
+        <el-table v-show="activeTab === 'closed'" :data="paginatedClosed" stripe style="width: 100%">
+          <el-table-column type="index" label="序号" width="60" align="center" :index="closedIndexMethod" />
+          <el-table-column prop="stock_code" label="股票代码" width="100" />
+          <el-table-column prop="stock_name" label="股票名称" width="120" />
+          <el-table-column prop="buy_quantity" label="数量" width="80" align="right" />
+          <el-table-column label="买入价" width="100" align="right">
+            <template #default="{ row }">¥{{ row.avg_buy_price }}</template>
+          </el-table-column>
+          <el-table-column label="卖出价" width="100" align="right">
+            <template #default="{ row }">¥{{ row.avg_sell_price }}</template>
+          </el-table-column>
+          <el-table-column label="买入时间" width="110">
+            <template #default="{ row }">{{ row.first_buy_time }}</template>
+          </el-table-column>
+          <el-table-column label="卖出时间" width="110">
+            <template #default="{ row }">{{ row.last_sell_time }}</template>
+          </el-table-column>
+          <el-table-column prop="holding_days" label="持有天数" width="80" align="right" />
+          <el-table-column label="交易成本" width="110" align="right">
+            <template #default="{ row }">¥{{ formatNumber(row.total_commission) }}</template>
+          </el-table-column>
+          <el-table-column label="清仓收益" width="120" align="right">
+            <template #default="{ row }">
+              <span :class="row.net_profit >= 0 ? 'profit-positive' : 'profit-negative'">
+                {{ row.net_profit >= 0 ? '+' : '' }}¥{{ formatNumber(Math.abs(row.net_profit)) }}
+              </span>
+            </template>
+          </el-table-column>
+          <el-table-column label="收益率" width="100" align="right">
+            <template #default="{ row }">
+              <span :class="row.profit_pct >= 0 ? 'profit-positive' : 'profit-negative'">
+                {{ row.profit_pct >= 0 ? '+' : '' }}{{ row.profit_pct }}%
+              </span>
+            </template>
+          </el-table-column>
+          <el-table-column label="年化收益" width="100" align="right">
+            <template #default="{ row }">
+              <span :class="row.annualized_pct >= 0 ? 'profit-positive' : 'profit-negative'">
+                {{ row.annualized_pct >= 0 ? '+' : '' }}{{ formatPct(row.annualized_pct) }}%
+              </span>
+            </template>
+          </el-table-column>
+        </el-table>
+
+        <div class="pagination-bar" v-if="activeTab === 'closed' && closedPositions.length > closedPageSize">
+          <el-pagination
+            v-model:current-page="closedCurrentPage"
+            v-model:page-size="closedPageSize"
+            :total="closedPositions.length"
+            :page-sizes="[10, 20, 50, 100]"
+            layout="sizes, prev, pager, next, total"
+            small
+          />
+        </div>
       </el-card>
 
       <!-- DSA 分析结果弹窗 -->
@@ -115,15 +187,31 @@
           <el-button type="primary" @click="dsaDialogVisible = false">关闭</el-button>
         </template>
       </el-dialog>
+
+      <!-- K 线图弹窗 -->
+      <el-dialog v-model="klineVisible" :title="`${klineStockInfo.name} (${klineStockInfo.code}) K线走势`" width="85%" top="5vh" @close="destroyKlineChart">
+        <div class="kline-nav">
+          <el-button size="small" @click="prevStock" :disabled="!hasPrevStock">
+            <el-icon><ArrowLeft /></el-icon> 上一只
+          </el-button>
+          <span class="kline-nav-text">{{ klineNavText }}</span>
+          <el-button size="small" @click="nextStock" :disabled="!hasNextStock">
+            下一只 <el-icon><ArrowRight /></el-icon>
+          </el-button>
+        </div>
+        <div ref="klineChartRef" style="width: 100%; height: 550px"></div>
+      </el-dialog>
     </el-main>
   </div>
 </template>
 
 <script setup>
-import { ref, onMounted, computed } from 'vue'
+import { ref, onMounted, computed, nextTick } from 'vue'
 import { ElMessage } from 'element-plus'
+import { ArrowLeft, ArrowRight } from '@element-plus/icons-vue'
 import { useAccountStore } from '../stores/account'
 import NavBar from '../components/NavBar.vue'
+import * as echarts from 'echarts'
 
 const accountStore = useAccountStore()
 const currentAccount = computed(() => accountStore.currentAccount)
@@ -136,6 +224,15 @@ const marketValue = ref(0)
 const totalPnl = ref(0)
 const pnlPercent = ref(0)
 
+// 分页
+const posCurrentPage = ref(1)
+const posPageSize = ref(20)
+const paginatedPositions = computed(() => {
+  const start = (posCurrentPage.value - 1) * posPageSize.value
+  return positions.value.slice(start, start + posPageSize.value)
+})
+const indexMethod = (index) => (posCurrentPage.value - 1) * posPageSize.value + index + 1
+
 // DSA 分析状态
 const dsaDialogVisible = ref(false)
 const dsaAnalyzing = ref(false)
@@ -145,12 +242,53 @@ const dsaError = ref('')
 
 const refreshing = ref(false)
 
+// 已清仓明细
+const activeTab = ref('holding')
+const closedPositions = ref([])
+const closedCount = ref(0)
+const closedCurrentPage = ref(1)
+const closedPageSize = ref(20)
+const paginatedClosed = computed(() => {
+  const start = (closedCurrentPage.value - 1) * closedPageSize.value
+  return closedPositions.value.slice(start, start + closedPageSize.value)
+})
+const closedIndexMethod = (index) => (closedCurrentPage.value - 1) * closedPageSize.value + index + 1
+
+const loadClosedPositions = async () => {
+  try {
+    const response = await fetch(`/api/v1/ui/${currentAccountId.value}/closed-positions?limit=500`)
+    const data = await response.json()
+    closedPositions.value = data.closed_positions || []
+    closedCount.value = data.total || 0
+    closedCurrentPage.value = 1
+  } catch (error) {
+    console.error('加载已清仓明细失败:', error)
+  }
+}
+
+// K 线图
+const klineVisible = ref(false)
+const klineChartRef = ref(null)
+const klineStockInfo = ref({ code: '', name: '' })
+const klineStockIndex = ref(-1)
+let klineChart = null
+
+const hasPrevStock = computed(() => klineStockIndex.value > 0)
+const hasNextStock = computed(() => klineStockIndex.value >= 0 && klineStockIndex.value < positions.value.length - 1)
+const klineNavText = computed(() => {
+  const total = positions.value.length
+  const idx = klineStockIndex.value
+  if (idx < 0 || total === 0) return ''
+  return `${idx + 1} / ${total}`
+})
+
 const loadPositions = async () => {
   // 先从 DB 加载数据（不等待行情刷新）
   try {
     const response = await fetch(`/api/v1/ui/${currentAccountId.value}/positions`)
     const data = await response.json()
     positions.value = data.positions || []
+    posCurrentPage.value = 1
     availableCash.value = data.available_cash || 0
     marketValue.value = positions.value.reduce((sum, p) => sum + (p.market_value || 0), 0)
     totalPnl.value = positions.value.reduce((sum, p) => sum + (p.profit_loss || 0), 0)
@@ -168,6 +306,7 @@ const refreshPrices = async () => {
     const data = await response.json()
 
     positions.value = data.positions || []
+    posCurrentPage.value = 1
     availableCash.value = data.available_cash || 0
 
     marketValue.value = positions.value.reduce((sum, p) => sum + (p.market_value || 0), 0)
@@ -186,6 +325,13 @@ const refreshPrices = async () => {
 
 const formatNumber = (num) => {
   return Number(num || 0).toLocaleString('zh-CN', { minimumFractionDigits: 2 })
+}
+
+const formatPct = (num) => {
+  const n = Number(num || 0)
+  if (n >= 1000) return '1000+'
+  if (n <= -1000) return '-1000+'
+  return n.toFixed(2)
 }
 
 const handleAction = (row, action) => {
@@ -223,9 +369,151 @@ const handleDsaAnalysis = async (row) => {
   }
 }
 
+// ========== K 线图 ==========
+
+const showKline = async (row) => {
+  const idx = positions.value.findIndex(s => s.stock_code === row.stock_code)
+  klineStockIndex.value = idx
+  klineVisible.value = true
+  await loadKlineData(row.stock_code, row.stock_name)
+}
+
+const loadKlineData = async (code, name) => {
+  klineStockInfo.value = { code, name }
+
+  // 优先从本地 kline.db 读取
+  try {
+    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/stocks/${code}/kline-local?months=6`)
+    if (res.ok) {
+      const data = await res.json()
+      await nextTick()
+      if (data.success && data.kline && data.kline.length > 0) {
+        renderKlineChart(data.kline)
+        return
+      }
+    }
+  } catch (e) {
+    console.warn('本地 K 线数据读取失败，回退 SDK:', e.message)
+  }
+
+  // 回退：SDK 查询
+  const endDt = new Date()
+  const startDt = new Date()
+  startDt.setMonth(startDt.getMonth() - 6)
+  const start = startDt.toISOString().slice(0, 10).replace(/-/g, '')
+  const end = endDt.toISOString().slice(0, 10).replace(/-/g, '')
+
+  try {
+    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/market/kline?stock_code=${code}&period=day&start_date=${start}&end_date=${end}`)
+    const data = await res.json()
+    await nextTick()
+    renderKlineChart(data.data?.kline || [])
+  } catch (e) {
+    console.error('加载 K 线数据失败:', e)
+  }
+}
+
+const prevStock = async () => {
+  if (!hasPrevStock.value) return
+  const idx = klineStockIndex.value - 1
+  const row = positions.value[idx]
+  if (!row) return
+  klineStockIndex.value = idx
+  await loadKlineData(row.stock_code, row.stock_name)
+}
+
+const nextStock = async () => {
+  if (!hasNextStock.value) return
+  const idx = klineStockIndex.value + 1
+  const row = positions.value[idx]
+  if (!row) return
+  klineStockIndex.value = idx
+  await loadKlineData(row.stock_code, row.stock_name)
+}
+
+const renderKlineChart = (klineData) => {
+  if (!klineChartRef.value) return
+  if (!klineChart) {
+    klineChart = echarts.init(klineChartRef.value)
+  }
+
+  const dates = klineData.map(d => String(d.trade_date))
+  const ohlcValues = klineData.map(d => [d.open, d.close, d.low, d.high])
+  const volumes = klineData.map(d => d.volume || 0)
+
+  klineChart.setOption({
+    tooltip: {
+      trigger: 'axis',
+      axisPointer: { type: 'cross' },
+      formatter: (params) => {
+        const p = params[0]
+        if (!p || !p.value) return ''
+        const v = p.value
+        const idx = dates.indexOf(p.name)
+        const vol = idx >= 0 ? volumes[idx] : '-'
+        return `${p.name}<br/>开: ${v[1]}  收: ${v[2]}  低: ${v[3]}  高: ${v[4]}<br/>量: ${typeof vol === 'number' ? vol.toLocaleString() : vol}`
+      },
+    },
+    grid: [
+      { left: '8%', right: '4%', top: '8%', height: '55%' },
+      { left: '8%', right: '4%', top: '68%', height: '22%' },
+    ],
+    xAxis: [
+      { type: 'category', data: dates, gridIndex: 0, axisLabel: { show: false } },
+      { type: 'category', data: dates, gridIndex: 1 },
+    ],
+    yAxis: [
+      { type: 'value', scale: true, gridIndex: 0 },
+      { type: 'value', scale: true, gridIndex: 1, splitNumber: 2 },
+    ],
+    series: [
+      {
+        name: 'K线',
+        type: 'candlestick',
+        data: ohlcValues,
+        xAxisIndex: 0,
+        yAxisIndex: 0,
+        itemStyle: { color: '#ef232a', color0: '#14b143', borderColor: '#ef232a', borderColor0: '#14b143' },
+      },
+      {
+        name: '成交量',
+        type: 'bar',
+        data: volumes,
+        xAxisIndex: 1,
+        yAxisIndex: 1,
+        itemStyle: {
+          color: (param) => {
+            const idx = param.dataIndex
+            if (idx < klineData.length) {
+              return klineData[idx].close >= klineData[idx].open ? '#ef232a' : '#14b143'
+            }
+            return '#999'
+          },
+        },
+      },
+    ],
+    dataZoom: [{ type: 'inside' }, { type: 'slider', xAxisIndex: [0, 1] }],
+  }, true)
+  if (!klineChart._resizeBound) {
+    const handler = () => klineChart && klineChart.resize()
+    window.addEventListener('resize', handler)
+    klineChart._resizeBound = true
+  }
+}
+
+const destroyKlineChart = () => {
+  if (klineChart) { klineChart.dispose(); klineChart = null }
+}
+
+import { onUnmounted } from 'vue'
+onUnmounted(() => {
+  destroyKlineChart()
+})
+
 onMounted(async () => {
   // 先展示 DB 数据
   await loadPositions()
+  await loadClosedPositions()
   // 后台静默刷新实时行情
   refreshPrices()
 })
@@ -255,6 +543,18 @@ h2 {
   display: flex;
   justify-content: space-between;
   align-items: center;
+}
+
+.detail-tabs {
+  flex: 1;
+}
+
+.detail-tabs :deep(.el-tabs__header) {
+  margin-bottom: 0;
+}
+
+.detail-tabs :deep(.el-tabs__nav-wrap::after) {
+  display: none;
 }
 
 .profit-positive {
@@ -301,5 +601,25 @@ h2 {
 
 .dsa-error {
   padding: 20px 0;
+}
+
+.pagination-bar {
+  display: flex; justify-content: center; padding: 12px 0;
+}
+
+.kline-nav {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+
+.kline-nav-text {
+  font-size: 14px;
+  color: #606266;
+  min-width: 80px;
+  text-align: center;
+  font-family: monospace;
 }
 </style>

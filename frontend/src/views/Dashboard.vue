@@ -288,10 +288,14 @@ const startUptimeTimer = () => {
   }
 }
 
-// 加载仪表盘数据
-const loadDashboard = async () => {
+// 加载仪表盘数据（silent=true 时静默失败，不输出日志）
+const loadDashboard = async (silent = false) => {
   try {
     const response = await fetch(`/api/v1/ui/${currentAccountId.value}/dashboard`)
+    if (!response.ok) {
+      if (!silent) console.warn('仪表盘数据加载失败:', response.status)
+      return
+    }
     const data = await response.json()
 
     healthStatus.value = data.system_health?.status || 'unknown'
@@ -365,7 +369,7 @@ const loadDashboard = async () => {
       session: sm.session || { total_calls: 0, success_calls: 0, total_rows: 0 },
     }
   } catch (error) {
-    console.error('加载仪表盘数据失败:', error)
+    if (!silent) console.error('加载仪表盘数据失败:', error)
   }
 }
 
@@ -377,13 +381,20 @@ const formatNumber = (num) => {
   return Number(num || 0).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 }
 
+// 自动刷新定时器
+let refreshTimer = null
+const REFRESH_INTERVAL = 60000 // 1 分钟
+
 onMounted(async () => {
   await accountStore.loadAccounts()
   await loadDashboard()
+  // 每分钟自动刷新
+  refreshTimer = setInterval(() => loadDashboard(true), REFRESH_INTERVAL)
 })
 
 onUnmounted(() => {
   if (uptimeTimer) clearInterval(uptimeTimer)
+  if (refreshTimer) clearInterval(refreshTimer)
 })
 </script>
 

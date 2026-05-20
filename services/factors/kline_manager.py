@@ -396,7 +396,7 @@ class KlineManager:
         self, stock_code: str, stock_name: str, df: pd.DataFrame
     ) -> int:
         """
-        保存日K线数据到数据库（INSERT OR REPLACE）。
+        保存日K线数据到数据库（INSERT OR REPLACE，executemany 批量写入）。
 
         Returns:
             保存的记录数
@@ -406,19 +406,14 @@ class KlineManager:
 
         conn = self._conn(timeout=30)
         cursor = conn.cursor()
-        saved_count = 0
 
         try:
+            rows_data = []
             for _, row in df.iterrows():
                 trade_date = self._normalize_date(row.get('trade_date'))
                 if not trade_date:
                     continue
-
-                cursor.execute('''
-                    INSERT OR REPLACE INTO kline_data
-                    (stock_code, stock_name, trade_date, open, high, low, close, volume, amount)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (
+                rows_data.append((
                     stock_code, stock_name, trade_date,
                     float(row.get('open', 0)),
                     float(row.get('high', 0)),
@@ -427,19 +422,25 @@ class KlineManager:
                     int(row.get('volume', 0)),
                     float(row.get('amount', 0))
                 ))
-                saved_count += 1
+
+            if rows_data:
+                cursor.executemany('''
+                    INSERT OR REPLACE INTO kline_data
+                    (stock_code, stock_name, trade_date, open, high, low, close, volume, amount)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', rows_data)
             conn.commit()
         except Exception:
             conn.rollback()
             raise
 
-        return saved_count
+        return len(rows_data)
 
     def save_kline_data_batch(
         self, kline_batch: List[Tuple[str, str, pd.DataFrame]]
     ) -> int:
         """
-        批量保存多只股票的日K线数据（单事务）。
+        批量保存多只股票的日K线数据（单事务，executemany 批量写入）。
 
         Args:
             kline_batch: [(stock_code, stock_name, df), ...]
@@ -465,16 +466,12 @@ class KlineManager:
                         df = df.reset_index()
                     df.columns = df.columns.str.lower()
 
+                rows_data = []
                 for _, row in df.iterrows():
                     trade_date = self._normalize_date(row.get('trade_date'))
                     if not trade_date:
                         continue
-
-                    cursor.execute('''
-                        INSERT OR REPLACE INTO kline_data
-                        (stock_code, stock_name, trade_date, open, high, low, close, volume, amount)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ''', (
+                    rows_data.append((
                         stock_code, stock_name, trade_date,
                         float(row.get('open', 0)),
                         float(row.get('high', 0)),
@@ -483,7 +480,14 @@ class KlineManager:
                         int(row.get('volume', 0)),
                         float(row.get('amount', 0))
                     ))
-                    total_saved += 1
+
+                if rows_data:
+                    cursor.executemany('''
+                        INSERT OR REPLACE INTO kline_data
+                        (stock_code, stock_name, trade_date, open, high, low, close, volume, amount)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ''', rows_data)
+                    total_saved += len(rows_data)
 
             conn.commit()
         except Exception:
@@ -498,7 +502,7 @@ class KlineManager:
         skip_existing_before: Optional[str] = None
     ) -> int:
         """
-        保存单只股票的周K线数据。
+        保存单只股票的周K线数据（executemany 批量写入）。
 
         使用 SDK 返回的 trade_date 直接计算周边界（周一至周五）。
         不再依赖预构建日历，避免日历覆盖不足导致数据丢失。
@@ -523,7 +527,7 @@ class KlineManager:
 
         conn = self._conn()
         cursor = conn.cursor()
-        saved = 0
+        rows_data = []
 
         for _, row in df.iterrows():
             # 从 trade_date 获取周结束日期（ISO周五）
@@ -552,27 +556,29 @@ class KlineManager:
             if skip_existing_before and week_end_str <= skip_existing_before:
                 continue
 
+            rows_data.append((
+                stock_code, stock_name, week_start_str, week_end_str,
+                float(row.get('open', 0)) if not pd.isna(row.get('open')) else None,
+                float(row.get('high', 0)) if not pd.isna(row.get('high')) else None,
+                float(row.get('low', 0)) if not pd.isna(row.get('low')) else None,
+                float(row.get('close', 0)) if not pd.isna(row.get('close')) else None,
+                int(row.get('volume', 0)) if not pd.isna(row.get('volume')) else None,
+                float(row.get('amount', 0)) if not pd.isna(row.get('amount')) else None
+            ))
+
+        if rows_data:
             try:
-                cursor.execute("""
+                cursor.executemany("""
                     INSERT OR REPLACE INTO weekly_kline_data
                     (stock_code, stock_name, week_start_date, week_end_date,
                      open, high, low, close, volume, amount)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    stock_code, stock_name, week_start_str, week_end_str,
-                    float(row.get('open', 0)) if not pd.isna(row.get('open')) else None,
-                    float(row.get('high', 0)) if not pd.isna(row.get('high')) else None,
-                    float(row.get('low', 0)) if not pd.isna(row.get('low')) else None,
-                    float(row.get('close', 0)) if not pd.isna(row.get('close')) else None,
-                    int(row.get('volume', 0)) if not pd.isna(row.get('volume')) else None,
-                    float(row.get('amount', 0)) if not pd.isna(row.get('amount')) else None
-                ))
-                saved += 1
+                """, rows_data)
             except Exception:
-                continue
+                pass
 
         conn.commit()
-        return saved
+        return len(rows_data)
 
     # ================================================================
     # 交易周日历构建

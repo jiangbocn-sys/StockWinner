@@ -173,6 +173,24 @@ async def get_positions(
             (account_id,)
         )
 
+    # 从内存价格缓存注入实时现价
+    try:
+        from services.common.price_cache import get_price_cache
+        cache = get_price_cache()
+        cached_prices = cache.get_all_for_account(account_id)
+        for pos in positions:
+            code = pos.get("stock_code")
+            if code and code in cached_prices:
+                pos["current_price"] = cached_prices[code]
+                # 重新计算市值和盈亏
+                qty = pos.get("quantity", 0)
+                avg = pos.get("avg_cost", 0)
+                price = cached_prices[code]
+                pos["market_value"] = round(price * qty, 2)
+                pos["profit_loss"] = round((price - avg) * qty, 2)
+    except Exception:
+        pass
+
     # 获取账户可用资金
     account_data = await db.fetchone(
         "SELECT available_cash FROM accounts WHERE account_id = ?",
@@ -300,6 +318,131 @@ async def dsa_analyze_position(
                 )
 
     raise HTTPException(status_code=504, detail="DSA 分析超时，请稍后重试")
+
+
+@router.get("/api/v1/ui/{account_id}/closed-positions")
+async def get_closed_positions(
+    account_id: str = Path(..., description="账户 ID"),
+    limit: int = Query(50, description="返回数量限制")
+):
+    """获取已清仓股票明细
+
+    通过 trade_records 聚合买卖记录，找出已全部卖出的股票，
+    计算持有时间、交易成本、清仓收益、收益率、年化收益率。
+    """
+    db = get_db_manager()
+
+    account = await db.fetchone(
+        "SELECT 1 FROM accounts WHERE account_id = ? AND is_active = 1",
+        (account_id,)
+    )
+    if not account:
+        raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
+
+    # 1. 找出所有有买入记录的股票
+    buy_stocks = await db.fetchall("""
+        SELECT stock_code, stock_name,
+               SUM(quantity) as total_buy_qty,
+               SUM(amount) as total_buy_amount,
+               SUM(commission) as total_buy_commission,
+               MIN(trade_time) as first_buy_time,
+               AVG(price) as avg_buy_price
+        FROM trade_records
+        WHERE account_id = ? AND trade_type = 'buy'
+        GROUP BY stock_code
+    """, (account_id,))
+
+    if not buy_stocks:
+        return {"success": True, "account_id": account_id, "closed_positions": []}
+
+    # 2. 对每只股票，检查是否已清仓（卖出数量 = 买入数量）
+    closed = []
+    for stock in buy_stocks:
+        code = stock["stock_code"]
+        name = stock["stock_name"] or ""
+        buy_qty = stock["total_buy_qty"]
+        buy_amount = stock["total_buy_amount"]
+        buy_commission = stock["total_buy_commission"]
+        first_buy = stock["first_buy_time"]
+
+        # 查询卖出记录
+        sell_record = await db.fetchone("""
+            SELECT SUM(quantity) as total_sell_qty,
+                   SUM(amount) as total_sell_amount,
+                   SUM(commission) as total_sell_commission,
+                   MAX(trade_time) as last_sell_time
+            FROM trade_records
+            WHERE account_id = ? AND stock_code = ? AND trade_type = 'sell'
+        """, (account_id, code))
+
+        if not sell_record:
+            continue
+
+        sell_qty = sell_record["total_sell_qty"] or 0
+        sell_amount = sell_record["total_sell_amount"] or 0.0
+        sell_commission = sell_record["total_sell_commission"] or 0.0
+        last_sell = sell_record["last_sell_time"]
+
+        # 只展示已清仓的（卖出数量 >= 买入数量）
+        if sell_qty < buy_qty:
+            continue
+
+        # 交易成本 = 买入佣金 + 卖出佣金 + 印花税等（卖出金额已扣除）
+        total_cost = buy_amount + buy_commission + sell_commission
+        total_revenue = sell_amount
+        net_profit = total_revenue - total_cost
+        profit_pct = (net_profit / total_cost * 100) if total_cost > 0 else 0.0
+
+        # 持有天数
+        try:
+            if isinstance(first_buy, str):
+                buy_dt = datetime.datetime.fromisoformat(first_buy.replace('+08:00', '+08:00'))
+            else:
+                buy_dt = first_buy
+            if isinstance(last_sell, str):
+                sell_dt = datetime.datetime.fromisoformat(last_sell.replace('+08:00', '+08:00'))
+            else:
+                sell_dt = last_sell
+            holding_days = max((sell_dt - buy_dt).days, 1)
+        except Exception:
+            buy_dt = None
+            sell_dt = None
+            holding_days = 1
+
+        # 年化收益率
+        annualized_pct = ((1 + profit_pct / 100) ** (365 / holding_days) - 1) * 100 if holding_days > 0 else 0.0
+
+        closed.append({
+            "stock_code": code,
+            "stock_name": name,
+            "buy_quantity": buy_qty,
+            "avg_buy_price": round(buy_amount / buy_qty, 3) if buy_qty > 0 else 0,
+            "avg_sell_price": round(sell_amount / sell_qty, 3) if sell_qty > 0 else 0,
+            "first_buy_time": str(first_buy)[:19],
+            "last_sell_time": str(last_sell)[:19],
+            "_sell_dt": sell_dt,
+            "holding_days": holding_days,
+            "total_cost": round(total_cost, 2),
+            "total_revenue": round(total_revenue, 2),
+            "total_commission": round(buy_commission + sell_commission, 2),
+            "net_profit": round(net_profit, 2),
+            "profit_pct": round(profit_pct, 2),
+            "annualized_pct": round(annualized_pct, 2),
+        })
+
+    # 按清仓卖出时间倒序
+    closed.sort(key=lambda x: x["_sell_dt"] or datetime.datetime.min, reverse=True)
+
+    # 移除内部字段
+    for item in closed:
+        item.pop("_sell_dt", None)
+
+    return {
+        "success": True,
+        "account_id": account_id,
+        "closed_positions": closed[:limit],
+        "total": len(closed)
+    }
 
 
 @router.post("/api/v1/ui/{account_id}/stocks/{stock_code}/dsa-analyze")

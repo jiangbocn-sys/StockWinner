@@ -4,7 +4,7 @@
 
 from fastapi import APIRouter, HTTPException, Path
 from services.common.account_manager import get_account_manager
-from services.common.database import get_db_manager
+from services.common.database import get_db_manager, configure_kline_connection
 from services.common.timezone import get_china_time
 from services._version import VERSION, get_start_time
 
@@ -129,6 +129,7 @@ async def get_dashboard(account_id: str = Path(..., description="账户 ID")):
     try:
         if kline_db_path.exists():
             kconn = sqlite3.connect(str(kline_db_path), timeout=30)
+            configure_kline_connection(kconn)
             kcursor = kconn.cursor()
 
             # 日K线

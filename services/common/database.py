@@ -34,6 +34,7 @@ class DatabaseManager:
         self._pool: Optional[asyncio.Queue] = None  # 延迟初始化，避免跨事件循环问题
         self._initialized = False
         self._lock: Optional[asyncio.Lock] = None
+        self._loop_id: Optional[int] = None  # 记录初始化时的事件循环 ID
 
         # 吞吐量计数器（线程安全）
         self._counter_lock = threading.Lock()
@@ -52,16 +53,32 @@ class DatabaseManager:
         self._snap_rows_written = 0
 
     def _ensure_loop_resources(self):
-        """确保在当前事件循环中初始化 pool 和 lock"""
+        """确保在当前事件循环中初始化 pool 和 lock
+
+        检测到事件循环切换时（如 APScheduler 后台线程 / run_async_safe
+        创建的新循环），自动重置 pool 和 lock 以绑定到新循环。
+        """
+        try:
+            current_loop = asyncio.get_running_loop()
+            current_loop_id = id(current_loop)
+        except RuntimeError:
+            return  # 没有运行中的事件循环
+
+        loop_changed = self._loop_id is not None and self._loop_id != current_loop_id
+
+        if loop_changed:
+            # 事件循环已切换，重置以在新循环中重新初始化
+            self._pool = None
+            self._lock = None
+            self._initialized = False
+            self._loop_id = current_loop_id
+
         if self._pool is None or self._lock is None:
-            try:
-                asyncio.get_running_loop()
-            except RuntimeError:
-                return  # 没有运行中的事件循环
             if self._lock is None:
                 self._lock = asyncio.Lock()
             if self._pool is None:
                 self._pool = asyncio.Queue()
+                self._loop_id = current_loop_id
 
     async def _create_connection(self) -> aiosqlite.Connection:
         """创建并配置新连接"""
@@ -332,6 +349,19 @@ def _configure_connection(conn: sqlite3.Connection):
     """配置 SQLite 连接：WAL mode、busy timeout、foreign keys"""
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA busy_timeout = 10000")
+    conn.execute("PRAGMA foreign_keys = ON")
+
+
+def configure_kline_connection(conn: sqlite3.Connection):
+    """配置 kline.db 的 sqlite3 连接：WAL mode + busy timeout
+
+    供所有直接 sqlite3.connect(kline.db) 的位置调用，确保 PRAGMA 一致。
+    用法：
+        conn = sqlite3.connect(kline_path, timeout=30)
+        configure_kline_connection(conn)
+    """
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA busy_timeout = 30000")
     conn.execute("PRAGMA foreign_keys = ON")
 
 

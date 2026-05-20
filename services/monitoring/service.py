@@ -13,6 +13,7 @@
 
 import asyncio
 import time
+import threading
 from typing import Dict, List, Optional, Any
 from services.common.database import get_db_manager
 from services.common.timezone import get_china_time
@@ -30,6 +31,7 @@ class TradingMonitor:
         self._running = False
         self._task = None
         self._account_ids: list[str] = []
+        self._state_lock = threading.Lock()  # 保护 _running 和 _account_ids 的并发访问
         # 冷却期记录：{(account_id, strategy_id): last_trigger_time}
         self._cooldown: Dict[tuple, float] = {}
         # 策略代码编译缓存：{strategy_id: compiled_code}
@@ -53,7 +55,14 @@ class TradingMonitor:
             interval: 监控间隔（秒）
         """
         if self._running:
-            return {"success": False, "message": "交易监控服务已在运行"}
+            # 僵尸状态检测：_running=True 但 task 已死
+            if self._task and self._task.done():
+                log = get_logger("monitor")
+                log.log_event("monitor_zombie_detect", f"检测到监控僵尸状态（task 已死），自动清理")
+                self._running = False
+                self._task = None
+            else:
+                return {"success": False, "message": "交易监控服务已在运行"}
 
         if not account_ids:
             from services.common.database import get_db_manager
@@ -129,26 +138,68 @@ class TradingMonitor:
                 log.error("monitor_loop", f"监控循环错误: {e}")
                 await asyncio.sleep(interval)
 
+        self._running = False  # 循环退出后重置状态，防止僵尸状态
         log.log_event("monitor_loop_stop", "交易监控服务已停止")
 
     async def _run_monitoring(self, account_id: str):
         """执行一次交易监控"""
         db = get_db_manager()
 
+        # === 预取：收集所有需要监控的股票代码，一次性批量获取行情 ===
+        all_stock_codes = set()
+        try:
+            wl = await db.fetchall(
+                "SELECT stock_code FROM watchlist WHERE account_id = ? AND status IN ('pending', 'watching', 'bought')",
+                (account_id,),
+            )
+            all_stock_codes.update(w["stock_code"] for w in wl)
+        except Exception:
+            pass
+        try:
+            pos = await db.fetchall(
+                "SELECT stock_code FROM stock_positions WHERE account_id = ?",
+                (account_id,),
+            )
+            all_stock_codes.update(p["stock_code"] for p in pos)
+        except Exception:
+            pass
+
+        market_data_cache: Dict[str, Any] = {}
+        if all_stock_codes:
+            try:
+                from services.trading.gateway import get_gateway
+                gateway = await get_gateway()
+                market_data_cache = await gateway.get_batch_market_data(list(all_stock_codes))
+                if not self._sdk_healthy:
+                    get_logger("monitor").log_event("sdk_recovered", "SDK/TGW 连接已恢复")
+                    self._sdk_healthy = True
+                    self._sdk_error_time = None
+                    self._sdk_error_msg = ""
+                    self._consecutive_errors = 0
+            except Exception as e:
+                self._sdk_healthy = False
+                self._sdk_error_time = get_china_time().strftime("%Y-%m-%d %H:%M:%S")
+                self._sdk_error_msg = str(e)
+                self._consecutive_errors += 1
+
         # === 第一部分：基于交易策略的触发评估 ===
         await self._evaluate_trading_strategies(account_id)
 
         # === 第二部分：基于 watchlist 的传统监控（止损止盈）===
-        await self._monitor_watchlist(account_id)
+        await self._monitor_watchlist(account_id, market_data_cache=market_data_cache)
 
         # === 第三部分：扫描手动 pending 信号并执行 ===
-        await self._scan_pending_signals(account_id)
+        await self._scan_pending_signals(account_id, market_data_cache=market_data_cache)
 
         # === 第四部分：刷新持仓盈亏 ===
-        await self._refresh_positions_pnl(account_id)
+        await self._refresh_positions_pnl(account_id, market_data_cache=market_data_cache)
 
-        # === 第五部分：更新 watchlist 现价 ===
-        await self._update_watchlist_current_price(account_id)
+        # === 第五部分：更新实时价格到内存缓存（不再写 DB）===
+        self._update_price_cache(account_id, market_data_cache=market_data_cache)
+
+        # === 第六部分：每 15 分钟兜底刷盘 ===
+        if self._cache.should_flush():
+            await self._flush_price_cache_to_db(account_id)
 
     async def _evaluate_trading_strategies(self, account_id: str):
         """评估交易策略配置中的触发条件"""
@@ -218,7 +269,7 @@ class TradingMonitor:
             pass
         return 300  # 默认 5 分钟
 
-    async def _monitor_watchlist(self, account_id: str):
+    async def _monitor_watchlist(self, account_id: str, market_data_cache: Optional[Dict[str, Any]] = None):
         """传统的 watchlist 止损止盈监控（批量行情 + 策略预加载）"""
         db = get_db_manager()
 
@@ -233,18 +284,20 @@ class TradingMonitor:
 
         stock_codes = [w["stock_code"] for w in watchlist]
 
-        # 批量获取行情数据（一次 SDK 调用）
-        try:
-            from services.trading.gateway import get_gateway
-            gateway = await get_gateway()
-            batch_data = await gateway.get_batch_market_data(stock_codes)
-        except Exception as e:
-            log = get_logger("monitor")
-            log.error("monitor", f"批量获取行情失败: {e}")
-            # 降级为逐个获取
-            for stock in watchlist:
-                await self._check_stock_signals(account_id, stock)
-            return
+        # 批量获取行情数据（优先用预取缓存，否则自己调用）
+        if market_data_cache:
+            batch_data = market_data_cache
+        else:
+            try:
+                from services.trading.gateway import get_gateway
+                gateway = await get_gateway()
+                batch_data = await gateway.get_batch_market_data(stock_codes)
+            except Exception as e:
+                log = get_logger("monitor")
+                log.error("monitor", f"批量获取行情失败: {e}")
+                for stock in watchlist:
+                    await self._check_stock_signals(account_id, stock)
+                return
 
         # === 优化 1：一次 SQL JOIN 预加载所有股票的策略配置 ===
         # P1: trading_strategies（个股策略）
@@ -293,18 +346,12 @@ class TradingMonitor:
                         get_logger("monitor").error("monitor", f"策略 #{sid} 编译失败: {e}")
                         self._strategy_cache[sid] = None
 
-        # === 优化 2：预加载 K 线缓存 ===
+        # === 优化 2：批量预加载 K 线缓存 ===
         kline_cache: Dict[str, Any] = {}
         try:
             from services.data.local_data_service import get_local_data_service
             lds = get_local_data_service()
-            for code in stock_codes:
-                try:
-                    kline = lds.get_kline_data(code, limit=60)
-                    if kline is not None and len(kline) > 0:
-                        kline_cache[code] = kline
-                except Exception:
-                    pass
+            kline_cache = lds.get_batch_kline(stock_codes, limit=60)
         except Exception:
             pass
 
@@ -327,10 +374,10 @@ class TradingMonitor:
                 kline_cache=kline_cache,
             )
 
-    async def _refresh_positions_pnl(self, account_id: str):
-        """刷新持仓盈亏（从行情数据更新 current_price）"""
-        from services.trading.gateway import get_gateway
-        from services.trading.position_manager import get_position_manager
+    async def _refresh_positions_pnl(self, account_id: str, market_data_cache: Optional[Dict[str, Any]] = None):
+        """刷新持仓盈亏（只更新内存缓存，不写 DB）"""
+        from services.common.price_cache import get_price_cache
+        self._cache = get_price_cache()
 
         db = get_db_manager()
         positions = await db.fetchall(
@@ -341,85 +388,95 @@ class TradingMonitor:
             return
 
         stock_codes = [p["stock_code"] for p in positions]
-        try:
-            gateway = await get_gateway()
-            batch_data = await gateway.get_batch_market_data(stock_codes)
-            if not self._sdk_healthy:
-                get_logger("monitor").log_event("sdk_recovered", "SDK/TGW 连接已恢复")
-                self._sdk_healthy = True
-                self._sdk_error_time = None
-                self._sdk_error_msg = ""
-                self._consecutive_errors = 0
-        except Exception as e:
-            self._sdk_healthy = False
-            self._sdk_error_time = get_china_time().strftime("%Y-%m-%d %H:%M:%S")
-            self._sdk_error_msg = str(e)
-            self._consecutive_errors += 1
+
+        # 使用预取的行情数据
+        if not market_data_cache:
+            try:
+                gateway = await get_gateway()
+                market_data_cache = await gateway.get_batch_market_data(stock_codes)
+                if not self._sdk_healthy:
+                    get_logger("monitor").log_event("sdk_recovered", "SDK/TGW 连接已恢复")
+                    self._sdk_healthy = True
+                    self._sdk_error_time = None
+                    self._sdk_error_msg = ""
+                    self._consecutive_errors = 0
+            except Exception as e:
+                self._sdk_healthy = False
+                self._sdk_error_time = get_china_time().strftime("%Y-%m-%d %H:%M:%S")
+                self._sdk_error_msg = str(e)
+                self._consecutive_errors += 1
+                return
+
+        # 更新内存价格缓存
+        data = {}
+        for code in stock_codes:
+            md = market_data_cache.get(code)
+            if md and md.current_price and md.current_price > 0:
+                data[code] = (md.current_price, md.change_percent if hasattr(md, 'change_percent') and md.change_percent else 0.0)
+
+        if data:
+            self._cache.update_batch(account_id, data)
+
+    def _update_price_cache(self, account_id: str, market_data_cache: Optional[Dict[str, Any]] = None):
+        """将实时行情写入内存价格缓存（不写 DB）"""
+        from services.common.price_cache import get_price_cache
+        self._cache = get_price_cache()
+
+        if not market_data_cache:
             return
 
-        prices = {}
-        for code in stock_codes:
-            md = batch_data.get(code)
-            if md:
-                prices[code] = md.current_price
+        # 从预取行情中提取价格（只缓存有效价格）
+        data = {}
+        for code, md in market_data_cache.items():
+            if md and md.current_price and md.current_price > 0:
+                data[code] = (md.current_price, md.change_percent if hasattr(md, 'change_percent') and md.change_percent else 0.0)
 
-        if prices:
-            pm = get_position_manager(account_id)
-            count = await pm.refresh_pnl(prices)
-            if count > 0:
-                get_logger("monitor").log_event("pnl_refresh", f"已刷新 {count} 只持仓盈亏", count=count)
+        if data:
+            self._cache.update_batch(account_id, data)
 
-    async def _update_watchlist_current_price(self, account_id: str):
-        """更新 watchlist 中所有股票的 current_price 字段
+    async def _flush_price_cache_to_db(self, account_id: str):
+        """每 15 分钟将内存缓存的价格兜底写入数据库"""
+        from services.common.price_cache import get_price_cache
+        self._cache = get_price_cache()
+        prices = self._cache.get_all_for_account(account_id)
+        if not prices:
+            return
 
-        批量获取所有监控中股票的实时行情，写入数据库。
-        候选股票清单和持仓分析页面都依赖此字段显示实时价格。
-        """
         db = get_db_manager()
 
-        # 获取所有需要更新现价的 watchlist 记录
-        watchlist = await db.fetchall(
-            "SELECT stock_code FROM watchlist WHERE account_id = ? AND status IN ('pending', 'watching', 'bought')",
-            (account_id,),
-        )
-        if not watchlist:
-            return
+        # 刷写 watchlist current_price
+        wl_updates = []
+        pos_updates = []
+        for code, price in prices.items():
+            wl_updates.append((price, get_china_time(), account_id, code))
+            pos_updates.append((price, price, price, get_china_time(), account_id, code))
 
-        stock_codes = [w["stock_code"] for w in watchlist]
+        if wl_updates:
+            try:
+                await db.executemany(
+                    "UPDATE watchlist SET current_price = ?, updated_at = ? WHERE account_id = ? AND stock_code = ?",
+                    wl_updates,
+                )
+                get_logger("monitor").log_event("price_flush", f"已刷盘 {len(wl_updates)} 条 watchlist 现价", count=len(wl_updates))
+            except Exception as e:
+                get_logger("monitor").error("monitor", f"刷盘 watchlist 现价失败: {e}")
 
-        # 批量获取行情
-        try:
-            from services.trading.gateway import get_gateway
-            gateway = await get_gateway()
-            batch_data = await gateway.get_batch_market_data(stock_codes)
-            # 成功获取后重置错误状态
-            if not self._sdk_healthy:
-                get_logger("monitor").log_event("sdk_recovered", "SDK/TGW 连接已恢复")
-                self._sdk_healthy = True
-                self._sdk_error_time = None
-                self._sdk_error_msg = ""
-                self._consecutive_errors = 0
-        except Exception as e:
-            self._sdk_healthy = False
-            self._sdk_error_time = get_china_time().strftime("%Y-%m-%d %H:%M:%S")
-            self._sdk_error_msg = str(e)
-            self._consecutive_errors += 1
-            get_logger("monitor").error("monitor", f"批量获取行情失败，跳过现价更新: {e}")
-            return
+        if pos_updates:
+            try:
+                await db.executemany(
+                    """UPDATE stock_positions
+                       SET current_price = ?,
+                           market_value = ? * quantity,
+                           profit_loss = (? - avg_cost) * quantity,
+                           updated_at = ?
+                       WHERE account_id = ? AND stock_code = ?""",
+                    pos_updates,
+                )
+                get_logger("monitor").log_event("price_flush", f"已刷盘 {len(pos_updates)} 条 position 盈亏", count=len(pos_updates))
+            except Exception as e:
+                get_logger("monitor").error("monitor", f"刷盘 position 盈亏失败: {e}")
 
-        # 批量更新
-        update_list = []
-        for code in stock_codes:
-            md = batch_data.get(code)
-            if md and md.current_price and md.current_price > 0:
-                update_list.append((md.current_price, account_id, code))
-
-        if update_list:
-            await db.executemany(
-                "UPDATE watchlist SET current_price = ?, updated_at = ? WHERE account_id = ? AND stock_code = ?",
-                [(price, get_china_time(), aid, code) for price, aid, code in update_list],
-            )
-            get_logger("monitor").log_event("watchlist_price_update", f"已更新 {len(update_list)} 只 watchlist 现价", count=len(update_list))
+        self._cache.mark_flushed()
 
     async def _evaluate_sell_strategy_code(
         self,
@@ -704,7 +761,7 @@ class TradingMonitor:
         db = get_db_manager()
         stock_code = stock.get('stock_code')
         buy_price = stock.get('buy_price', 0)
-        target_quantity = stock.get('target_quantity', 100)
+        target_quantity = stock.get('target_quantity') or 0
         status = stock.get('status')
 
         # 获取交易网关
@@ -729,7 +786,7 @@ class TradingMonitor:
 
         # 检查买入条件
         if status == 'pending':
-            if buy_price > 0 and abs(current_price - buy_price) / buy_price <= 0.02:
+            if buy_price > 0 and current_price <= buy_price:
                 get_logger("monitor").log_event("buy_signal",
                     f"触发买入信号：{stock_code}, 目标价：{buy_price:.2f}, 当前价：{current_price:.2f}",
                     stock_code=stock_code, buy_price=buy_price, current_price=current_price)
@@ -783,7 +840,7 @@ class TradingMonitor:
         """
         stock_code = stock.get('stock_code')
         buy_price = stock.get('buy_price', 0)
-        target_quantity = stock.get('target_quantity', 100)
+        target_quantity = stock.get('target_quantity') or 0
         status = stock.get('status')
         current_price = stock.get('current_price')
 
@@ -800,7 +857,7 @@ class TradingMonitor:
 
         # 检查买入条件
         if status == 'pending':
-            if buy_price > 0 and abs(current_price - buy_price) / buy_price <= 0.02:
+            if buy_price > 0 and current_price <= buy_price:
                 get_logger("monitor").log_event("buy_signal",
                     f"触发买入信号：{stock_code}, 目标价：{buy_price:.2f}, 当前价：{current_price:.2f}",
                     stock_code=stock_code, buy_price=buy_price, current_price=current_price)
@@ -855,22 +912,74 @@ class TradingMonitor:
     ):
         """执行买入交易
 
-        买入数量解析：
+        买入数量解析（按优先级）：
         1. 个股策略 max_trade_quantity > 0 → 按该数量
-        2. 否则使用 watchlist target_quantity
-        实际买入由 execution_service 根据账户风控参数计算上限
+        2. 选股策略 config.quantity → 按固定数量
+        3. 选股策略 config.position_pct → 按可用资金比例计算
+        4. 账户 max_single_position_pct → 按单股最大仓位计算
+        5. 回退到 watchlist target_quantity
         """
         stock_code = stock.get('stock_code')
         stock_name = stock.get('stock_name', '')
 
-        # 检查个股策略是否有最大买入数量限制
         db = get_db_manager()
+
+        # 优先级 1：个股策略 max_trade_quantity
         ts = await db.fetchone(
             "SELECT max_trade_quantity FROM trading_strategies WHERE account_id = ? AND stock_code = ?",
             (account_id, stock_code),
         )
         if ts and ts.get("max_trade_quantity", 0) > 0:
             target_quantity = ts["max_trade_quantity"]
+        else:
+            # 优先级 2-3：从选股策略配置读取 quantity 或 position_pct
+            strategy_id = stock.get('strategy_id')
+            if strategy_id:
+                strategy = await db.fetchone(
+                    "SELECT config FROM strategies WHERE id = ? AND account_id = ?",
+                    (strategy_id, account_id),
+                )
+                if strategy and strategy.get("config"):
+                    try:
+                        import json
+                        config = json.loads(strategy["config"]) if isinstance(strategy["config"], str) else strategy["config"]
+                        if config.get("quantity"):
+                            target_quantity = int(config["quantity"])
+                        elif config.get("position_pct"):
+                            # 按可用资金比例计算
+                            position_pct = float(config["position_pct"]) / 100.0
+                            account = await db.fetchone(
+                                "SELECT available_cash FROM accounts WHERE account_id = ?",
+                                (account_id,)
+                            )
+                            if account:
+                                available_cash = account.get('available_cash', 0)
+                                buy_amount = available_cash * position_pct
+                                if current_price > 0:
+                                    qty = int((buy_amount / current_price) // 100) * 100
+                                    target_quantity = max(qty, 0)
+                    except (json.JSONDecodeError, ValueError, TypeError):
+                        pass
+
+            # 优先级 4：如果 target_quantity 未设置，按账户单股最大仓位计算
+            if not target_quantity:
+                account = await db.fetchone(
+                    "SELECT available_cash, max_single_position_pct FROM accounts WHERE account_id = ?",
+                    (account_id,)
+                )
+                if account and current_price > 0:
+                    available_cash = account.get('available_cash', 0)
+                    max_single_pct = account.get('max_single_position_pct', 0.15)
+                    # 总资产 = 持仓市值 + 可用资金
+                    positions = await db.fetchall(
+                        "SELECT SUM(market_value) as total_mv FROM stock_positions WHERE account_id = ?",
+                        (account_id,)
+                    )
+                    current_mv = positions[0]["total_mv"] if positions and positions[0]["total_mv"] else 0
+                    total_assets = current_mv + available_cash
+                    risk_limit = int(total_assets * max_single_pct / current_price)
+                    if risk_limit >= 100:
+                        target_quantity = (risk_limit // 100) * 100
 
         # 获取交易执行服务
         execution = get_trade_execution_service(account_id)
@@ -1022,7 +1131,7 @@ class TradingMonitor:
                 },
             )
 
-    async def _scan_pending_signals(self, account_id: str):
+    async def _scan_pending_signals(self, account_id: str, market_data_cache: Optional[Dict[str, Any]] = None):
         """扫描手动创建的 pending 信号并执行
 
         流程：
@@ -1042,15 +1151,19 @@ class TradingMonitor:
         if not signals:
             return
 
-        # 批量获取行情
         stock_codes = [s['stock_code'] for s in signals]
-        try:
-            from services.trading.gateway import get_gateway
-            gateway = await get_gateway()
-            market_data = await gateway.get_batch_market_data(stock_codes)
-        except Exception as e:
-            get_logger("monitor").error("monitor", f"批量获取行情失败: {e}")
-            return
+
+        # 使用预取的行情数据，或自行获取
+        if market_data_cache:
+            market_data = market_data_cache
+        else:
+            try:
+                from services.trading.gateway import get_gateway
+                gateway = await get_gateway()
+                market_data = await gateway.get_batch_market_data(stock_codes)
+            except Exception as e:
+                get_logger("monitor").error("monitor", f"批量获取行情失败: {e}")
+                return
 
         for signal in signals:
             stock_code = signal['stock_code']
@@ -1067,10 +1180,10 @@ class TradingMonitor:
             current_price = md.current_price
 
             if signal_type == 'buy':
-                # 买入信号：检查现价与目标价是否接近（2% 以内）
-                if target_price > 0 and abs(current_price - target_price) / target_price > 0.02:
+                # 买入信号：现价必须 <= 目标价
+                if target_price > 0 and current_price > target_price:
                     get_logger("monitor").log_event("pending_signal_skip",
-                        f"跳过手动 pending 信号: {stock_code} 买入，现价 {current_price:.2f} 偏离目标价 {target_price:.2f}",
+                        f"跳过手动 pending 信号: {stock_code} 买入，现价 {current_price:.2f} 高于目标价 {target_price:.2f}",
                         stock_code=stock_code, signal_type=signal_type,
                         target_price=target_price, current_price=current_price, quantity=quantity)
                     continue

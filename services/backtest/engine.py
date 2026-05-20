@@ -18,6 +18,7 @@ from services.common.structured_logger import get_logger
 from services.common.timezone import get_china_time
 from services.backtest.data_validator import DataCompletenessChecker, DataGapReport
 from services.backtest.execution import FeeConfig, PositionLimits
+from services.backtest.metrics import PerformanceMetrics
 
 logger = get_logger("backtest")
 
@@ -28,6 +29,8 @@ class BacktestEngine:
     def __init__(self, account_id: str = ""):
         self.account_id = account_id
         self.db = get_db_manager()
+        from services.factors.kline_manager import get_kline_manager
+        self.km = get_kline_manager()
 
     async def create_run(
         self,
@@ -70,6 +73,9 @@ class BacktestEngine:
         stop_loss_pct: Optional[float] = None,
         take_profit_pct: Optional[float] = None,
         trailing_stop_pct: Optional[float] = None,
+        initial_positions: Optional[List[Dict]] = None,
+        initial_cash: Optional[float] = None,
+        liquidate_at_end: bool = True,
     ) -> Dict:
         """同步版本的 run_backtest，用于在线程池中执行。"""
         import asyncio
@@ -93,8 +99,70 @@ class BacktestEngine:
                     stop_loss_pct=stop_loss_pct,
                     take_profit_pct=take_profit_pct,
                     trailing_stop_pct=trailing_stop_pct,
+                    initial_positions=initial_positions,
+                    initial_cash=initial_cash,
+                    liquidate_at_end=liquidate_at_end,
                 )
             )
+        finally:
+            loop.close()
+
+    def _run_segmented_backtest_sync(
+        self,
+        run_id: int,
+        strategy_config: Dict,
+        mode: str,
+        start_date: str,
+        end_date: str,
+        initial_capital: float,
+        pool_schedule: List[Dict],
+        fee_config: Optional[FeeConfig] = None,
+        position_limits: Optional[PositionLimits] = None,
+        slippage_pct: float = 0.0,
+        stop_loss_pct: Optional[float] = None,
+        take_profit_pct: Optional[float] = None,
+        trailing_stop_pct: Optional[float] = None,
+    ) -> Dict:
+        """同步版本的分段回测，用于在线程池中执行。"""
+        import asyncio
+
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            # 先获取基准数据
+            benchmark_data = loop.run_until_complete(
+                self._fetch_benchmark_data(start_date, end_date)
+            )
+
+            result = loop.run_until_complete(
+                self.run_segmented_backtest(
+                    run_id=run_id,
+                    strategy_config=strategy_config,
+                    mode=mode,
+                    start_date=start_date,
+                    end_date=end_date,
+                    initial_capital=initial_capital,
+                    pool_schedule=pool_schedule,
+                    fee_config=fee_config,
+                    position_limits=position_limits,
+                    slippage_pct=slippage_pct,
+                    stop_loss_pct=stop_loss_pct,
+                    take_profit_pct=take_profit_pct,
+                    trailing_stop_pct=trailing_stop_pct,
+                )
+            )
+
+            if "error" not in result:
+                # 保存结果（需要 benchmark_data 重新计算）
+                try:
+                    loop.run_until_complete(
+                        self._save_results(run_id, result, benchmark_data)
+                    )
+                except Exception as e:
+                    logger.warn("backtest", f"保存回测结果失败: {e}")
+                    result["error"] = f"保存结果失败: {e}"
+
+            return result
         finally:
             loop.close()
 
@@ -113,6 +181,9 @@ class BacktestEngine:
         stop_loss_pct: Optional[float] = None,
         take_profit_pct: Optional[float] = None,
         trailing_stop_pct: Optional[float] = None,
+        initial_positions: Optional[List[Dict]] = None,
+        initial_cash: Optional[float] = None,
+        liquidate_at_end: bool = True,
     ) -> Dict:
         """
         执行回测。
@@ -164,6 +235,7 @@ class BacktestEngine:
                     run_id, strategy_config, start_date, end_date,
                     initial_capital, stock_pool, fee_config, position_limits,
                     slippage_pct, stop_loss_pct, take_profit_pct, trailing_stop_pct,
+                    initial_positions, initial_cash, liquidate_at_end,
                 )
             elif mode == "return_accumulation":
                 result = await self._run_return_accumulation(
@@ -176,7 +248,7 @@ class BacktestEngine:
             return result
 
         except Exception as e:
-            logger.error(f"回测执行失败 (run_id={run_id}): {e}", exc_info=True)
+            logger.error("backtest", f"回测执行失败 (run_id={run_id}): {e}")
             await self._mark_failed(run_id, str(e), None)
             return {"error": str(e)}
 
@@ -184,6 +256,7 @@ class BacktestEngine:
         self, run_id, strategy_config, start_date, end_date,
         initial_capital, stock_pool, fee_config, position_limits,
         slippage_pct, stop_loss_pct, take_profit_pct, trailing_stop_pct,
+        initial_positions=None, initial_cash=None, liquidate_at_end=True,
     ) -> Dict:
         """执行撮合模拟盘模式"""
         from services.backtest.modes.simulated_trading import SimulatedTradingEngine
@@ -223,6 +296,9 @@ class BacktestEngine:
             take_profit_pct=take_profit_pct,
             trailing_stop_pct=trailing_stop_pct,
             stop_execution_price=strategy_config.get("stop_execution_price", "close"),
+            initial_positions=initial_positions,
+            initial_cash=initial_cash,
+            liquidate_at_end=liquidate_at_end,
         )
 
         # 进度回调（同步版本，直接执行 DB 更新）
@@ -240,7 +316,6 @@ class BacktestEngine:
 
                 # 每 2% 计算一次实时指标
                 if pct - last_saved[0] >= 2.0:
-                    from services.backtest.metrics import PerformanceMetrics
                     partial_result = PerformanceMetrics.compute(
                         nav_series=engine.nav_series,
                         trades=engine.trades,
@@ -256,8 +331,8 @@ class BacktestEngine:
 
                 conn.commit()
                 conn.close()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warn("backtest", f"保存回测进度失败: {e}")
 
         result = engine.run(progress_callback=progress)
 
@@ -265,9 +340,32 @@ class BacktestEngine:
             await self._mark_failed(run_id, result["error"], None)
             return result
 
-        # 保存结果
-        await self._save_results(run_id, result)
+        # 获取基准数据（沪深300）
+        benchmark_data = await self._fetch_benchmark_data(start_date, end_date)
+
+        # 保存结果（传入基准数据）
+        await self._save_results(run_id, result, benchmark_data)
         return result
+
+    async def _fetch_benchmark_data(self, start_date: str, end_date: str) -> List[Dict]:
+        """获取沪深300指数（000300.SH）基准数据"""
+        from services.factors.kline_manager import get_kline_manager
+        km = get_kline_manager()
+        kline = km.get_kline_data("000300.SH", start_date=start_date, end_date=end_date)
+        if kline is None or len(kline) == 0:
+            return []
+        # 转换为 [{'trade_date': ..., 'close': ...}] 格式
+        if hasattr(kline, 'to_dict'):
+            return [
+                {"trade_date": row["trade_date"], "close": float(row["close"])}
+                for row in kline.to_dict("records")
+            ]
+        elif isinstance(kline, list):
+            return [
+                {"trade_date": row.get("trade_date", ""), "close": float(row.get("close", 0))}
+                for row in kline
+            ]
+        return []
 
     async def _run_return_accumulation(
         self, run_id, strategy_config, start_date, end_date,
@@ -296,7 +394,8 @@ class BacktestEngine:
             await self._mark_failed(run_id, result["error"], None)
             return result
 
-        await self._save_results(run_id, result)
+        benchmark_data = await self._fetch_benchmark_data(start_date, end_date)
+        await self._save_results(run_id, result, benchmark_data)
         return result
 
     async def _check_data_completeness(
@@ -307,12 +406,30 @@ class BacktestEngine:
         report = await checker.check(stock_pool, start_date, end_date)
         return report
 
-    async def _save_results(self, run_id: int, result: Dict):
+    async def _save_results(
+        self, run_id: int, result: Dict, benchmark_data: Optional[List[Dict]] = None
+    ):
         """保存回测结果到数据库"""
         backtest_trades = result.get("trades", [])
         nav_series = result.get("nav_series", [])
         daily_positions = result.get("daily_positions", [])
         summary = result.get("result", {})
+
+        # 如果有基准数据，重新计算含对比的指标
+        if benchmark_data and nav_series and backtest_trades:
+            initial_capital = summary.get("initial_capital", 1000000)
+            # 从 nav_series 推断日期范围
+            first_date = nav_series[0]["trade_date"] if nav_series else ""
+            last_date = nav_series[-1]["trade_date"] if nav_series else ""
+            recomputed = PerformanceMetrics.compute(
+                nav_series=nav_series,
+                trades=backtest_trades,
+                initial_capital=initial_capital,
+                start_date=first_date,
+                end_date=last_date,
+                benchmark_series=benchmark_data,
+            )
+            summary = recomputed.to_dict()
 
         # 1. 保存交易记录
         for trade in backtest_trades:
@@ -437,3 +554,191 @@ class BacktestEngine:
         km = get_kline_manager()
         all_stocks = km.get_all_stocks()
         return [c for c in all_stocks if c.split(".")[-1] in ("SH", "SZ")]
+
+    async def run_segmented_backtest(
+        self,
+        run_id: int,
+        strategy_config: Dict,
+        mode: str,
+        start_date: str,
+        end_date: str,
+        initial_capital: float,
+        pool_schedule: List[Dict],
+        fee_config: Optional[FeeConfig] = None,
+        position_limits: Optional[PositionLimits] = None,
+        slippage_pct: float = 0.0,
+        stop_loss_pct: Optional[float] = None,
+        take_profit_pct: Optional[float] = None,
+        trailing_stop_pct: Optional[float] = None,
+        progress_callback=None,
+    ) -> Dict:
+        """
+        分段回测：每段独立运行，持仓和现金在段间传递。
+        段只需要 start_date，结束日期自动取下一段的 start_date 或整体 end_date。
+
+        Args:
+            pool_schedule: [
+                {"start_date": "2024-01-01", "stock_pool": ["..."], "strategy_config": {...}},
+                ...
+            ]
+        """
+        from services.backtest.modes.simulated_trading import SimulatedTradingEngine
+        from datetime import datetime, timedelta
+
+        if not pool_schedule:
+            return {"error": "pool_schedule 不能为空"}
+
+        # 校验并补全 end_date：段之间必须连续
+        resolved_schedule = []
+        for i, seg in enumerate(pool_schedule):
+            seg_start = seg.get("start_date")
+            if not seg_start:
+                return {"error": f"分段 {i+1} 缺少 start_date"}
+            # 结束日期取下一段开始日期，或整体 end_date
+            if i + 1 < len(pool_schedule):
+                seg_end = pool_schedule[i + 1]["start_date"]
+            else:
+                seg_end = end_date
+
+            resolved_schedule.append({
+                "start_date": seg_start,
+                "end_date": seg_end,
+                "stock_pool": seg.get("stock_pool", []),
+                "strategy_config": seg.get("strategy_config") or strategy_config,
+            })
+
+        # 校验连续性：第一段 start_date 必须 <= 整体 start_date，段间不能有重叠
+        if resolved_schedule[0]["start_date"] > start_date:
+            return {"error": f"第一段 start_date ({resolved_schedule[0]['start_date']}) 不能晚于整体 start_date ({start_date})"}
+
+        # 计算总交易日数（用于进度条）
+        total_trade_days = 0
+        for seg in resolved_schedule:
+            days = self.km.get_all_trade_dates(seg["start_date"], seg["end_date"]) if self.km else []
+            total_trade_days += len(days)
+
+        if total_trade_days == 0:
+            return {"error": "分段日期范围内无交易日"}
+
+        # 累积结果
+        all_trades: List[Dict] = []
+        all_nav: List[Dict] = []
+        all_daily_positions: List[Dict] = []
+        carried_positions: List[Dict] = []  # 段间传递的持仓
+        carried_cash: Optional[float] = None
+
+        # 逐段执行
+        for seg_idx, seg in enumerate(resolved_schedule):
+            is_last = seg_idx == len(pool_schedule) - 1
+            seg_start = seg["start_date"]
+            seg_end = seg["end_date"]
+            seg_pool = seg.get("stock_pool", [])
+            seg_strategy = seg.get("strategy_config") or strategy_config
+
+            logger.warn("backtest", f"分段 {seg_idx+1}/{len(pool_schedule)}: {seg_start} ~ {seg_end}, "
+                           f"股票池 {len(seg_pool)} 只, 初始现金={carried_cash or initial_capital:.0f}, "
+                           f"持仓 {len(carried_positions)} 只")
+
+            # 构造本段的进度回调
+            def seg_progress(current, total, trade_date="", idx=seg_idx):
+                acc_days = sum(
+                    len(self.km.get_all_trade_dates(s["start_date"], s["end_date"]))
+                    for s in resolved_schedule[:idx]
+                ) if self.km else 0
+                acc = acc_days + current
+                pct = round(acc / total_trade_days * 100, 1) if total_trade_days > 0 else 0
+                try:
+                    import sqlite3
+                    from services.common.database import get_sync_connection
+                    conn = get_sync_connection("stockwinner")
+                    # 分段进度标注：[段号/总数] 日期 (累计天数/总天数)
+                    label = f"[{idx+1}/{len(resolved_schedule)}] {trade_date} ({acc}/{total_trade_days})"
+                    conn.execute(
+                        "UPDATE backtest_runs SET progress = ?, current_trade_date = ? WHERE id = ?",
+                        (pct, label, run_id)
+                    )
+                    conn.commit()
+                    conn.close()
+                except Exception as e:
+                    logger.warn("backtest", f"分段进度保存失败: {e}")
+                # 调用外部回调
+                if progress_callback:
+                    progress_callback(acc, total_trade_days, trade_date)
+
+            # 创建本段引擎
+            fee = fee_config or FeeConfig(
+                commission_rate=seg_strategy.get("commission_rate", 0.0001),
+                min_commission=seg_strategy.get("min_commission", 5.0),
+                stamp_tax=seg_strategy.get("stamp_tax", 0.0005),
+                transfer_fee=seg_strategy.get("transfer_fee", 0.00002),
+            )
+            limits = position_limits or PositionLimits(
+                max_total_position_pct=seg_strategy.get("max_total_position_pct", 0.80),
+                max_single_position_pct=seg_strategy.get("max_single_position_pct", 0.15),
+                cash_reserve_pct=seg_strategy.get("cash_reserve_pct", 0.10),
+            )
+
+            engine = SimulatedTradingEngine(
+                strategy_config=seg_strategy,
+                initial_capital=initial_capital,
+                start_date=seg_start,
+                end_date=seg_end,
+                stock_pool=seg_pool,
+                fee_config=fee,
+                position_limits=limits,
+                slippage_pct=slippage_pct,
+                stop_loss_pct=stop_loss_pct or seg_strategy.get("stop_loss_pct"),
+                take_profit_pct=take_profit_pct or seg_strategy.get("take_profit_pct"),
+                trailing_stop_pct=trailing_stop_pct or seg_strategy.get("trailing_stop_pct"),
+                stop_execution_price=seg_strategy.get("stop_execution_price", "close"),
+                initial_positions=carried_positions if carried_positions else None,
+                initial_cash=carried_cash,
+                liquidate_at_end=is_last,
+            )
+
+            # 执行本段
+            seg_result = engine.run(progress_callback=seg_progress)
+
+            if "error" in seg_result:
+                return {"error": f"分段 {seg_idx+1} 执行失败: {seg_result['error']}"}
+
+            # 合并结果
+            all_trades.extend(seg_result.get("trades", []))
+            all_nav.extend(seg_result.get("nav_series", []))
+            all_daily_positions.extend(seg_result.get("daily_positions", []))
+
+            # 提取本段结束时的状态，传递给下一段
+            if not is_last:
+                carried_cash = engine.execution.cash
+                carried_positions = []
+                for code, pos in engine.execution.positions.items():
+                    carried_positions.append({
+                        "stock_code": code,
+                        "stock_name": pos.stock_name,
+                        "quantity": pos.quantity,
+                        "avg_cost": pos.avg_cost,
+                        "buy_date": pos.buy_date,
+                        "total_cost": pos.total_cost,
+                    })
+
+        # 所有段执行完毕，合并后的汇总指标
+        if all_nav:
+            first_date = all_nav[0]["trade_date"]
+            last_date = all_nav[-1]["trade_date"]
+            summary = PerformanceMetrics.compute(
+                nav_series=all_nav,
+                trades=all_trades,
+                initial_capital=initial_capital,
+                start_date=first_date,
+                end_date=last_date,
+            ).to_dict()
+        else:
+            summary = {"total_return": 0, "annualized_return": 0}
+
+        return {
+            "result": summary,
+            "trades": all_trades,
+            "nav_series": all_nav,
+            "daily_positions": all_daily_positions,
+            "segment_count": len(pool_schedule),
+        }

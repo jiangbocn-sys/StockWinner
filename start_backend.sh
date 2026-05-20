@@ -47,9 +47,16 @@ case "$1" in
             echo "服务启动失败，请查看日志：$LOG_FILE"
             exit 1
         fi
+        # 启动 Watchdog（如果请求了 --watch）
+        if [ "$3" = "--watch" ]; then
+            nohup bash "$PROJECT_DIR/services/process_watchdog.sh" > /dev/null 2>&1 &
+            echo "  Watchdog 已启动"
+        fi
         ;;
     stop)
         echo "停止 StockWinner 后端服务..."
+        # 同时停止 Watchdog
+        pkill -f "process_watchdog.sh" 2>/dev/null
         if [ -f "$PID_FILE" ]; then
             PID=$(cat "$PID_FILE")
             if kill -0 "$PID" 2>/dev/null; then
@@ -97,11 +104,13 @@ case "$1" in
         tail -f "$LOG_FILE"
         ;;
     *)
-        echo "用法：$0 {start|stop|restart|status|logs} [--dev]"
+        echo "用法：$0 {start|stop|restart|status|logs} [--dev] [--watch]"
         echo
         echo "  start          - 启动服务（生产模式，不热重载）"
         echo "  start --dev    - 启动服务（开发模式，文件变更自动重启）"
-        echo "  stop           - 停止服务"
+        echo "  start --watch  - 启动服务 + Watchdog 自动重启（崩溃时自动恢复）"
+        echo "  start --dev --watch - 开发模式 + Watchdog"
+        echo "  stop           - 停止服务（同时停止 Watchdog）"
         echo "  restart        - 重启服务"
         echo "  status         - 查看状态"
         echo "  logs           - 查看日志 (实时)"

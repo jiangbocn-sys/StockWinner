@@ -338,7 +338,9 @@ class TradingGateway(TradingGatewayInterface):
         try:
             kline_db_path = Path(__file__).parent.parent.parent / "data" / "kline.db"
             if kline_db_path.exists():
+                from services.common.database import configure_kline_connection
                 conn = sqlite3.connect(str(kline_db_path))
+                configure_kline_connection(conn)
                 cursor = conn.cursor()
                 # 优先查 stock_base_info（每日 SDK 同步，名称最新）
                 cursor.execute(
@@ -460,7 +462,9 @@ class TradingGateway(TradingGatewayInterface):
         for db_path in db_paths:
             if db_path.exists():
                 try:
+                    from services.common.database import configure_kline_connection
                     conn = sqlite3.connect(str(db_path))
+                    configure_kline_connection(conn)
                     cursor = conn.cursor()
                     cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='kline_data'")
                     if cursor.fetchone():

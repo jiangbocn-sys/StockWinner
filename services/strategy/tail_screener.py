@@ -115,7 +115,7 @@ def run(context):
             "stop_loss_pct": 0.03,
             "take_profit_pct": 0.10,
             "reason": "尾盘评分+理由",
-            "target_quantity": 100,
+            "target_quantity": None,
         }]
     """
     # 获取候选股票
@@ -337,7 +337,7 @@ def run(context):
             "stop_loss_pct": stop_loss_pct,
             "take_profit_pct": take_profit_pct,
             "reason": " | ".join(reason_parts),
-            "target_quantity": 100,
+            "target_quantity": None,
         })
 
     return signals

@@ -129,7 +129,7 @@ class LocalKlineDataService:
     def _init_db(self):
         """初始化数据库表"""
         self.db_path.parent.mkdir(exist_ok=True)
-        conn = sqlite3.connect(str(self.db_path), timeout=30)
+        conn = self._get_conn(timeout=30)
         cursor = conn.cursor()
 
         # 启用 WAL 模式以提高并发性能
@@ -175,9 +175,16 @@ class LocalKlineDataService:
         conn.close()
         print(f"[LocalData] 数据库初始化完成：{self.db_path}")
 
+    def _get_conn(self, timeout: int = 30) -> sqlite3.Connection:
+        """获取已配置 WAL 的 kline.db 连接"""
+        from services.common.database import configure_kline_connection
+        conn = sqlite3.connect(str(self.db_path), timeout=timeout)
+        configure_kline_connection(conn)
+        return conn
+
     def get_latest_date(self, stock_code: str) -> Optional[str]:
         """获取某只股票最新的 K 线日期"""
-        conn = sqlite3.connect(str(self.db_path), timeout=30)
+        conn = self._get_conn(timeout=30)
         cursor = conn.cursor()
         cursor.execute(
             'SELECT MAX(trade_date) FROM kline_data WHERE stock_code = ?',
@@ -189,7 +196,7 @@ class LocalKlineDataService:
 
     def get_kline_count(self, stock_code: str) -> int:
         """获取某只股票的 K 线数据条数"""
-        conn = sqlite3.connect(str(self.db_path), timeout=30)
+        conn = self._get_conn(timeout=30)
         cursor = conn.cursor()
         cursor.execute(
             'SELECT COUNT(*) FROM kline_data WHERE stock_code = ?',
@@ -211,7 +218,7 @@ class LocalKlineDataService:
         if df is None or len(df) == 0:
             return 0
 
-        conn = sqlite3.connect(str(self.db_path), timeout=30)
+        conn = self._get_conn(timeout=30)
         cursor = conn.cursor()
 
         saved_count = 0
@@ -291,7 +298,7 @@ class LocalKlineDataService:
         if not kline_batch:
             return 0
 
-        conn = sqlite3.connect(str(self.db_path), timeout=60)
+        conn = self._get_conn(timeout=60)
         cursor = conn.cursor()
         total_saved = 0
 
@@ -417,7 +424,7 @@ class LocalKlineDataService:
         Returns:
             K 线数据列表
         """
-        conn = sqlite3.connect(str(self.db_path), timeout=30)
+        conn = self._get_conn(timeout=30)
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
 
@@ -446,7 +453,7 @@ class LocalKlineDataService:
 
     def get_all_stocks(self) -> List[str]:
         """获取数据库中所有股票代码"""
-        conn = sqlite3.connect(str(self.db_path), timeout=30)
+        conn = self._get_conn(timeout=30)
         cursor = conn.cursor()
         cursor.execute('SELECT DISTINCT stock_code FROM kline_data')
         stocks = [row[0] for row in cursor.fetchall()]
@@ -468,7 +475,7 @@ class LocalKlineDataService:
         if not stock_codes:
             return {}
 
-        conn = sqlite3.connect(str(self.db_path), timeout=30)
+        conn = self._get_conn(timeout=30)
         cursor = conn.cursor()
 
         # 使用 GROUP BY 一次性查询所有股票的日期范围
@@ -506,7 +513,7 @@ class LocalKlineDataService:
         if not stock_codes:
             return {}
 
-        conn = sqlite3.connect(str(self.db_path), timeout=30)
+        conn = self._get_conn(timeout=30)
         cursor = conn.cursor()
 
         # 批量查询所有股票的日期列表
@@ -529,7 +536,7 @@ class LocalKlineDataService:
 
     def get_stock_date_range(self, stock_code: str) -> tuple:
         """获取某只股票的日期范围（最新日期，最早日期）"""
-        conn = sqlite3.connect(str(self.db_path), timeout=30)
+        conn = self._get_conn(timeout=30)
         cursor = conn.cursor()
         cursor.execute('''
             SELECT MAX(trade_date), MIN(trade_date)
@@ -562,7 +569,7 @@ class LocalKlineDataService:
                 'missing_ranges': list    # 缺失的日期范围列表
             }
         """
-        conn = sqlite3.connect(str(self.db_path), timeout=30)
+        conn = self._get_conn(timeout=30)
         cursor = conn.cursor()
 
         # 计算期望的记录数（交易日天数，约 242 天/年）
@@ -664,7 +671,7 @@ class LocalKlineDataService:
 
     def cleanup_old_data(self, months: int = 6):
         """清理超过指定月数的旧数据"""
-        conn = sqlite3.connect(str(self.db_path), timeout=30)
+        conn = self._get_conn(timeout=30)
         cursor = conn.cursor()
 
         # 计算截止日期
@@ -683,7 +690,7 @@ class LocalKlineDataService:
 
     def get_download_stats(self) -> Dict:
         """获取下载统计信息"""
-        conn = sqlite3.connect(str(self.db_path), timeout=30)
+        conn = self._get_conn(timeout=30)
         cursor = conn.cursor()
 
         # 总股票数
@@ -733,7 +740,7 @@ class LocalKlineDataService:
         if not stock_codes:
             return {}
 
-        conn = sqlite3.connect(str(self.db_path), timeout=30)
+        conn = self._get_conn(timeout=30)
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
 
@@ -794,7 +801,7 @@ class LocalKlineDataService:
         Returns:
             因子数据 Dict，不存在返回 None
         """
-        conn = sqlite3.connect(str(self.db_path), timeout=30)
+        conn = self._get_conn(timeout=30)
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
 
@@ -825,7 +832,7 @@ class LocalKlineDataService:
         if not stock_codes:
             return {}
 
-        conn = sqlite3.connect(str(self.db_path), timeout=30)
+        conn = self._get_conn(timeout=30)
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
 
@@ -998,6 +1005,8 @@ def get_ipo_date_for_stock(stock_code: str) -> Optional[str]:
     - IPO 日期字符串 YYYY-MM-DD，如无法确定返回 None
     """
     conn = sqlite3.connect(str(DB_PATH), timeout=30)
+    from services.common.database import configure_kline_connection
+    configure_kline_connection(conn)
     cursor = conn.cursor()
 
     # 从 kline_data 表获取最早的交易日期

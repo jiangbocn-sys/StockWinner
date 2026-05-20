@@ -5,7 +5,7 @@
 
 from fastapi import APIRouter, HTTPException, Path, Body, Query
 from typing import List, Optional, Dict, Any
-from services.common.database import get_db_manager
+from services.common.database import get_db_manager, configure_kline_connection
 from services.trading.gateway import get_gateway
 
 import sqlite3
@@ -37,6 +37,7 @@ async def test_query_kline_batch(
     # 获取股票代码
     kline_db = Path(__file__).parent.parent.parent / "data" / "kline.db"
     conn = sqlite3.connect(str(kline_db), timeout=30)
+    configure_kline_connection(conn)
     c = conn.cursor()
     c.execute(
         "SELECT DISTINCT stock_code FROM kline_data WHERE stock_code NOT LIKE '%.BJ' LIMIT ?",
@@ -356,7 +357,7 @@ async def get_local_kline(
     if "." not in stock_code:
         stock_code = f"{stock_code}.SH" if stock_code.startswith("6") else f"{stock_code}.SZ"
 
-    from datetime import datetime, timedelta
+    from datetime import datetime, timedelta, time as dt_time
     from services.common.timezone import get_china_time
     end_dt = get_china_time()
     start_dt = end_dt - timedelta(days=months * 30)
@@ -365,6 +366,7 @@ async def get_local_kline(
 
     try:
         conn = sqlite3.connect(KLINE_DB_PATH, timeout=10)
+        configure_kline_connection(conn)
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         cursor.execute("""
@@ -377,9 +379,14 @@ async def get_local_kline(
         conn.close()
 
         kline = []
+        seen_today = False
+        today_str = end_dt.strftime("%Y-%m-%d")
         for r in rows:
+            td = str(r["trade_date"])
+            if td == today_str:
+                seen_today = True
             kline.append({
-                "trade_date": str(r["trade_date"]).replace("-", ""),
+                "trade_date": td.replace("-", ""),
                 "open": float(r["open"]),
                 "close": float(r["close"]),
                 "low": float(r["low"]),
@@ -387,6 +394,40 @@ async def get_local_kline(
                 "volume": float(r["volume"]) if r["volume"] else 0,
                 "amount": float(r["amount"]) if r["amount"] else 0,
             })
+
+        # 交易时段拼接当日实时 K 线（周一~周五 9:30~15:00）
+        weekday = end_dt.weekday()  # 0=Mon .. 4=Fri
+        now_time = end_dt.time()
+        is_trading_hours = (
+            weekday < 5
+            and dt_time(9, 30) <= now_time <= dt_time(15, 0)
+        )
+        if is_trading_hours and not seen_today:
+            try:
+                from services.trading.gateway import get_gateway
+                gateway = await get_gateway()
+                today_kline = await gateway.get_kline_data(
+                    stock_code=stock_code,
+                    period="day",
+                    start_date=today_str.replace("-", ""),
+                    end_date=today_str.replace("-", ""),
+                    limit=1,
+                )
+                if today_kline and len(today_kline) > 0:
+                    row = today_kline[0]
+                    kline.append({
+                        "trade_date": today_str.replace("-", ""),
+                        "open": float(row.get("open", 0)),
+                        "close": float(row.get("close", 0)),
+                        "low": float(row.get("low", 0)),
+                        "high": float(row.get("high", 0)),
+                        "volume": float(row.get("volume", 0)),
+                        "amount": float(row.get("amount", 0)),
+                    })
+            except Exception as e:
+                # SDK 拼接失败不影响返回历史数据
+                import logging
+                logging.getLogger("market_data").debug(f"拼接当日 K 线失败: {e}")
 
         return {"success": True, "stock_code": stock_code, "kline": kline, "count": len(kline)}
     except Exception as e:
@@ -458,6 +499,7 @@ async def get_stock_info(
     kline_path = '/home/bobo/StockWinner/data/kline.db'
     try:
         conn = sqlite3.connect(kline_path, timeout=10)
+        configure_kline_connection(conn)
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         # 优先从 monthly_factors 查（有 stock_name 和最新数据）

@@ -102,7 +102,9 @@ class MonthlyFactorUpdater:
 
     def _get_connection(self) -> sqlite3.Connection:
         """获取数据库连接"""
+        from services.common.database import configure_kline_connection
         conn = sqlite3.connect(str(self.db_path), timeout=60)
+        configure_kline_connection(conn)
         conn.row_factory = sqlite3.Row
         return conn
 
@@ -198,7 +200,7 @@ class MonthlyFactorUpdater:
 
         return periods
 
-    def get_market_cap_batch(self, stock_codes: List[str], trade_date: str, lookback_days: int = 5) -> Dict[str, Dict]:
+    def get_market_cap_batch(self, stock_codes: List[str], trade_date: str, lookback_days: int = 20) -> Dict[str, Dict]:
         """批量获取市值数据（如果报告日期非交易日，回溯查找最近交易日）"""
         conn = self._get_connection()
         cursor = conn.cursor()
@@ -483,27 +485,30 @@ class MonthlyFactorUpdater:
                         if not self._safe_is_zero(ly_single):
                             factors['net_profit_single_yoy'] = (single_np - ly_single) / abs(ly_single) * 100
 
-            # 营收增长
+            # 营收增长：同季度同比（与 operating_profit_growth_yoy 一致）
             curr_rev = current.get('TOT_OPERA_REV')
-            prev_rev = previous.get('TOT_OPERA_REV')
-            if curr_rev is not None and prev_rev is not None:
-                # 同比
-                if not self._safe_is_zero(prev_rev):
-                    factors['revenue_growth_yoy'] = (curr_rev - prev_rev) / abs(prev_rev) * 100
+            ly_rev = inc[inc['REPORTING_PERIOD'].astype(str) == last_year_period]
+            if curr_rev is not None and not ly_rev.empty:
+                last_rev = ly_rev.iloc[0].get('TOT_OPERA_REV')
+                if last_rev is not None and not self._safe_is_zero(last_rev):
+                    factors['revenue_growth_yoy'] = (curr_rev - last_rev) / abs(last_rev) * 100
 
                 # 环比（单季）
                 if len(inc) >= 3:
                     prior_rev = inc.iloc[-3].get('TOT_OPERA_REV')
-                    if prior_rev is not None:
+                    prev_rev = previous.get('TOT_OPERA_REV')
+                    if prior_rev is not None and prev_rev is not None:
                         single_curr = curr_rev - prev_rev
                         single_prev = prev_rev - prior_rev
                         if not self._safe_is_zero(single_prev):
                             factors['revenue_growth_qoq'] = (single_curr - single_prev) / abs(single_prev) * 100
 
-            # 净利润同比（累计值同比）
-            if curr_np is not None and prev_np is not None:
-                if not self._safe_is_zero(prev_np):
-                    factors['net_profit_growth_yoy'] = (curr_np - prev_np) / abs(prev_np) * 100
+            # 净利润同比：同季度累计值同比（与 operating_profit_growth_yoy 一致）
+            ly_np_data = inc[inc['REPORTING_PERIOD'].astype(str) == last_year_period]
+            if curr_np is not None and not ly_np_data.empty:
+                last_np = ly_np_data.iloc[0].get('NET_PRO_INCL_MIN_INT_INC')
+                if last_np is not None and not self._safe_is_zero(last_np):
+                    factors['net_profit_growth_yoy'] = (curr_np - last_np) / abs(last_np) * 100
 
             # 净利润环比（复用 single_qoq）
             if 'net_profit_single_qoq' in factors:

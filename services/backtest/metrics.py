@@ -5,7 +5,7 @@
 """
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List, Dict, Optional
 
 
@@ -31,27 +31,53 @@ class BacktestResult:
     initial_capital: float = 0.0        # 初始资金
     final_value: float = 0.0            # 最终总资产
 
+    # 基准对比（沪深300）
+    benchmark_return: float = 0.0       # 基准收益率
+    benchmark_annualized: float = 0.0   # 基准年化收益率
+    alpha: float = 0.0                  # 超额收益
+    beta: float = 0.0                   # Beta 系数
+
+    # 分年度统计
+    yearly_returns: List[Dict] = field(default_factory=list)  # [{'year': 2024, 'return': 0.15, 'max_drawdown': 0.1, ...}]
+
     def to_dict(self) -> dict:
-        return {
-            "total_return": round(self.total_return * 100, 2),
-            "annualized_return": round(self.annualized_return * 100, 2),
-            "max_drawdown": round(self.max_drawdown * 100, 2),
+        def safe_round(v, n=2):
+            if v is None or math.isinf(v) or math.isnan(v):
+                return None
+            return round(v, n)
+        d = {
+            "total_return": safe_round(self.total_return * 100),
+            "annualized_return": safe_round(self.annualized_return * 100),
+            "max_drawdown": safe_round(self.max_drawdown * 100),
             "max_drawdown_start": self.max_drawdown_start,
             "max_drawdown_end": self.max_drawdown_end,
-            "sharpe_ratio": round(self.sharpe_ratio, 2),
-            "calmar_ratio": round(self.calmar_ratio, 2),
-            "win_rate": round(self.win_rate * 100, 2),
-            "profit_factor": round(self.profit_factor, 2),
-            "avg_holding_days": round(self.avg_holding_days, 1),
+            "sharpe_ratio": safe_round(self.sharpe_ratio),
+            "calmar_ratio": safe_round(self.calmar_ratio),
+            "win_rate": safe_round(self.win_rate * 100),
+            "profit_factor": safe_round(self.profit_factor),
+            "avg_holding_days": safe_round(self.avg_holding_days, 1),
             "total_trades": self.total_trades,
-            "avg_trade_return": round(self.avg_trade_return * 100, 2),
-            "best_trade": round(self.best_trade * 100, 2),
-            "worst_trade": round(self.worst_trade * 100, 2),
-            "total_commission": round(self.total_commission, 2),
-            "final_nav": round(self.final_nav, 4),
-            "initial_capital": round(self.initial_capital, 2),
-            "final_value": round(self.final_value, 2),
+            "avg_trade_return": safe_round(self.avg_trade_return * 100),
+            "best_trade": safe_round(self.best_trade * 100),
+            "worst_trade": safe_round(self.worst_trade * 100),
+            "total_commission": safe_round(self.total_commission),
+            "final_nav": safe_round(self.final_nav, 4),
+            "initial_capital": safe_round(self.initial_capital),
+            "final_value": safe_round(self.final_value),
         }
+        # 基准对比
+        if self.benchmark_return is not None:
+            d["benchmark_return"] = safe_round(self.benchmark_return * 100)
+            d["benchmark_annualized"] = safe_round(self.benchmark_annualized * 100)
+            d["alpha"] = safe_round(self.alpha * 100)
+            d["beta"] = safe_round(self.beta)
+        # 分年度
+        if self.yearly_returns:
+            d["yearly_returns"] = [
+                {**yr, "return": safe_round(yr.get("return", 0) * 100), "max_drawdown": safe_round(yr.get("max_drawdown", 0) * 100)}
+                for yr in self.yearly_returns
+            ]
+        return d
 
 
 class PerformanceMetrics:
@@ -67,6 +93,7 @@ class PerformanceMetrics:
         initial_capital: float,
         start_date: str,
         end_date: str,
+        benchmark_series: Optional[List[Dict]] = None,  # [{'trade_date': ..., 'close': ...}]
     ) -> BacktestResult:
         """
         计算回测指标。
@@ -132,6 +159,14 @@ class PerformanceMetrics:
         result.total_commission = sum(
             t.get("commission", 0) + t.get("buy_commission", 0) for t in trades
         )
+
+        # 基准对比（沪深300）
+        if benchmark_series and len(benchmark_series) > 1:
+            cls._calc_benchmark(result, benchmark_series, nav_series)
+
+        # 分年度统计
+        if nav_series:
+            result.yearly_returns = cls._calc_yearly_returns(nav_series)
 
         return result
 
@@ -224,3 +259,79 @@ class PerformanceMetrics:
             return (d2 - d1).days
         except (ValueError, TypeError):
             return 0
+
+    @classmethod
+    def _calc_benchmark(cls, result: BacktestResult, benchmark_series: List[Dict], nav_series: Optional[List[Dict]] = None):
+        """计算基准（沪深300）收益率、年化、alpha、beta"""
+        if not benchmark_series or not nav_series:
+            return
+
+        first_close = benchmark_series[0].get("close", 0)
+        last_close = benchmark_series[-1].get("close", 0)
+        if first_close <= 0:
+            return
+
+        result.benchmark_return = (last_close - first_close) / first_close
+
+        # 基准年化
+        days = cls._days_between(benchmark_series[0].get("trade_date", ""), benchmark_series[-1].get("trade_date", ""))
+        if days > 0:
+            result.benchmark_annualized = (1 + result.benchmark_return) ** (365 / days) - 1
+
+        # Alpha = 策略年化 - 基准年化
+        result.alpha = result.annualized_return - result.benchmark_annualized
+
+        # Beta = Cov(strategy_ret, bench_ret) / Var(bench_ret)
+        nav_map = {item["trade_date"]: item["total_value"] for item in nav_series}
+        bench_map = {b["trade_date"]: b["close"] for b in benchmark_series}
+        common_dates = sorted(set(nav_map.keys()) & set(bench_map.keys()))
+
+        if len(common_dates) > 2:
+            strat_rets = []
+            bench_rets = []
+            for i in range(1, len(common_dates)):
+                prev_d, curr_d = common_dates[i-1], common_dates[i]
+                sr = (nav_map[curr_d] - nav_map[prev_d]) / nav_map[prev_d]
+                br = (bench_map[curr_d] - bench_map[prev_d]) / bench_map[prev_d]
+                strat_rets.append(sr)
+                bench_rets.append(br)
+
+            if strat_rets and bench_rets:
+                mean_s = sum(strat_rets) / len(strat_rets)
+                mean_b = sum(bench_rets) / len(bench_rets)
+                cov = sum((s - mean_s) * (b - mean_b) for s, b in zip(strat_rets, bench_rets)) / (len(strat_rets) - 1)
+                var_b = sum((b - mean_b) ** 2 for b in bench_rets) / (len(bench_rets) - 1)
+                result.beta = cov / var_b if var_b > 0 else 1.0
+
+    @staticmethod
+    def _calc_yearly_returns(nav_series: List[Dict]) -> List[Dict]:
+        """分年度统计"""
+        from datetime import datetime
+        yearly = {}
+        for item in nav_series:
+            d = item.get("trade_date", "")
+            if not d:
+                continue
+            try:
+                year = int(d[:4])
+            except (ValueError, IndexError):
+                continue
+            value = item.get("total_value", 0)
+            drawdown = item.get("drawdown", 0)
+            if year not in yearly:
+                yearly[year] = {"year": year, "start_value": value, "end_value": value, "max_drawdown": 0, "max_value": value}
+            yr = yearly[year]
+            yr["end_value"] = value
+            yr["max_value"] = max(yr["max_value"], value)
+            yr["max_drawdown"] = max(yr["max_drawdown"], drawdown)
+
+        result = []
+        for year in sorted(yearly.keys()):
+            yr = yearly[year]
+            yr_return = (yr["end_value"] - yr["start_value"]) / yr["start_value"] if yr["start_value"] > 0 else 0
+            result.append({
+                "year": year,
+                "return": yr_return,
+                "max_drawdown": yr["max_drawdown"],
+            })
+        return result

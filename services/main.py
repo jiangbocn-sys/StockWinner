@@ -55,6 +55,11 @@ async def lifespan(app: FastAPI):
     active_ids = ', '.join([a['account_id'] for a in active_accounts])
     log.log_event("accounts_loaded", f"已加载 {len(active_accounts)} 个激活账户：{active_ids}", count=len(active_accounts))
 
+    # 启动 Agent 审计日志后台队列（非阻塞写入，减少 DB 锁竞争）
+    from services.agent.audit import start_audit_consumer
+    start_audit_consumer()
+    log.log_event("audit_consumer_started", "审计日志后台队列已启动")
+
     # 启动调度服务
     from services.common.scheduler_service import start_scheduler, get_scheduler, _set_fastapi_loop
     start_scheduler()
@@ -353,6 +358,18 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.error("db_migration", f"清理 running 状态跳过 ({e})")
 
+    # 清理遗留回测任务 running 状态（每次启动执行）
+    try:
+        result = await db_manager.execute(
+            "UPDATE backtest_runs SET status = 'error', error_message = '服务重启，任务中断', completed_at = ? WHERE status = 'running'",
+            (get_china_time().isoformat(),)
+        )
+        bt_reset_count = getattr(result, 'rowcount', 0) if hasattr(result, 'rowcount') else 0
+        if bt_reset_count > 0:
+            log.log_event("backtest_running_cleanup", f"已清理 {bt_reset_count} 个遗留 running 回测任务", count=bt_reset_count)
+    except Exception as e:
+        log.error("db_migration", f"清理 backtest running 状态跳过 ({e})")
+
     # 恢复遗留未完成订单（每次启动执行）
     try:
         result = await db_manager.execute(
@@ -407,8 +424,8 @@ async def lifespan(app: FastAPI):
             {"task_type": "builtin", "module": "kline_check", "account_id": "SYSTEM", "cron_expression": "0 1 * * *", "enabled": 1},
             {"task_type": "builtin", "module": "monthly_factors", "account_id": "SYSTEM", "cron_expression": "0 1 5 * *", "enabled": 1},
             {"task_type": "builtin", "module": "weekly_kline", "account_id": "SYSTEM", "cron_expression": "0 2 * * 6", "enabled": 1},
-            {"task_type": "builtin", "module": "industry_download", "account_id": "SYSTEM", "cron_expression": "0 3 * * 1-5", "enabled": 0},
-            {"task_type": "builtin", "module": "post_market_analysis", "account_id": "SYSTEM", "cron_expression": "30 15 * * 1-5", "enabled": 1},
+            {"task_type": "builtin", "module": "industry_download", "account_id": "SYSTEM", "cron_expression": "0 3 * * mon-fri", "enabled": 0},
+            {"task_type": "builtin", "module": "post_market_analysis", "account_id": "SYSTEM", "cron_expression": "30 15 * * mon-fri", "enabled": 1},
         ]
         for t in builtin_defaults:
             existing = await db_manager.fetchone(
@@ -535,7 +552,18 @@ async def lifespan(app: FastAPI):
             result_summary TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             started_at TIMESTAMP,
-            completed_at TIMESTAMP
+            completed_at TIMESTAMP,
+            pool_schedule TEXT,
+            markets TEXT,
+            group_ids TEXT,
+            stock_pool TEXT,
+            description TEXT DEFAULT '',
+            stop_loss_pct REAL,
+            take_profit_pct REAL,
+            trailing_stop_pct REAL,
+            stop_execution_price TEXT DEFAULT 'close',
+            liquidate_at_end INTEGER DEFAULT 1,
+            current_trade_date TEXT
         )""",
         """CREATE INDEX IF NOT EXISTS idx_backtest_runs_account ON backtest_runs(account_id)""",
         """CREATE INDEX IF NOT EXISTS idx_backtest_runs_status ON backtest_runs(status)""",
@@ -603,6 +631,13 @@ async def lifespan(app: FastAPI):
         )""",
     ])
 
+    # v8: 动态股票池回测支持（2026-05-19）
+    await run_migration(8, "动态股票池", [
+        "ALTER TABLE backtest_runs ADD COLUMN pool_schedule TEXT",
+        "ALTER TABLE backtest_runs ADD COLUMN liquidate_at_end INTEGER DEFAULT 1",
+        "ALTER TABLE backtest_runs ADD COLUMN current_trade_date TEXT",
+    ])
+
     # v7 数据源配置 seed（从 registry.json 初始化）
     try:
         from services.data.channel.config_manager import seed_provider_configs, add_account_role_column
@@ -656,6 +691,14 @@ async def lifespan(app: FastAPI):
 
     from services.common.scheduler_service import stop_scheduler
     stop_scheduler()
+
+    # 关闭 Agent 审计日志消费者（等待队列清空）
+    try:
+        from services.agent.audit import stop_audit_consumer
+        await stop_audit_consumer()
+        log.log_event("audit_consumer_stopped", "审计日志后台队列已关闭")
+    except Exception as e:
+        log.error("shutdown", f"关闭审计消费者失败: {e}")
 
     # 断开 SDK 连接，清理 gateway 缓存
     try:
@@ -921,6 +964,16 @@ async def agent_security_middleware(request: Request, call_next):
 
 
 # 全局异常处理
+from fastapi.exceptions import HTTPException
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    """将 FastAPI HTTPException 的 detail 转为前端可识别的 message"""
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"success": False, "message": exc.detail}
+    )
+
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
     """全局异常处理"""

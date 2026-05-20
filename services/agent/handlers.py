@@ -889,9 +889,11 @@ async def query_stock_code(
         try:
             import sqlite3 as _sqlite3
             from pathlib import Path as _Path
+            from services.common.database import configure_kline_connection
             kline_path = _Path(__file__).parent.parent.parent / "data" / "kline.db"
             if kline_path.exists():
                 kconn = _sqlite3.connect(str(kline_path), timeout=30)
+                configure_kline_connection(kconn)
                 kconn.row_factory = _sqlite3.Row
                 row = kconn.execute(
                     "SELECT DISTINCT stock_code, stock_name FROM kline_data WHERE stock_code = ? LIMIT 1",
@@ -952,9 +954,11 @@ async def query_stock_code(
         try:
             import sqlite3 as _sqlite3
             from pathlib import Path as _Path
+            from services.common.database import configure_kline_connection
             kline_path = _Path(__file__).parent.parent.parent / "data" / "kline.db"
             if kline_path.exists():
                 kconn = _sqlite3.connect(str(kline_path), timeout=30)
+                configure_kline_connection(kconn)
                 kconn.row_factory = _sqlite3.Row
                 rows = kconn.execute(
                     "SELECT DISTINCT stock_code, stock_name FROM kline_data WHERE stock_name LIKE ? ORDER BY stock_code LIMIT 50",

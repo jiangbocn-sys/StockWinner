@@ -28,6 +28,7 @@ class Position:
     avg_cost: float = 0.0
     buy_date: str = ""  # 买入日期（用于 T+1 检查）
     highest_price: float = 0.0  # 最高价（用于移动止盈）
+    total_cost: float = 0.0  # 总买入成本（含佣金），用于 pnl_pct 计算
 
 
 @dataclass
@@ -140,6 +141,7 @@ class BacktestExecutionEngine:
             total_cost = pos.avg_cost * pos.quantity + fill_price * quantity
             pos.quantity += quantity
             pos.avg_cost = total_cost / pos.quantity if pos.quantity > 0 else fill_price
+            pos.total_cost += cost  # 累加总买入成本（含佣金）
         else:
             self.positions[stock_code] = Position(
                 stock_code=stock_code,
@@ -148,6 +150,7 @@ class BacktestExecutionEngine:
                 avg_cost=fill_price,
                 buy_date=date,
                 highest_price=fill_price,
+                total_cost=cost,
             )
 
         trade = Trade(
@@ -203,8 +206,9 @@ class BacktestExecutionEngine:
         revenue, commission = self._calc_sell_revenue(fill_price, pos.quantity)
 
         # 执行卖出
-        pnl = revenue - pos.avg_cost * pos.quantity
-        pnl_pct = (pnl / (pos.avg_cost * pos.quantity) * 100) if pos.avg_cost > 0 else 0
+        pnl = revenue - pos.total_cost
+        buy_cost = pos.total_cost
+        pnl_pct = (pnl / buy_cost * 100) if buy_cost > 0 else 0
         holding_days = self._days_between(pos.buy_date, date)
 
         self.cash += revenue

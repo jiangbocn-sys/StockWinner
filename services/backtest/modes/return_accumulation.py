@@ -61,9 +61,10 @@ class ReturnAccumulationEngine:
     def _load_stock_names(self):
         """从 kline.db 的 stock_base_info 表加载股票名称"""
         import sqlite3
-        from services.common.database import KLINE_DB_PATH
+        from services.common.database import KLINE_DB_PATH, configure_kline_connection
         try:
             conn = sqlite3.connect(str(KLINE_DB_PATH), timeout=30)
+            configure_kline_connection(conn)
             cursor = conn.cursor()
             cursor.execute("SELECT stock_code, stock_name FROM stock_base_info")
             self._stock_name_map = {row[0]: row[1].strip() for row in cursor.fetchall()}
@@ -177,7 +178,7 @@ class ReturnAccumulationEngine:
                     buy_price = pending_buy["price"]
                     sell_price = sig["price"]
                     pnl = sell_price - buy_price
-                    pnl_pct = pnl / buy_price if buy_price > 0 else 0
+                    pnl_pct = (pnl / buy_price * 100) if buy_price > 0 else 0
 
                     holding_days = self._days_between(pending_buy["date"], sig["date"])
 
@@ -207,7 +208,7 @@ class ReturnAccumulationEngine:
                     if self.stop_loss_pct and current_price <= buy_price * (1 - self.stop_loss_pct):
                         # 止损
                         pnl = current_price - buy_price
-                        pnl_pct = pnl / buy_price if buy_price > 0 else 0
+                        pnl_pct = (pnl / buy_price * 100) if buy_price > 0 else 0
                         holding_days = self._days_between(pending_buy["date"], sig["date"])
                         self.trades.append({
                             "stock_code": code,
@@ -229,7 +230,7 @@ class ReturnAccumulationEngine:
                     elif self.take_profit_pct and current_price >= buy_price * (1 + self.take_profit_pct):
                         # 止盈
                         pnl = current_price - buy_price
-                        pnl_pct = pnl / buy_price if buy_price > 0 else 0
+                        pnl_pct = (pnl / buy_price * 100) if buy_price > 0 else 0
                         holding_days = self._days_between(pending_buy["date"], sig["date"])
                         self.trades.append({
                             "stock_code": code,
@@ -278,7 +279,7 @@ class ReturnAccumulationEngine:
                 sell_price = prices.get(code, pending_buy["price"])
                 buy_price = pending_buy["price"]
                 pnl = sell_price - buy_price
-                pnl_pct = pnl / buy_price if buy_price > 0 else 0
+                pnl_pct = (pnl / buy_price * 100) if buy_price > 0 else 0
                 holding_days = self._days_between(pending_buy["date"], last_date)
                 self.trades.append({
                     "stock_code": code,
@@ -306,7 +307,7 @@ class ReturnAccumulationEngine:
         for t in self.trades:
             date = t["date"]
             daily_pnl.setdefault(date, 0)
-            daily_pnl[date] += t.get("pnl_pct", 0)
+            daily_pnl[date] += t.get("pnl_pct", 0) / 100  # 百分比转小数
 
         max_dd = 0.0
         for trade_date in trade_dates:
