@@ -337,9 +337,13 @@ class AmazingDataProvider(DataProvider):
         # 买1-5 / 卖1-5
         bid = []
         ask = []
+        bid_volume = []
+        ask_volume = []
         for i in range(1, 6):
             bid.append(get_float(f"bid{i}", 0))
             ask.append(get_float(f"ask{i}", 0))
+            bid_volume.append(get_float(f"bid_vol{i}", 0))
+            ask_volume.append(get_float(f"ask_vol{i}", 0))
 
         return {
             "stock_code": stock_code,
@@ -354,5 +358,7 @@ class AmazingDataProvider(DataProvider):
             "amount": get_float("amount", 0),
             "bid": bid,
             "ask": ask,
+            "bid_volume": bid_volume,
+            "ask_volume": ask_volume,
             "trade_date": str(d.get("trade_date", "")),
         }

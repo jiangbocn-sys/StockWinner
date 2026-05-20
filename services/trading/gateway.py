@@ -59,6 +59,7 @@ class MarketData:
                  high: float, low: float, open_price: float,
                  prev_close: float, volume: int, amount: float,
                  bid: List[float] = None, ask: List[float] = None,
+                 bid_volume: List[float] = None, ask_volume: List[float] = None,
                  trade_date: str = ""):
         self.stock_code = stock_code
         self.stock_name = stock_name
@@ -72,6 +73,8 @@ class MarketData:
         self.amount = amount
         self.bid = bid or []  # 买一至买五价格
         self.ask = ask or []  # 卖一至卖五价格
+        self.bid_volume = bid_volume or []  # 买一至买五委托量（股）
+        self.ask_volume = ask_volume or []  # 卖一至卖五委托量（股）
         self.trade_date = trade_date
 
 
@@ -312,6 +315,8 @@ class TradingGateway(TradingGatewayInterface):
                     amount=float(raw_data.get("amount", 0)),
                     bid=raw_data.get("bid", []),
                     ask=raw_data.get("ask", []),
+                    bid_volume=raw_data.get("bid_volume", []),
+                    ask_volume=raw_data.get("ask_volume", []),
                     trade_date=raw_data.get("trade_date", ""),
                 )
         except DataProviderError as e:
@@ -321,8 +326,7 @@ class TradingGateway(TradingGatewayInterface):
         raise Exception(f"获取行情失败：所有数据源均不可用")
 
     def _query_market_data_sync(self, stock_code: str) -> Optional[MarketData]:
-        """同步查询行情数据（在线程池中执行）"""
-        import datetime
+        """同步查询行情数据（在线程池中执行）— 优先使用 SDK 快照获取五档盘口"""
         import sqlite3
         from pathlib import Path
         from services.common.sdk_manager import get_sdk_manager
@@ -334,6 +338,89 @@ class TradingGateway(TradingGatewayInterface):
             else:
                 stock_code = f"{stock_code}.SZ"
 
+        # 1. 优先使用 SDK 快照（包含真实五档盘口）
+        try:
+            sdk_mgr = get_sdk_manager()
+            result = sdk_mgr.query_snapshot(
+                code_list=[stock_code],
+                begin_date=0,
+                end_date=0,
+            )
+            if result and stock_code in result:
+                df = result[stock_code]
+                if df is not None and len(df) > 0:
+                    row = df.iloc[0] if hasattr(df, 'iloc') else df
+                    return self._market_data_from_snapshot(row, stock_code)
+        except Exception as e:
+            logger.debug(f"SDK 快照查询失败，回退 K 线: {e}")
+
+        # 2. 回退：K 线数据（不含真实五档，仅估算）
+        return self._market_data_from_kline(stock_code, original_code)
+
+    def _market_data_from_snapshot(self, row, stock_code: str) -> MarketData:
+        """从 SDK 快照行构造 MarketData（含真实五档盘口）"""
+
+        def get_float(key, default=0.0):
+            v = row.get(key, default) if hasattr(row, 'get') else getattr(row, key, default)
+            try:
+                return float(v) if v is not None else default
+            except (ValueError, TypeError):
+                return default
+
+        def get_int(key, default=0):
+            return int(get_float(key, default))
+
+        def get_str(key, default=''):
+            v = row.get(key, default) if hasattr(row, 'get') else getattr(row, key, default)
+            return str(v) if v is not None else default
+
+        # 股票名称
+        stock_name = get_str(row, 'stock_name', '') or get_str(row, 'name', stock_code)
+
+        # 五档价格
+        bid = [get_float(f'bid{i}', 0) for i in range(1, 6)]
+        ask = [get_float(f'ask{i}', 0) for i in range(1, 6)]
+        # 五档委托量（股）
+        bid_volume = [get_int(f'bid_vol{i}', 0) for i in range(1, 6)]
+        ask_volume = [get_int(f'ask_vol{i}', 0) for i in range(1, 6)]
+
+        # DEBUG: 打印 SDK 快照原始字段
+        raw_keys = {k: v for k, v in (row.items() if hasattr(row, 'items') else row.__dict__.items())
+                     if 'bid' in k.lower() or 'ask' in k.lower() or k == 'current_price'}
+        logger.debug(f"[snapshot] {stock_code} bid={bid} ask={ask} bid_vol={bid_volume} ask_vol={ask_volume} raw={raw_keys}")
+
+        current_price = get_float('current_price', get_float('price', 0))
+        prev_close = get_float('prev_close', get_float('preclose', 0))
+        if prev_close == 0:
+            prev_close = current_price
+        change_percent = ((current_price - prev_close) / prev_close * 100) if prev_close != 0 else 0
+
+        trade_date = str(get_str(row, 'trade_date', ''))
+
+        return MarketData(
+            stock_code=stock_code,
+            stock_name=stock_name,
+            current_price=current_price,
+            change_percent=change_percent,
+            high=get_float('high', current_price),
+            low=get_float('low', current_price),
+            open_price=get_float('open', get_float('open_price', current_price)),
+            prev_close=prev_close,
+            volume=get_int('volume', 0),
+            amount=get_float('amount', 0),
+            bid=bid,
+            ask=ask,
+            bid_volume=bid_volume,
+            ask_volume=ask_volume,
+            trade_date=trade_date,
+        )
+
+    def _market_data_from_kline(self, stock_code: str, original_code: str) -> MarketData:
+        """从 K 线数据构造 MarketData（无真实五档，仅估算）"""
+        import datetime
+        import sqlite3
+        from pathlib import Path
+
         stock_name = original_code
         try:
             kline_db_path = Path(__file__).parent.parent.parent / "data" / "kline.db"
@@ -342,7 +429,6 @@ class TradingGateway(TradingGatewayInterface):
                 conn = sqlite3.connect(str(kline_db_path))
                 configure_kline_connection(conn)
                 cursor = conn.cursor()
-                # 优先查 stock_base_info（每日 SDK 同步，名称最新）
                 cursor.execute(
                     "SELECT stock_name FROM stock_base_info WHERE stock_code = ? LIMIT 1",
                     (stock_code,)
@@ -351,7 +437,6 @@ class TradingGateway(TradingGatewayInterface):
                 if row and row[0]:
                     stock_name = row[0]
                 else:
-                    # 备选：stock_monthly_factors
                     cursor.execute(
                         "SELECT stock_name FROM stock_monthly_factors WHERE stock_code = ? LIMIT 1",
                         (stock_code,)
@@ -360,7 +445,6 @@ class TradingGateway(TradingGatewayInterface):
                     if row and row[0]:
                         stock_name = row[0]
                     else:
-                        # 最后：kline_data
                         cursor.execute(
                             "SELECT DISTINCT stock_name FROM kline_data WHERE stock_code = ? LIMIT 1",
                             (stock_code,)
@@ -426,6 +510,8 @@ class TradingGateway(TradingGatewayInterface):
                     amount=amount,
                     bid=[current_price * 0.999] * 5,
                     ask=[current_price * 1.001] * 5,
+                    bid_volume=[0] * 5,
+                    ask_volume=[0] * 5,
                     trade_date=trade_date
                 )
 
@@ -1083,6 +1169,8 @@ class TradingGateway(TradingGatewayInterface):
                         amount=float(raw.get("amount", 0)),
                         bid=raw.get("bid", []),
                         ask=raw.get("ask", []),
+                        bid_volume=raw.get("bid_volume", []),
+                        ask_volume=raw.get("ask_volume", []),
                         trade_date=raw.get("trade_date", ""),
                     )
                 else:

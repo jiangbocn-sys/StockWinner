@@ -30,6 +30,18 @@
               <el-icon><Refresh /></el-icon>
               刷新行情
             </el-button>
+            <el-dropdown @command="handleExportPositions">
+              <el-button type="success" size="small"><el-icon><Download /></el-icon>导出</el-button>
+              <template #dropdown>
+                <el-dropdown-menu>
+                  <el-dropdown-item command="csv">CSV</el-dropdown-item>
+                  <el-dropdown-item command="json">JSON</el-dropdown-item>
+                  <el-dropdown-item command="md">Markdown</el-dropdown-item>
+                  <el-dropdown-item command="txt">TXT</el-dropdown-item>
+                  <el-dropdown-item command="excel">Excel</el-dropdown-item>
+                </el-dropdown-menu>
+              </template>
+            </el-dropdown>
           </div>
         </template>
 
@@ -201,14 +213,104 @@
         </div>
         <div ref="klineChartRef" style="width: 100%; height: 550px"></div>
       </el-dialog>
+
+      <!-- 交易对话框（加仓/减仓/清仓） -->
+      <el-dialog
+        v-model="tradeDialogVisible"
+        :title="tradeDialogTitle"
+        width="480px"
+        :close-on-click-modal="false"
+      >
+        <el-form :model="tradeForm" label-width="90px" label-position="right">
+          <el-form-item label="股票代码">
+            <el-input :value="tradeForm.stock_code" disabled />
+          </el-form-item>
+          <el-form-item label="股票名称">
+            <el-input :value="tradeForm.stock_name" disabled />
+          </el-form-item>
+          <el-form-item label="当前价">
+            <span :class="tradeQuote.current_price ? (tradeQuote.current_price >= tradeQuote.prev_close ? 'profit-positive' : 'profit-negative') : ''">
+              ¥{{ tradeQuote.current_price?.toFixed(2) || '-' }}
+            </span>
+            <span v-if="tradeQuote.change_percent != null" :class="tradeQuote.change_percent >= 0 ? 'profit-positive' : 'profit-negative'" style="margin-left: 8px">
+              {{ tradeQuote.change_percent >= 0 ? '+' : '' }}{{ tradeQuote.change_percent.toFixed(2) }}%
+            </span>
+          </el-form-item>
+
+          <!-- 五档盘口展示 -->
+          <el-form-item label="五档盘口" v-if="tradeAskLevels.length > 0 || tradeBidLevels.length > 0">
+            <div class="level5-container">
+              <div class="level5-header">
+                <span class="col-ask">卖盘</span>
+                <span class="col-price">卖价</span>
+                <span class="col-price">买价</span>
+                <span class="col-bid">买盘</span>
+              </div>
+              <div v-for="i in 5" :key="i" class="level5-row">
+                <span class="col-ask level-volume">{{ formatVolume(tradeAskVolumes[5 - i]) }}</span>
+                <span class="col-price level-price ask-price">{{ tradeAskLevels[5 - i]?.toFixed(2) || '-' }}</span>
+                <span class="col-price level-price bid-price">{{ tradeBidLevels[i - 1]?.toFixed(2) || '-' }}</span>
+                <span class="col-bid level-volume">{{ formatVolume(tradeBidVolumes[i - 1]) }}</span>
+              </div>
+            </div>
+          </el-form-item>
+
+          <el-form-item label="委托价格">
+            <el-input-number
+              v-model="tradeForm.price"
+              :precision="2"
+              :step="0.01"
+              :min="0.01"
+              controls-position="right"
+              style="width: 100%"
+            />
+            <div style="display: flex; gap: 4px; margin-top: 4px">
+              <el-button size="small" @click="usePrice('bid1')" v-if="tradeForm.trade_type === 'sell' && tradeQuote.bid1">买一 ¥{{ tradeQuote.bid1?.toFixed(2) }}</el-button>
+              <el-button size="small" @click="usePrice('ask1')" v-if="tradeForm.trade_type === 'buy' && tradeQuote.ask1">卖一 ¥{{ tradeQuote.ask1?.toFixed(2) }}</el-button>
+              <el-button size="small" @click="usePrice('current')" v-if="tradeQuote.current_price">现价 ¥{{ tradeQuote.current_price?.toFixed(2) }}</el-button>
+            </div>
+          </el-form-item>
+
+          <el-form-item label="委托数量">
+            <el-input-number
+              v-model="tradeForm.quantity"
+              :step="100"
+              :min="100"
+              :max="tradeForm.trade_type === 'sell' ? tradeForm.maxQuantity : (fundLimitQty > 0 ? fundLimitQty : 999999)"
+              controls-position="right"
+              style="width: 100%"
+            />
+            <div style="display: flex; gap: 4px; margin-top: 4px">
+              <el-button size="small" @click="useQuantity('half')">1/2</el-button>
+              <el-button size="small" @click="useQuantity('all')" :disabled="tradeForm.maxQuantity === 0">{{ tradeForm.trade_type === 'sell' ? '全部' : '最大' }}</el-button>
+            </div>
+            <div v-if="tradeForm.trade_type === 'sell'" class="position-hint">
+              持仓 {{ positionQtyDisplay }} 股，可卖 {{ tradeForm.maxQuantity }} 股
+            </div>
+          </el-form-item>
+        </el-form>
+
+        <template #footer>
+          <el-button @click="tradeDialogVisible = false">取消</el-button>
+          <el-button
+            :type="tradeForm.trade_type === 'buy' ? 'danger' : 'success'"
+            :loading="tradeSubmitting"
+            :disabled="!canTradeSubmit"
+            @click="submitTrade"
+          >
+            {{ tradeSubmitText }}
+          </el-button>
+        </template>
+      </el-dialog>
     </el-main>
   </div>
 </template>
 
 <script setup>
 import { ref, onMounted, computed, nextTick } from 'vue'
-import { ElMessage } from 'element-plus'
-import { ArrowLeft, ArrowRight } from '@element-plus/icons-vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { ArrowLeft, ArrowRight, Refresh, Download } from '@element-plus/icons-vue'
+import { exportTable as doExport } from '@/utils/exportHelper'
 import { useAccountStore } from '../stores/account'
 import NavBar from '../components/NavBar.vue'
 import * as echarts from 'echarts'
@@ -282,6 +384,38 @@ const klineNavText = computed(() => {
   return `${idx + 1} / ${total}`
 })
 
+// 导出功能
+const holdingColumns = [
+  { label: '股票代码', prop: 'stock_code' },
+  { label: '股票名称', prop: 'stock_name' },
+  { label: '数量', prop: 'quantity' },
+  { label: '成本价', prop: 'avg_cost' },
+  { label: '当前价', prop: 'current_price' },
+  { label: '市值', prop: 'market_value' },
+  { label: '盈亏', prop: 'profit_loss' },
+  { label: '盈亏比例', prop: 'profit_percent' },
+]
+const closedColumns = [
+  { label: '股票代码', prop: 'stock_code' },
+  { label: '股票名称', prop: 'stock_name' },
+  { label: '买入数量', prop: 'buy_quantity' },
+  { label: '买入均价', prop: 'avg_buy_price' },
+  { label: '卖出均价', prop: 'avg_sell_price' },
+  { label: '持有天数', prop: 'holding_days' },
+  { label: '手续费', prop: 'commission' },
+  { label: '净盈亏', prop: 'net_profit' },
+  { label: '收益率', prop: 'profit_pct' },
+  { label: '年化收益', prop: 'annualized_pct' },
+]
+
+const handleExportPositions = (format) => {
+  if (activeTab.value === 'holding') {
+    doExport(holdingColumns, positions.value, '当前持仓', format)
+  } else {
+    doExport(closedColumns, closedPositions.value, '已清仓', format)
+  }
+}
+
 const loadPositions = async () => {
   // 先从 DB 加载数据（不等待行情刷新）
   try {
@@ -334,9 +468,218 @@ const formatPct = (num) => {
   return n.toFixed(2)
 }
 
-const handleAction = (row, action) => {
-  console.log('操作:', action, row.stock_code)
-  // TODO: 实现交易操作
+const handleAction = async (row, action) => {
+  if (action === 'clear') {
+    // 清仓：先弹确认，再调接口
+    try {
+      await ElMessageBox.confirm(
+        `确认清仓 ${row.stock_name}（${row.stock_code}）？\n\n将卖出全部持仓 ${row.quantity} 股。\n交易时间内将以买盘对手价成交，非交易时间将创建委托单等待执行。`,
+        '确认清仓',
+        { type: 'warning', confirmButtonText: '确认清仓', cancelButtonText: '取消' }
+      )
+    } catch {
+      return
+    }
+    await executeClear(row)
+  } else {
+    // 加仓/减仓：弹出交易对话框
+    await openTradeDialog(row, action)
+  }
+}
+
+// ============================================================
+// 交易对话框（加仓/减仓/清仓）
+// ============================================================
+
+const tradeDialogVisible = ref(false)
+const tradeAction = ref('') // 'add' | 'reduce'
+const tradeSubmitting = ref(false)
+const tradeForm = ref({
+  stock_code: '',
+  stock_name: '',
+  trade_type: 'buy', // 'buy' | 'sell'
+  price: 0,
+  quantity: 100,
+  maxQuantity: 0, // 卖出时的可卖数量上限
+})
+const tradeQuote = ref({})
+const tradeBidLevels = ref([])
+const tradeBidVolumes = ref([])
+const tradeAskLevels = ref([])
+const tradeAskVolumes = ref([])
+const fundLimitQty = ref(0)
+const positionQtyDisplay = ref(0)
+
+const tradeDialogTitle = computed(() => {
+  if (tradeAction.value === 'clear') return '一键清仓'
+  return tradeForm.value.trade_type === 'buy' ? '加仓买入' : '减仓卖出'
+})
+
+const tradeSubmitText = computed(() => {
+  return tradeForm.value.trade_type === 'buy'
+    ? `买入委托 ¥${tradeForm.value.price.toFixed(2)} × ${tradeForm.value.quantity}股`
+    : `卖出委托 ¥${tradeForm.value.price.toFixed(2)} × ${tradeForm.value.quantity}股`
+})
+
+const canTradeSubmit = computed(() => {
+  return (
+    tradeForm.value.stock_code &&
+    tradeForm.value.price > 0 &&
+    tradeForm.value.quantity > 0 &&
+    tradeForm.value.quantity % 100 === 0 &&
+    !tradeSubmitting.value
+  )
+})
+
+const openTradeDialog = async (row, action) => {
+  tradeAction.value = action
+  const isBuy = action === 'add'
+  tradeForm.value = {
+    stock_code: row.stock_code,
+    stock_name: row.stock_name,
+    trade_type: isBuy ? 'buy' : 'sell',
+    price: 0,
+    quantity: 100,
+    maxQuantity: isBuy ? 0 : row.quantity,
+  }
+  positionQtyDisplay.value = row.quantity
+  tradeQuote.value = {}
+  tradeBidLevels.value = []
+  tradeBidVolumes.value = []
+  tradeAskLevels.value = []
+  tradeAskVolumes.value = []
+  fundLimitQty.value = 0
+  tradeDialogVisible.value = true
+
+  // 获取行情数据
+  await fetchTradeQuote(row.stock_code)
+}
+
+const fetchTradeQuote = async (code) => {
+  try {
+    const resp = await fetch(`/api/v1/ui/${currentAccountId.value}/manual-order/quote`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ stock_code: code }),
+    })
+    const data = await resp.json()
+    if (data.success) {
+      tradeQuote.value = {
+        current_price: data.current_price,
+        bid1: data.bid1,
+        ask1: data.ask1,
+        change_percent: data.change_percent,
+        prev_close: data.prev_close,
+      }
+      tradeBidLevels.value = data.bid_levels || []
+      tradeBidVolumes.value = data.bid_volumes || []
+      tradeAskLevels.value = data.ask_levels || []
+      tradeAskVolumes.value = data.ask_volumes || []
+      fundLimitQty.value = data.fund_limit_quantity || 0
+
+      if (tradeForm.value.trade_type === 'buy') {
+        tradeForm.value.maxQuantity = data.max_buy_quantity || 0
+        if (data.current_price && data.current_price > 0) {
+          tradeForm.value.price = data.current_price
+        }
+        if (tradeForm.value.maxQuantity > 0) {
+          tradeForm.value.quantity = tradeForm.value.maxQuantity
+        }
+      } else {
+        tradeForm.value.maxQuantity = data.available_quantity || 0
+        if (data.current_price && data.current_price > 0) {
+          tradeForm.value.price = data.current_price
+        }
+        if (tradeForm.value.maxQuantity > 0) {
+          tradeForm.value.quantity = tradeForm.value.maxQuantity
+        }
+      }
+    }
+  } catch (e) {
+    console.error('获取行情失败:', e)
+  }
+}
+
+const usePrice = (type) => {
+  if (type === 'bid1' && tradeQuote.value.bid1) {
+    tradeForm.value.price = tradeQuote.value.bid1
+  } else if (type === 'ask1' && tradeQuote.value.ask1) {
+    tradeForm.value.price = tradeQuote.value.ask1
+  } else if (type === 'current' && tradeQuote.value.current_price) {
+    tradeForm.value.price = tradeQuote.value.current_price
+  }
+}
+
+const useQuantity = (type) => {
+  const max = tradeForm.value.trade_type === 'sell'
+    ? tradeForm.value.maxQuantity
+    : (fundLimitQty.value > 0 ? fundLimitQty.value : tradeForm.value.maxQuantity)
+
+  if (type === 'all') {
+    tradeForm.value.quantity = max
+  } else if (type === 'half') {
+    tradeForm.value.quantity = Math.max(100, Math.floor(max / 2 / 100) * 100)
+  }
+}
+
+const formatVolume = (v) => {
+  if (v == null || v === 0) return '-'
+  if (v >= 10000) return (v / 10000).toFixed(1) + '万'
+  return v.toLocaleString()
+}
+
+const executeClear = async (row) => {
+  try {
+    const resp = await fetch(
+      `/api/v1/ui/${currentAccountId.value}/positions/${row.stock_code}/immediate-sell`,
+      { method: 'POST' }
+    )
+    const data = await resp.json()
+
+    if (data.success) {
+      if (data.trading_time) {
+        ElMessage.success(`${data.message}，监控程序将扫描执行`)
+      } else {
+        ElMessage.info(data.message)
+      }
+      await loadPositions()
+    } else {
+      ElMessage.error(data.message || '清仓失败')
+    }
+  } catch (e) {
+    ElMessage.error('清仓失败：' + e.message)
+  }
+}
+
+const submitTrade = async () => {
+  tradeSubmitting.value = true
+  try {
+    const resp = await fetch(`/api/v1/ui/${currentAccountId.value}/manual-order/submit`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        stock_code: tradeForm.value.stock_code,
+        stock_name: tradeForm.value.stock_name,
+        trade_type: tradeForm.value.trade_type,
+        price: tradeForm.value.price,
+        quantity: tradeForm.value.quantity,
+        order_type: 'day',
+      }),
+    })
+    const data = await resp.json()
+    if (data.success) {
+      const dir = tradeForm.value.trade_type === 'buy' ? '买入' : '卖出'
+      ElMessage.success(`${dir}委托已提交（${tradeForm.value.quantity}股 @ ¥${tradeForm.value.price.toFixed(2)}），监控程序将扫描执行`)
+      tradeDialogVisible.value = false
+      await loadPositions()
+    } else {
+      ElMessage.error(data.message || '委托失败')
+    }
+  } catch (e) {
+    ElMessage.error('提交失败：' + e.message)
+  } finally {
+    tradeSubmitting.value = false
+  }
 }
 
 const handleDsaAnalysis = async (row) => {
@@ -605,6 +948,79 @@ h2 {
 
 .pagination-bar {
   display: flex; justify-content: center; padding: 12px 0;
+}
+
+.bid-ask-display {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12px;
+  font-family: monospace;
+}
+
+.bid-level {
+  color: #f56c6c;
+}
+
+.position-hint {
+  font-size: 12px;
+  color: #909399;
+  margin-top: 4px;
+}
+
+/* 五档盘口左右排列 */
+.level5-container {
+  font-size: 13px;
+  font-family: monospace;
+  border: 1px solid #ebeef5;
+  border-radius: 4px;
+  overflow: hidden;
+  width: 380px;
+}
+
+.level5-header {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr 1fr;
+  background: #f5f7fa;
+  padding: 4px 8px;
+  font-size: 12px;
+  color: #909399;
+  font-weight: 500;
+  text-align: center;
+}
+
+.level5-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr 1fr;
+  padding: 3px 8px;
+  text-align: center;
+  border-top: 1px solid #f0f0f0;
+}
+
+.col-ask {
+  color: #67c23a;
+}
+
+.col-bid {
+  color: #f56c6c;
+}
+
+.col-price {
+  padding: 0 4px;
+  font-weight: 600;
+}
+
+.ask-price {
+  color: #67c23a;
+}
+
+.bid-price {
+  color: #f56c6c;
+}
+
+.level-volume {
+  font-size: 12px;
+  color: #606266;
 }
 
 .kline-nav {
