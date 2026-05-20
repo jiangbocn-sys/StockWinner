@@ -12,7 +12,7 @@ import asyncio
 from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional, Any
 from pathlib import Path
-from services.common.database import get_db_manager
+from services.common.database import get_db_manager, configure_kline_connection
 from services.common.account_manager import get_account_manager
 from services.common.timezone import get_china_time, format_china_time, CHINA_TZ
 from services.common.technical_indicators import calculate_indicators_for_screening, calculate_rsi
@@ -32,6 +32,7 @@ def _load_stock_names() -> Dict[str, str]:
     """从 kline.db 的 stock_base_info 表批量加载股票名称"""
     try:
         conn = sqlite3.connect(str(KLINE_DB), timeout=30)
+        configure_kline_connection(conn)
         cursor = conn.cursor()
         cursor.execute("SELECT stock_code, stock_name FROM stock_base_info")
         names = {row[0]: row[1].strip() for row in cursor.fetchall()}
@@ -289,13 +290,30 @@ class ScreeningService:
         db_factors, calc_factors = registry.classify_factors(required_factors)
         print(f"[Screening] 数据库因子：{db_factors}, 需计算：{calc_factors}")
 
+        # 3.1 检测可能缺失的 DB 因子（动态注册的 MA 系列，如 MA120, MA250）
+        # 这些因子虽然在 mapping 中标为 source='db'，但 stock_daily_factors 表可能没有对应列
+        # 需要预加载 K 线数据作为回退
+        potentially_missing_db_factors = set()
+        import re as _re2
+        for f in db_factors:
+            if _re2.match(r'^MA\d+$', f):
+                period = int(_re2.match(r'^MA(\d+)$', f).group(1))
+                # MA5/MA10/MA20/MA60 在 stock_daily_factors 中有列，更大的需要 K 线计算
+                if period > 60:
+                    potentially_missing_db_factors.add(f)
+
+        if potentially_missing_db_factors:
+            print(f"[Screening] 可能缺失的 DB 因子（需要 K 线回退）：{potentially_missing_db_factors}")
+            # 将这些因子加入 calc_factors，确保预加载 K 线数据
+            calc_factors |= potentially_missing_db_factors
+
         # 4. 获取最新交易日期
         if not trade_date:
             # 从 stock_daily_factors 表获取最新日期
             import sqlite3
             conn = sqlite3.connect(str(KLINE_DB), timeout=60)
+            configure_kline_connection(conn)
             cursor = conn.cursor()
-            cursor.execute("PRAGMA busy_timeout=60000")
             cursor.execute("SELECT MAX(trade_date) FROM stock_daily_factors")
             result = cursor.fetchone()
             conn.close()
@@ -366,8 +384,8 @@ class ScreeningService:
         if circ_cap_max or circ_cap_min or total_cap_max or total_cap_min:
             import sqlite3
             conn = sqlite3.connect(str(KLINE_DB), timeout=60)
+            configure_kline_connection(conn)
             cursor = conn.cursor()
-            cursor.execute("PRAGMA busy_timeout=60000")
 
             # 构建市值过滤SQL
             cap_conditions = []
@@ -403,12 +421,20 @@ class ScreeningService:
             conn.close()
 
         # 6. 获取 K 线数据（用于动态计算缺失因子）
-        local_service = get_local_data_service()
-        kline_cache = {}  # 缓存 K 线数据
-
+        # 批量预加载，避免循环内逐只查询（N+1 优化）
+        kline_cache: Dict[str, List[Dict]] = {}
         if calc_factors:
-            # 只需要为需要计算的因子获取 K 线数据
-            print(f"[Screening] 需要计算缺失因子：{calc_factors}")
+            # 计算需要的 K 线长度：取所有 MA 因子的最大周期
+            max_period = 60  # 默认最小值
+            for f in calc_factors:
+                import re as _re_kline
+                m = _re_kline.match(r'^MA(\d+)$', f)
+                if m:
+                    max_period = max(max_period, int(m.group(1)))
+            print(f"[Screening] 批量预加载 {len(stock_codes)} 只股票的 K 线数据（需要 {max_period} 根）...")
+            local_service = get_local_data_service()
+            kline_cache = local_service.get_batch_kline(stock_codes, limit=max_period)
+            print(f"[Screening] K 线预加载完成，共 {len(kline_cache)} 只股票有数据")
 
         # 7. 遍历股票，评估条件
         self._progress["total_stocks"] = len(stock_codes)
@@ -428,12 +454,8 @@ class ScreeningService:
 
             # 动态计算缺失因子
             if calc_factors:
-                # 获取 K 线数据（缓存）
-                if stock_code not in kline_cache:
-                    kline_data = local_service.get_kline_data(stock_code, limit=60)
-                    kline_cache[stock_code] = kline_data
-                else:
-                    kline_data = kline_cache[stock_code]
+                # 从预加载的缓存获取 K 线数据
+                kline_data = kline_cache.get(stock_code, [])
 
                 if kline_data and len(kline_data) >= 26:
                     closes = [k['close'] for k in kline_data]
@@ -464,6 +486,36 @@ class ScreeningService:
                                     indicators[factor.lower()] = value
                                     # 同时添加大写键名以兼容条件检查
                                     indicators[factor] = value
+                        elif factor_config is None:
+                            # 未知因子（未在 factor_metadata 中注册）
+                            # 尝试按 MA 系列处理：MA{period}
+                            import re
+                            ma_match = re.match(r'^MA(\d+)$', factor)
+                            if ma_match:
+                                period = int(ma_match.group(1))
+                                if len(closes) >= period:
+                                    from services.common.technical_indicators import calculate_ma
+                                    value = calculate_ma(closes, period)
+                                    if value is not None:
+                                        indicators[factor.lower()] = value
+                                        indicators[factor] = value
+                            # 其他未知因子暂不支持动态计算
+                        elif factor_config.get('source') == 'db':
+                            # DB 因子但可能缺失（如 MA120, MA250）
+                            # 先检查 DB 值是否为空
+                            db_value = indicators.get(factor.lower()) or indicators.get(factor)
+                            if db_value is None or (isinstance(db_value, float) and str(db_value) == 'nan'):
+                                import re
+                                ma_match = re.match(r'^MA(\d+)$', factor)
+                                if ma_match:
+                                    period = int(ma_match.group(1))
+                                    if len(closes) >= period:
+                                        from services.common.technical_indicators import calculate_ma
+                                        value = calculate_ma(closes, period)
+                                        if value is not None:
+                                            indicators[factor.lower()] = value
+                                            indicators[factor] = value
+                                            print(f"[Screening] K 线计算 {factor}: {value:.2f}")
 
             # 检查条件（使用ConditionParser支持嵌套逻辑）
             parser = get_condition_parser()
@@ -831,12 +883,12 @@ class ScreeningService:
         # 计算目标买入数量
         # 1. 从策略配置读取固定数量
         # 2. 或从策略配置读取买入比例（占总资金的百分比）
-        # 3. 默认 100 股
-        target_quantity = 100  # 默认值
+        # 3. 默认 None，由买入执行时按仓位策略计算
+        target_quantity = None
 
         if strategy_config:
             if strategy_config.get('quantity'):
-                target_quantity = int(strategy_config.get('quantity', 100))
+                target_quantity = int(strategy_config.get('quantity'))
             elif strategy_config.get('position_pct'):
                 # 根据账户可用资金计算
                 position_pct = float(strategy_config.get('position_pct', 0.1))
@@ -852,7 +904,6 @@ class ScreeningService:
                     # 计算可买数量（100 的整数倍）
                     if current_price > 0:
                         target_quantity = int((buy_amount / current_price) // 100) * 100
-                        target_quantity = max(target_quantity, 100)  # 至少 100 股
 
         watchlist_data = {
             "account_id": account_id,
@@ -919,11 +970,11 @@ class ScreeningService:
         take_profit = current_price * (1 + take_profit_pct)
 
         # 计算目标买入数量
-        target_quantity = 100  # 默认值
+        target_quantity = None
 
         if strategy_config:
             if strategy_config.get('quantity'):
-                target_quantity = int(strategy_config.get('quantity', 100))
+                target_quantity = int(strategy_config.get('quantity'))
             elif strategy_config.get('position_pct'):
                 position_pct = float(strategy_config.get('position_pct', 0.1))
                 account = await db.fetchone(
@@ -935,7 +986,6 @@ class ScreeningService:
                     buy_amount = available_cash * position_pct
                     if current_price > 0:
                         target_quantity = int((buy_amount / current_price) // 100) * 100
-                        target_quantity = max(target_quantity, 100)
 
         temp_data = {
             "account_id": account_id,

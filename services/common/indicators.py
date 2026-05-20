@@ -255,6 +255,23 @@ class TechnicalIndicators:
                 'VOLUME': indicators.get('volume') or indicators.get('VOLUME'),
             }
 
+            # 动态解析 MA{n} 系列（MA120, MA250 等，可能由 K 线动态计算）
+            # 扫描 indicators 字典中所有 ma{N} / MA{N} 键
+            import re as _re
+            for ind_key in indicators:
+                ma_match = _re.match(r'^(?:ma|MA)(\d+)$', ind_key)
+                if ma_match:
+                    upper_key = ind_key.upper()
+                    if upper_key not in available:
+                        available[upper_key] = indicators.get(ind_key)
+
+            for key in list(available.keys()):
+                if available[key] is None:
+                    ma_match = _re.match(r'^MA(\d+)$', key)
+                    if ma_match:
+                        # 尝试从小写键名获取
+                        available[key] = indicators.get(key.lower()) or indicators.get(key)
+
             # 替换条件中的指标名称
             expr = condition
 

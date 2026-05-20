@@ -62,6 +62,8 @@ ALLOWED_MODULES = {
     "pandas", "numpy", "datetime", "statistics", "json", "math", "re",
     "collections", "itertools", "functools", "dataclasses", "typing",
     "time", "calendar", "decimal", "copy", "string",
+    # 策略 62 尾盘筛选需要
+    "sys", "os",
 }
 
 # 黑名单：禁止使用的函数
@@ -210,6 +212,17 @@ class StrategyEngine:
             "import_module": "禁止使用 importlib.import_module",
         }
 
+        # 禁止 import 的危险模块（即使不在 ALLOWED_MODULES 中也额外检查）
+        forbidden_modules = {
+            "subprocess": "禁止使用 subprocess，不得使用 shell 命令",
+            "AmazingData": "禁止直连 SDK，请使用 context 中注入的数据函数",
+            "torch": "禁止导入 torch，请使用 kronos_predict()",
+            "safetensors": "禁止导入 safetensors，请使用 kronos_predict()",
+            "requests": "禁止使用 requests，请使用 context 中注入的数据函数",
+            "shlex": "禁止使用 shlex",
+            "shutil": "禁止使用 shutil",
+        }
+
         for node in ast.walk(tree):
             # 检查函数调用
             if isinstance(node, ast.Call):
@@ -229,10 +242,14 @@ class StrategyEngine:
                     base = alias.name.split(".")[0]
                     if base not in ALLOWED_MODULES:
                         errors.append(f"第 {node.lineno} 行: 模块 '{alias.name}' 不在允许列表中")
+                    if base in forbidden_modules:
+                        errors.append(f"第 {node.lineno} 行: {forbidden_modules[base]}")
             if isinstance(node, ast.ImportFrom) and node.module:
                 base = node.module.split(".")[0]
                 if base not in ALLOWED_MODULES:
                     errors.append(f"第 {node.lineno} 行: 模块 '{node.module}' 不在允许列表中")
+                if base in forbidden_modules:
+                    errors.append(f"第 {node.lineno} 行: {forbidden_modules[base]}")
 
             # 检查 open() 调用
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "open":
@@ -363,6 +380,21 @@ class StrategyEngine:
             return kronos_service.predict(df_hist, pred_len=pred_len, future_dates=future_dates, **kwargs)
         env["kronos_predict"] = _kronos_predict
         env["kronos_available"] = kronos_service.is_available
+
+        # 注入技术指标计算函数（策略可直接调用，无需从 indicators dict 取）
+        from services.common.technical_indicators import (
+            calculate_ma, calculate_ema, calculate_rsi,
+            calculate_macd, calculate_kdj, calculate_bollinger_bands,
+            calculate_atr, calculate_adx,
+        )
+        env["calculate_ma"] = calculate_ma
+        env["calculate_ema"] = calculate_ema
+        env["calculate_rsi"] = calculate_rsi
+        env["calculate_macd"] = calculate_macd
+        env["calculate_kdj"] = calculate_kdj
+        env["calculate_bollinger_bands"] = calculate_bollinger_bands
+        env["calculate_atr"] = calculate_atr
+        env["calculate_adx"] = calculate_adx
 
         return env
 

@@ -13,6 +13,7 @@ import sqlite3
 import pandas as pd
 from pathlib import Path
 from typing import Dict, List, Set, Tuple, Optional, Any, Callable
+from services.common.database import configure_kline_connection
 from datetime import datetime
 
 # 数据库路径
@@ -20,6 +21,8 @@ KLINE_DB = Path(__file__).parent.parent.parent / "data" / "kline.db"
 
 # 条件解析正则表达式
 INDICATOR_PATTERN = re.compile(r'\b([A-Z_]+(?:\d+)?)\b')
+# MA 系列正则：匹配 MA5, MA10, MA20, MA60, MA120, MA250 等
+MA_PATTERN = re.compile(r'\b(MA(\d+))\b')
 
 
 class FactorRegistry:
@@ -36,7 +39,7 @@ class FactorRegistry:
         """从 factor_metadata 表加载因子配置"""
         try:
             conn = sqlite3.connect(str(self.db_path), timeout=60)
-            conn.execute("PRAGMA busy_timeout=60000")
+            configure_kline_connection(conn)
             cursor = conn.cursor()
 
             cursor.execute("""
@@ -94,6 +97,8 @@ class FactorRegistry:
         self._calculators['calculate_ema'] = calculate_ema
         self._calculators['calculate_ma'] = calculate_ma
         self._calculators['calculate_kdj'] = calculate_kdj
+        # 长周期 MA 计算（MA120, MA250 等需要更多数据）
+        self._calculators['calculate_ma_long'] = calculate_ma
 
     def reload(self):
         """重新从数据库加载因子配置"""
@@ -149,6 +154,27 @@ class FactorRegistry:
             for match in matches:
                 if match in self._mapping:
                     factors.add(match)
+
+            # 提取 MA 系列因子（MA5, MA10, MA20, MA60, MA120, MA250 等）
+            # 即使未在 factor_metadata 中注册也要提取
+            ma_matches = MA_PATTERN.findall(conditions)
+            for ma_name, ma_period in ma_matches:
+                factors.add(ma_name)
+                # 如果未在 mapping 中，动态注册
+                if ma_name not in self._mapping:
+                    self._mapping[ma_name] = {
+                        'factor_name': f'{ma_period}日均线',
+                        'category': 'technical',
+                        'data_table': 'stock_daily_factors',
+                        'data_column': ma_name.lower(),
+                        'update_freq': 'daily',
+                        'is_filterable': 0,
+                        'source': 'db',  # 声明为 db，但实际数据可能缺失
+                        'description': f'{ma_period}日简单移动平均线',
+                        'calculator': 'calculate_ma',
+                        'params': {'period': int(ma_period)},
+                    }
+
             # 也处理特殊条件名（如 DIF_CROSS_UP_DEA）
             special_conditions = ['DIF_CROSS_UP_DEA', 'DIF_CROSS_DOWN_DEA',
                                    'MA5_CROSS_UP_MA10', 'MA5_CROSS_DOWN_MA10',
@@ -255,7 +281,7 @@ class FactorRegistry:
 
             try:
                 conn = sqlite3.connect(str(self.db_path), timeout=60)
-                conn.execute("PRAGMA busy_timeout=60000")
+                configure_kline_connection(conn)
                 df = pd.read_sql_query(query, conn)
                 conn.close()
 
