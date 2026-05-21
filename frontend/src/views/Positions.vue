@@ -339,7 +339,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted, computed, nextTick } from 'vue'
+import { ref, onMounted, onUnmounted, computed, nextTick } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { ArrowLeft, ArrowRight, Refresh, Download } from '@element-plus/icons-vue'
 import { exportTable as doExport } from '@/utils/exportHelper'
@@ -893,9 +893,27 @@ const destroyKlineChart = () => {
   if (klineChart) { klineChart.dispose(); klineChart = null }
 }
 
-import { onUnmounted } from 'vue'
+// 静默刷新当前价（从内存 PriceCache 取，不触发 SDK 调用）
+let priceRefreshTimer = null
+const startPriceRefresh = () => {
+  priceRefreshTimer = setInterval(async () => {
+    try {
+      const res = await fetch(`/api/v1/ui/${currentAccountId.value}/positions`)
+      const data = await res.json()
+      if (data.positions) {
+        positions.value = data.positions
+        // 刷新策略统计
+        await loadStrategyStats()
+      }
+    } catch (e) {
+      // 静默失败，不弹提示
+    }
+  }, 10000)  // 每 10 秒刷新一次
+}
+
 onUnmounted(() => {
   destroyKlineChart()
+  if (priceRefreshTimer) { clearInterval(priceRefreshTimer); priceRefreshTimer = null }
 })
 
 onMounted(async () => {
@@ -905,6 +923,8 @@ onMounted(async () => {
   await loadStrategyStats()
   // 后台静默刷新实时行情
   refreshPrices()
+  // 启动定时静默刷新（从内存缓存取价）
+  startPriceRefresh()
 })
 </script>
 
