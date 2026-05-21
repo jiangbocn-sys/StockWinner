@@ -96,7 +96,7 @@ async def refresh_position_prices(
     try:
         from services.common.price_cache import get_price_cache
         cache = get_price_cache()
-        cached_prices = cache.get_all_for_account(account_id)
+        cached_prices = cache.get_all_prices()
         for pos in positions:
             code = pos.get("stock_code")
             if code and code in cached_prices:
@@ -193,7 +193,7 @@ async def get_positions(
     try:
         from services.common.price_cache import get_price_cache
         cache = get_price_cache()
-        cached_prices = cache.get_all_for_account(account_id)
+        cached_prices = cache.get_all_prices()
         for pos in positions:
             code = pos.get("stock_code")
             if code and code in cached_prices:

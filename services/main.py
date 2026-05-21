@@ -31,7 +31,7 @@ from services._version import VERSION, set_start_time
 _server_start_time = None
 
 # 数据库迁移版本号 —— 每次新增迁移时递增
-MIGRATION_VERSION = 12
+MIGRATION_VERSION = 13
 
 
 @asynccontextmanager
@@ -680,6 +680,13 @@ async def lifespan(app: FastAPI):
     # v12: watchlist 重命名 buy_price → trigger_price（2026-05-21）
     await run_migration(12, "watchlist 字段重命名", [
         "ALTER TABLE watchlist RENAME COLUMN buy_price TO trigger_price",
+    ])
+
+    # v13: watchlist 添加 is_active 字段（2026-05-21）
+    # 用于标记是否需要实时监控行情，回测用股票可设为 inactive，不参与 price_cache 刷新
+    await run_migration(13, "watchlist 添加 is_active", [
+        "ALTER TABLE watchlist ADD COLUMN is_active INTEGER DEFAULT 1",
+        "CREATE INDEX IF NOT EXISTS idx_watchlist_active_status ON watchlist(stock_code, status) WHERE is_active = 1",
     ])
 
     # v7 数据源配置 seed（从 registry.json 初始化）

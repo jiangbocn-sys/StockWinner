@@ -180,7 +180,7 @@ class NotificationService:
                 f"**候选组：** {payload.get('group_name', '-')}",
                 f"**股票代码：** {payload.get('stock_code', '-')}",
                 f"**股票名称：** {payload.get('stock_name', '-')}",
-                f"**建议买入价：** {payload.get('buy_price', '-')}",
+                f"**建议买入价：** {payload.get('buy_price', payload.get('trigger_price', payload.get('price', '-')))}",
                 f"**止损价：** {payload.get('stop_loss_price', '-')}",
                 f"**止盈价：** {payload.get('take_profit_price', '-')}",
                 f"**触发原因：** {payload.get('reason', '-')}",

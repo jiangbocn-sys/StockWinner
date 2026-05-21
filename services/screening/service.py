@@ -642,23 +642,24 @@ class ScreeningService:
             if not indicators.get('ma5') or not indicators.get('ma20') or not indicators.get('rsi'):
                 continue
 
-            # 获取最新价格 - 优先使用网关实时价格
+            # 获取最新价格 - 优先使用 price_cache，其次用网关实时价格兜底
             current_price = indicators.get('price', 0)
-            gateway = None
             try:
-                from services.trading.gateway import get_gateway
-                gateway = await get_gateway()
+                from services.common.price_cache import get_price_cache
+                cached_price = get_price_cache().get(stock_code)
+                if cached_price and cached_price > 0:
+                    current_price = cached_price
+                    indicators['price'] = current_price
+                else:
+                    from services.trading.gateway import get_gateway
+                    gateway = await get_gateway()
+                    if gateway and gateway.connected:
+                        market_data = await gateway.get_market_data(stock_code)
+                        if market_data and market_data.current_price:
+                            current_price = market_data.current_price
+                            indicators['price'] = current_price
             except Exception:
-                pass
-
-            if gateway and gateway.connected:
-                try:
-                    market_data = await gateway.get_market_data(stock_code)
-                    if market_data and market_data.current_price:
-                        current_price = market_data.current_price
-                        indicators['price'] = current_price  # 更新指标中的价格
-                except Exception:
-                    pass  # 获取实时价格失败，使用本地收盘价
+                pass  # 兜底失败则使用本地收盘价
 
             # 检查条件（使用ConditionParser支持嵌套逻辑）
             parser = get_condition_parser()
@@ -757,13 +758,21 @@ class ScreeningService:
                 remaining_stocks = self._progress["total_stocks"] - self._progress["processed"]
                 self._progress["estimated_remaining"] = int(remaining_stocks * avg_time_per_stock)  # 秒
 
-            # 获取行情数据
+            # 获取行情数据 — 优先 price_cache，SDK 兜底
             try:
-                market_data = await gateway.get_market_data(stock_code)
-                if not market_data:
-                    fail_count += 1
-                    continue
-                success_count += 1
+                from services.common.price_cache import get_price_cache
+                cached_ohlcv = get_price_cache().get_ohlcv(stock_code)
+                if cached_ohlcv and cached_ohlcv.get('close', 0) > 0:
+                    # price_cache 有当日数据，直接使用
+                    market_data = cached_ohlcv
+                    success_count += 1
+                else:
+                    # price_cache 无数据，SDK 兜底
+                    market_data = await gateway.get_market_data(stock_code)
+                    if not market_data:
+                        fail_count += 1
+                        continue
+                    success_count += 1
             except Exception as e:
                 errors.append(f"{stock_code}: {str(e)}")
                 fail_count += 1
@@ -793,9 +802,13 @@ class ScreeningService:
                 fail_count += 1
                 continue
 
-            # 更新价格和成交量
-            indicators['price'] = market_data.current_price
-            indicators['volume'] = market_data.volume
+            # 更新价格和成交量（兼容 dict 和 MarketData 对象）
+            if isinstance(market_data, dict):
+                indicators['price'] = market_data.get('close', current_price)
+                indicators['volume'] = market_data.get('volume', 0)
+            else:
+                indicators['price'] = market_data.current_price
+                indicators['volume'] = market_data.volume
 
             # 检查条件（使用ConditionParser支持嵌套逻辑）
             parser = get_condition_parser()

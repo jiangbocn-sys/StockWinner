@@ -650,7 +650,30 @@ async def query_market(
         if '.' not in code:
             code = f"{code}.SH" if code.startswith('6') else f"{code}.SZ"
 
-        market_data = await gateway.get_market_data(code)
+        market_data = None
+        # 优先 price_cache
+        try:
+            from services.common.price_cache import get_price_cache
+            cached = get_price_cache().get_ohlcv(code)
+            if cached and cached.get('close', 0) > 0:
+                market_data = cached
+        except Exception:
+            pass
+
+        if not market_data:
+            market_data = await gateway.get_market_data(code)
+
+        if isinstance(market_data, dict):
+            return {
+                "stock_code": code,
+                "close": market_data.get('close'),
+                "open": market_data.get('open'),
+                "high": market_data.get('high'),
+                "low": market_data.get('low'),
+                "volume": market_data.get('volume'),
+                "amount": market_data.get('amount'),
+                "change_percent": market_data.get('change_pct'),
+            }
         return {
             "stock_code": code,
             "close": market_data.current_price,
@@ -1458,10 +1481,26 @@ async def submit_strategy_code(
         return lds.get_daily_factors_batch(codes, date or today)
 
     def _get_kline_spliced(codes, lookback=100):
-        return lds.get_kline_spliced(codes, lookback=lookback)
+        """本地历史 + 当日 price_cache 实时拼接"""
+        from services.data.local_data_service import is_trading_hours
+        realtime_quotes = {}
+        if is_trading_hours():
+            try:
+                from services.common.price_cache import get_price_cache
+                cached = get_price_cache().get_all_for_codes(set(codes))
+                for code in codes:
+                    if code in cached and cached[code].get('close', 0) > 0:
+                        realtime_quotes[code] = cached[code]
+            except Exception:
+                pass
+        return lds.get_kline_spliced(codes, lookback=lookback, realtime_quotes=realtime_quotes if realtime_quotes else None)
 
     def _get_kline_smart(codes, lookback=100):
-        return lds.get_kline_with_realtime(codes, lookback=lookback)
+        """盘中 → 本地历史 + price_cache 实时；盘后 → 纯本地"""
+        from services.data.local_data_service import is_trading_hours
+        if is_trading_hours():
+            return _get_kline_spliced(codes, lookback=lookback)
+        return lds.get_batch_kline(codes, limit=lookback)
 
     test_run_result = None
     test_run_error = None
@@ -1985,10 +2024,19 @@ async def strategy_execute(
         return lds.get_daily_factors_batch(codes, date or today)
 
     def _get_market_data(stock_code):
+        """获取当日行情 — 优先 price_cache，其次返回 None"""
+        try:
+            from services.common.price_cache import get_price_cache
+            cached = get_price_cache().get_ohlcv(stock_code)
+            if cached and cached.get('close', 0) > 0:
+                return cached
+        except Exception:
+            pass
         return None
 
     def _get_realtime_quote(stock_code):
-        return None
+        """获取预取的当日实时 OHLCV — 从 price_cache 取"""
+        return _get_market_data(stock_code)
 
     context = {
         "stocks": stocks,

@@ -187,6 +187,8 @@ async def get_dashboard(account_id: str = Path(..., description="账户 ID")):
         monitor_sdk_error_time = monitor_status.get("sdk_error_time", "")
         monitor_sdk_error_msg = monitor_status.get("sdk_error_msg", "")
         monitor_running = monitor_status.get("running", False)
+        monitor_data_stale = monitor_status.get("data_stale", False)
+        monitor_last_data_time = monitor_status.get("last_data_time", "")
     except Exception:
         monitor_sdk_healthy = True
         monitor_sdk_error_time = ""
@@ -195,7 +197,7 @@ async def get_dashboard(account_id: str = Path(..., description="账户 ID")):
 
     # 综合健康状态：SDK + Galaxy API + 服务运行状态
     sdk_connection_ok = check_sdk_connection()
-    overall_healthy = sdk_connection_ok == "connected" and monitor_sdk_healthy
+    overall_healthy = sdk_connection_ok == "connected" and monitor_sdk_healthy and not monitor_data_stale
 
     # 确定异常原因
     health_issues = []
@@ -203,6 +205,8 @@ async def get_dashboard(account_id: str = Path(..., description="账户 ID")):
         health_issues.append(f"SDK连接异常: {sdk_connection_ok}")
     if not monitor_sdk_healthy and monitor_running:
         health_issues.append(f"行情获取失败: {monitor_sdk_error_msg}")
+    if monitor_data_stale and monitor_running:
+        health_issues.append(f"行情数据过期: 最近成功获取时间={monitor_last_data_time or '无'}")
 
     return {
         "account_id": account_id,
@@ -219,6 +223,8 @@ async def get_dashboard(account_id: str = Path(..., description="账户 ID")):
             "monitor_sdk_error_time": monitor_sdk_error_time,
             "monitor_sdk_error_msg": monitor_sdk_error_msg,
             "monitor_running": monitor_running,
+            "monitor_data_stale": monitor_data_stale,
+            "monitor_last_data_time": monitor_last_data_time,
             "cpu_percent": resources["cpu_percent"],
             "memory_mb": resources["memory_mb"],
             "disk_percent": resources["disk_percent"],

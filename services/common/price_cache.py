@@ -1,79 +1,190 @@
 """
-实时价格缓存服务
+实时行情缓存服务
 
-将 SDK 实时行情缓存在内存中，避免频繁写入数据库。
-- 监控循环只更新内存缓存，不写 DB
-- API 返回时从缓存注入 current_price
+将 SDK 实时缓存在内存中，避免策略任务重复占用 TGW 连接。
+- 监控循环/API 调用更新完整 OHLCV 行情
+- 策略任务直接从缓存取当日数据，无需再调 SDK snapshot
 - 每 15 分钟刷盘兜底
+
+注意：行情是市场数据，与账户无关。缓存按 stock_code 索引，不按 account 隔离。
 """
 
 import time
 import threading
-from typing import Dict, Optional, Any
-from services.common.timezone import get_china_time
+from typing import Dict, Optional, Any, Set
 from services.common.structured_logger import get_logger
 
-# 数据格式
+# 数据格式 — 存储完整 OHLCV
 class PriceEntry:
-    __slots__ = ('price', 'timestamp', 'change_pct')
+    __slots__ = ('price', 'open', 'high', 'low', 'close', 'volume', 'amount', 'change_pct', 'timestamp')
 
-    def __init__(self, price: float, change_pct: float = 0.0):
+    def __init__(self, price: float, open: float = 0, high: float = 0, low: float = 0,
+                 close: float = 0, volume: float = 0, amount: float = 0, change_pct: float = 0.0):
         self.price = price
-        self.timestamp = time.time()
+        self.open = open or price
+        self.high = high or price
+        self.low = low or price
+        self.close = close or price
+        self.volume = volume or 0
+        self.amount = amount or 0
         self.change_pct = change_pct
+        self.timestamp = time.time()
 
 
 class PriceCache:
-    """线程安全的内存价格缓存"""
+    """线程安全的内存行情缓存（全局共享，不按账户隔离）"""
 
     def __init__(self):
         self._lock = threading.Lock()
-        # {account_id: {stock_code: PriceEntry}}
-        self._prices: Dict[str, Dict[str, PriceEntry]] = {}
+        # {stock_code: PriceEntry} — 行情与账户无关，全局一份
+        self._prices: Dict[str, PriceEntry] = {}
         self._flush_interval = 900  # 15 分钟
         self._last_flush = time.time()
 
-    def update(self, account_id: str, stock_code: str, price: float, change_pct: float = 0.0):
-        """更新单只股票价格（线程安全）"""
-        with self._lock:
-            if account_id not in self._prices:
-                self._prices[account_id] = {}
-            self._prices[account_id][stock_code] = PriceEntry(price, change_pct)
+    def update(self, stock_code: str, price: float,
+               open: float = 0, high: float = 0, low: float = 0,
+               close: float = 0, volume: float = 0, amount: float = 0,
+               change_pct: float = 0.0):
+        """更新单只股票行情（线程安全）
 
-    def update_batch(self, account_id: str, data: Dict[str, tuple]):
-        """批量更新价格
-        data: {stock_code: (price, change_pct)}
+        保护机制：当新数据某字段为 0 但缓存中已有有效值时，保留旧值。
         """
         with self._lock:
-            if account_id not in self._prices:
-                self._prices[account_id] = {}
-            for code, (price, change_pct) in data.items():
-                self._prices[account_id][code] = PriceEntry(price, change_pct)
+            existing = self._prices.get(stock_code)
+            if existing:
+                open = open if open > 0 else existing.open
+                high = high if high > 0 else existing.high
+                low = low if low > 0 else existing.low
+                close = close if close > 0 else existing.close
+                volume = volume if volume > 0 else existing.volume
+                amount = amount if amount > 0 else existing.amount
+            self._prices[stock_code] = PriceEntry(
+                price=close, open=open, high=high, low=low,
+                close=close, volume=volume, amount=amount, change_pct=change_pct
+            )
 
-    def get(self, account_id: str, stock_code: str) -> Optional[float]:
-        """获取价格，未找到或过期返回 None"""
+    def update_ohlcv(self, stock_code: str,
+                     open: float, high: float, low: float, close: float,
+                     volume: float, amount: float, change_pct: float = 0.0):
+        """更新完整 OHLCV 行情（线程安全）
+
+        保护机制：当新数据某字段为 0 但缓存中已有有效值时，保留旧值，避免用 0 覆盖。
+        """
         with self._lock:
-            acct = self._prices.get(account_id)
-            if not acct:
-                return None
-            entry = acct.get(stock_code)
+            existing = self._prices.get(stock_code)
+            if existing:
+                # 用新值覆盖，但 0 值回退到旧值
+                open = open if open > 0 else existing.open
+                high = high if high > 0 else existing.high
+                low = low if low > 0 else existing.low
+                close = close if close > 0 else existing.close
+                volume = volume if volume > 0 else existing.volume
+                amount = amount if amount > 0 else existing.amount
+            self._prices[stock_code] = PriceEntry(
+                price=close, open=open, high=high, low=low,
+                close=close, volume=volume, amount=amount, change_pct=change_pct
+            )
+
+    def update_batch(self, data: Dict[str, dict]):
+        """批量更新行情
+        data: {stock_code: OHLCV_dict}
+        OHLCV_dict 需包含: close(或 price), open, high, low, volume, amount, change_pct
+
+        保护机制：当新数据某字段为 0 但缓存中已有有效值时，保留旧值。
+        """
+        with self._lock:
+            for code, item in data.items():
+                existing = self._prices.get(code)
+                if isinstance(item, dict):
+                    close_val = item.get('close', item.get('price', 0))
+                    open_val = item.get('open', 0)
+                    high_val = item.get('high', 0)
+                    low_val = item.get('low', 0)
+                    vol_val = item.get('volume', 0)
+                    amt_val = item.get('amount', 0)
+                    if existing:
+                        open_val = open_val if open_val > 0 else existing.open
+                        high_val = high_val if high_val > 0 else existing.high
+                        low_val = low_val if low_val > 0 else existing.low
+                        close_val = close_val if close_val > 0 else existing.close
+                        vol_val = vol_val if vol_val > 0 else existing.volume
+                        amt_val = amt_val if amt_val > 0 else existing.amount
+                    self._prices[code] = PriceEntry(
+                        price=close_val,
+                        open=open_val, high=high_val, low=low_val,
+                        close=close_val, volume=vol_val, amount=amt_val,
+                        change_pct=item.get('change_pct', 0)
+                    )
+                elif isinstance(item, tuple) and len(item) >= 2:
+                    price, change_pct = item[0], item[1]
+                    self._prices[code] = PriceEntry(price, change_pct=change_pct)
+
+    def get(self, stock_code: str) -> Optional[float]:
+        """获取最新价，未找到或过期返回 None"""
+        with self._lock:
+            entry = self._prices.get(stock_code)
             if not entry:
                 return None
-            # 超过 10 分钟认为数据过期
             if time.time() - entry.timestamp > 600:
                 return None
             return entry.price
 
-    def get_all_for_account(self, account_id: str) -> Dict[str, float]:
-        """获取某账户所有股票的实时价格
-        Returns: {stock_code: price}
+    def get_ohlcv(self, stock_code: str) -> Optional[Dict[str, float]]:
+        """获取完整 OHLCV 行情，未找到或过期返回 None
+        Returns: {open, high, low, close, volume, amount, change_pct}
         """
         with self._lock:
-            acct = self._prices.get(account_id, {})
+            entry = self._prices.get(stock_code)
+            if not entry:
+                return None
+            if time.time() - entry.timestamp > 600:
+                return None
+            return {
+                'open': entry.open, 'high': entry.high, 'low': entry.low,
+                'close': entry.close, 'volume': entry.volume, 'amount': entry.amount,
+                'change_pct': entry.change_pct,
+            }
+
+    def get_all(self) -> Dict[str, Dict[str, float]]:
+        """获取所有股票的完整 OHLCV 行情
+        Returns: {stock_code: {open, high, low, close, volume, amount, change_pct}}
+        """
+        with self._lock:
             result = {}
             now = time.time()
-            for code, entry in acct.items():
-                if now - entry.timestamp <= 600:  # 10 分钟内有效
+            for code, entry in self._prices.items():
+                if now - entry.timestamp <= 600:
+                    result[code] = {
+                        'open': entry.open, 'high': entry.high, 'low': entry.low,
+                        'close': entry.close, 'volume': entry.volume, 'amount': entry.amount,
+                        'change_pct': entry.change_pct,
+                    }
+            return result
+
+    def get_all_for_codes(self, codes: Set[str]) -> Dict[str, Dict[str, float]]:
+        """获取指定股票列表的 OHLCV 行情（过滤过期条目）
+        Returns: {stock_code: {open, high, low, close, volume, amount, change_pct}}
+        """
+        with self._lock:
+            result = {}
+            now = time.time()
+            for code in codes:
+                entry = self._prices.get(code)
+                if entry and now - entry.timestamp <= 600:
+                    result[code] = {
+                        'open': entry.open, 'high': entry.high, 'low': entry.low,
+                        'close': entry.close, 'volume': entry.volume, 'amount': entry.amount,
+                        'change_pct': entry.change_pct,
+                    }
+            return result
+
+    def get_all_prices(self) -> Dict[str, float]:
+        """获取所有股票最新价 {stock_code: price}（兼容旧接口）"""
+        with self._lock:
+            result = {}
+            now = time.time()
+            for code, entry in self._prices.items():
+                if now - entry.timestamp <= 600:
                     result[code] = entry.price
             return result
 
@@ -88,10 +199,8 @@ class PriceCache:
     def get_stats(self) -> Dict[str, Any]:
         """获取缓存统计"""
         with self._lock:
-            total = sum(len(v) for v in self._prices.values())
             return {
-                "accounts": len(self._prices),
-                "total_entries": total,
+                "total_entries": len(self._prices),
                 "last_flush_age_seconds": round(time.time() - self._last_flush, 0),
             }
 

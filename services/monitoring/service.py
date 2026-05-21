@@ -41,6 +41,12 @@ class TradingMonitor:
         self._sdk_error_time: Optional[str] = None  # 最近一次 SDK 错误时间
         self._sdk_error_msg: str = ""  # 最近一次 SDK 错误信息
         self._consecutive_errors = 0  # 连续错误计数
+        # 数据新鲜度：最后一次成功获取有效行情的时间
+        self._last_data_time: Optional[str] = None  # 最近一次成功获取行情的中国时间字符串
+        self._data_stale = False  # 数据是否过期（交易时间内长时间取不到有效行情）
+        # 通知防抖
+        self._last_notify_time: float = 0.0  # 上次发通知的 time.time()
+        self._notify_cooldown: float = 300  # 5 分钟内不重复发同类通知
 
     async def start_monitoring(
         self,
@@ -101,7 +107,7 @@ class TradingMonitor:
         account_ids: list[str],
         interval: int
     ):
-        """交易监控循环 — 遍历所有账户"""
+        """交易监控循环 — 全局去重股票，一次 SDK 调用"""
         from services.trading.trading_hours import can_trade, get_next_trading_window
 
         log = get_logger("monitor")
@@ -111,10 +117,7 @@ class TradingMonitor:
         while self._running:
             try:
                 if can_trade():
-                    for acct_id in account_ids:
-                        if not self._running:
-                            break
-                        await self._run_monitoring(acct_id)
+                    await self._run_monitoring_global(account_ids)
                     # 交易中按 interval 轮询
                     await asyncio.sleep(interval)
                 else:
@@ -141,47 +144,93 @@ class TradingMonitor:
         self._running = False  # 循环退出后重置状态，防止僵尸状态
         log.log_event("monitor_loop_stop", "交易监控服务已停止")
 
-    async def _run_monitoring(self, account_id: str):
-        """执行一次交易监控"""
+    async def _run_monitoring_global(self, account_ids: list[str]):
+        """全局监控：收集所有账户的股票去重，一次 SDK 调用，分发到各账户逻辑"""
         db = get_db_manager()
+        log = get_logger("monitor")
 
-        # === 预取：收集所有需要监控的股票代码，一次性批量获取行情 ===
-        all_stock_codes = set()
-        try:
-            wl = await db.fetchall(
-                "SELECT stock_code FROM watchlist WHERE account_id = ? AND status IN ('pending', 'watching', 'bought')",
-                (account_id,),
-            )
-            all_stock_codes.update(w["stock_code"] for w in wl)
-        except Exception:
-            pass
-        try:
-            pos = await db.fetchall(
-                "SELECT stock_code FROM stock_positions WHERE account_id = ?",
-                (account_id,),
-            )
-            all_stock_codes.update(p["stock_code"] for p in pos)
-        except Exception:
-            pass
-
-        market_data_cache: Dict[str, Any] = {}
-        if all_stock_codes:
+        # ① 收集所有账户需要监控股票（去重）
+        all_stock_codes: set = set()
+        account_stocks: Dict[str, set] = {}  # {account_id: set_of_codes}
+        for acct_id in account_ids:
+            if not self._running:
+                return
+            codes = set()
             try:
-                from services.trading.gateway import get_gateway
-                gateway = await get_gateway()
-                market_data_cache = await gateway.get_batch_market_data(list(all_stock_codes))
-                if not self._sdk_healthy:
-                    get_logger("monitor").log_event("sdk_recovered", "SDK/TGW 连接已恢复")
-                    self._sdk_healthy = True
-                    self._sdk_error_time = None
-                    self._sdk_error_msg = ""
-                    self._consecutive_errors = 0
-            except Exception as e:
-                self._sdk_healthy = False
-                self._sdk_error_time = get_china_time().strftime("%Y-%m-%d %H:%M:%S")
-                self._sdk_error_msg = str(e)
-                self._consecutive_errors += 1
+                wl = await db.fetchall(
+                    "SELECT stock_code FROM watchlist WHERE account_id = ? AND is_active = 1 AND status IN ('pending', 'watching', 'bought')",
+                    (acct_id,),
+                )
+                codes.update(w["stock_code"] for w in wl)
+            except Exception:
+                pass
+            try:
+                pos = await db.fetchall(
+                    "SELECT stock_code FROM stock_positions WHERE account_id = ?",
+                    (acct_id,),
+                )
+                codes.update(p["stock_code"] for p in pos)
+            except Exception:
+                pass
+            account_stocks[acct_id] = codes
+            all_stock_codes.update(codes)
 
+        if not all_stock_codes:
+            return
+
+        # ② 一次 SDK 调用获取全部股票行情
+        market_data_cache: Dict[str, Any] = {}
+        try:
+            from services.trading.gateway import get_gateway
+            gateway = await get_gateway()
+            market_data_cache = await gateway.get_batch_market_data(list(all_stock_codes))
+            if not self._sdk_healthy:
+                log.log_event("sdk_recovered", "SDK/TGW 连接已恢复")
+                self._sdk_healthy = True
+                self._sdk_error_time = None
+                self._sdk_error_msg = ""
+                self._consecutive_errors = 0
+
+            # 检查数据有效性
+            valid_count = sum(
+                1 for md in market_data_cache.values()
+                if md and getattr(md, 'current_price', 0) > 0
+            )
+            if valid_count > 0:
+                self._last_data_time = get_china_time().strftime("%Y-%m-%d %H:%M:%S")
+                if self._data_stale:
+                    log.log_event("data_recovered", f"行情数据已恢复，有效股票数={valid_count}")
+                    self._data_stale = False
+            elif len(market_data_cache) > 0:
+                self._data_stale = True
+                self._notify_sdk_event("行情数据异常", f"SDK 返回 {len(market_data_cache)} 只股票但全部现价无效")
+        except Exception as e:
+            self._sdk_healthy = False
+            self._sdk_error_time = get_china_time().strftime("%Y-%m-%d %H:%M:%S")
+            self._sdk_error_msg = str(e)
+            self._consecutive_errors += 1
+            self._data_stale = True
+            self._notify_sdk_event("SDK 连接失败", f"监控循环获取行情失败: {e}")
+            return  # SDK 失败，跳过本轮
+
+        # ③ 分发到各账户执行监控逻辑
+        for acct_id in account_ids:
+            if not self._running:
+                return
+            acct_codes = account_stocks.get(acct_id, set())
+            if not acct_codes:
+                continue
+            acct_market = {code: market_data_cache.get(code) for code in acct_codes if code in market_data_cache}
+            await self._run_per_account(acct_id, acct_market)
+
+        # ④ 更新 price_cache + 刷盘（全局一次）
+        self._update_price_cache("", market_data_cache=market_data_cache)
+        if self._cache.should_flush():
+            for acct_id in account_ids:
+                await self._flush_price_cache_to_db(acct_id)
+
+    async def _run_per_account(self, account_id: str, market_data_cache: Dict[str, Any]):
+        """单个账户的监控逻辑（从 _run_monitoring 提取，不含 SDK 调用）"""
         # === 第一部分：基于交易策略的触发评估 ===
         await self._evaluate_trading_strategies(account_id)
 
@@ -193,13 +242,6 @@ class TradingMonitor:
 
         # === 第四部分：刷新持仓盈亏 ===
         await self._refresh_positions_pnl(account_id, market_data_cache=market_data_cache)
-
-        # === 第五部分：更新实时价格到内存缓存（不再写 DB）===
-        self._update_price_cache(account_id, market_data_cache=market_data_cache)
-
-        # === 第六部分：每 15 分钟兜底刷盘 ===
-        if self._cache.should_flush():
-            await self._flush_price_cache_to_db(account_id)
 
     async def _evaluate_trading_strategies(self, account_id: str):
         """评估交易策略配置中的触发条件"""
@@ -389,23 +431,9 @@ class TradingMonitor:
 
         stock_codes = [p["stock_code"] for p in positions]
 
-        # 使用预取的行情数据
+        # 使用预取的行情数据（由 _run_monitoring_global 全局一次性获取）
         if not market_data_cache:
-            try:
-                gateway = await get_gateway()
-                market_data_cache = await gateway.get_batch_market_data(stock_codes)
-                if not self._sdk_healthy:
-                    get_logger("monitor").log_event("sdk_recovered", "SDK/TGW 连接已恢复")
-                    self._sdk_healthy = True
-                    self._sdk_error_time = None
-                    self._sdk_error_msg = ""
-                    self._consecutive_errors = 0
-            except Exception as e:
-                self._sdk_healthy = False
-                self._sdk_error_time = get_china_time().strftime("%Y-%m-%d %H:%M:%S")
-                self._sdk_error_msg = str(e)
-                self._consecutive_errors += 1
-                return
+            return  # 无预取行情，跳过
 
         # 更新内存价格缓存
         data = {}
@@ -415,30 +443,40 @@ class TradingMonitor:
                 data[code] = (md.current_price, md.change_percent if hasattr(md, 'change_percent') and md.change_percent else 0.0)
 
         if data:
-            self._cache.update_batch(account_id, data)
+            self._cache.update_batch(data)
 
     def _update_price_cache(self, account_id: str, market_data_cache: Optional[Dict[str, Any]] = None):
-        """将实时行情写入内存价格缓存（不写 DB）"""
+        """将实时行情写入内存价格缓存（完整 OHLCV，不写 DB）"""
         from services.common.price_cache import get_price_cache
         self._cache = get_price_cache()
 
         if not market_data_cache:
             return
 
-        # 从预取行情中提取价格（只缓存有效价格）
-        data = {}
+        # 从预取行情中提取完整 OHLCV
+        count = 0
         for code, md in market_data_cache.items():
             if md and md.current_price and md.current_price > 0:
-                data[code] = (md.current_price, md.change_percent if hasattr(md, 'change_percent') and md.change_percent else 0.0)
-
-        if data:
-            self._cache.update_batch(account_id, data)
+                self._cache.update_ohlcv(
+                    code,
+                    open=getattr(md, 'open_price', 0) or getattr(md, 'open', 0) or md.current_price,
+                    high=getattr(md, 'high', 0) or md.current_price,
+                    low=getattr(md, 'low', 0) or md.current_price,
+                    close=md.current_price,
+                    volume=getattr(md, 'volume', 0) or 0,
+                    amount=getattr(md, 'amount', 0) or 0,
+                    change_pct=getattr(md, 'change_percent', 0) or 0.0,
+                )
+                count += 1
+        if count > 0:
+            from services.common.structured_logger import get_logger
+            get_logger("monitor").log_event("price_cache_update", f"price_cache 更新: stocks={count}")
 
     async def _flush_price_cache_to_db(self, account_id: str):
         """每 15 分钟将内存缓存的价格兜底写入数据库"""
         from services.common.price_cache import get_price_cache
         self._cache = get_price_cache()
-        prices = self._cache.get_all_for_account(account_id)
+        prices = self._cache.get_all_prices()
         if not prices:
             return
 
@@ -1419,7 +1457,39 @@ class TradingMonitor:
             "sdk_error_time": self._sdk_error_time,
             "sdk_error_msg": self._sdk_error_msg,
             "consecutive_errors": self._consecutive_errors,
+            "data_stale": self._data_stale,
+            "last_data_time": self._last_data_time,
         }
+
+    def _notify_sdk_event(self, issue_type: str, detail: str):
+        """发送 SDK 异常飞书通知（带防抖，5 分钟内不重复）"""
+        import time
+        now = time.time()
+        if now - self._last_notify_time < self._notify_cooldown:
+            return  # 防抖冷却中
+
+        try:
+            from services.notifications import get_notification_service
+            notification = get_notification_service()
+            for acct_id in self._account_ids:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    loop.run_until_complete(notification.emit(
+                        event_type="sdk_connection_error",
+                        account_id=acct_id,
+                        payload={
+                            "detected_at": get_china_time().strftime("%Y-%m-%d %H:%M:%S"),
+                            "issue": issue_type,
+                            "detail": detail,
+                        },
+                    ))
+                finally:
+                    loop.close()
+            self._last_notify_time = now
+            get_logger("monitor").log_event("sdk_notify_sent", f"已发送飞书通知: {issue_type}")
+        except Exception:
+            pass  # 通知失败静默处理，不影响主流程
 
 
 # 全局单例

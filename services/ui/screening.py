@@ -576,7 +576,7 @@ async def get_watchlist(
     try:
         from services.common.price_cache import get_price_cache
         cache = get_price_cache()
-        cached_prices = cache.get_all_for_account(account_id)
+        cached_prices = cache.get_all_prices()
         for item in watchlist:
             code = item.get("stock_code")
             if code and code in cached_prices:
