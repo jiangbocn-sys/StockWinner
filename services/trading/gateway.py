@@ -327,9 +327,8 @@ class TradingGateway(TradingGatewayInterface):
 
     def _query_market_data_sync(self, stock_code: str) -> Optional[MarketData]:
         """同步查询行情数据（在线程池中执行）— 优先使用 SDK 快照获取五档盘口"""
-        import sqlite3
-        from pathlib import Path
         from services.common.sdk_manager import get_sdk_manager
+        from services.common.timezone import get_china_time
 
         original_code = stock_code
         if '.' not in stock_code:
@@ -341,8 +340,6 @@ class TradingGateway(TradingGatewayInterface):
         # 1. 优先使用 SDK 快照（包含真实五档盘口）
         try:
             sdk_mgr = get_sdk_manager()
-            import datetime
-            from services.common.timezone import get_china_time
             today_int = int(get_china_time().strftime("%Y%m%d"))
             # SDK query_snapshot 返回 {date: {code: DataFrame}}
             result = sdk_mgr.query_snapshot(
@@ -359,15 +356,10 @@ class TradingGateway(TradingGatewayInterface):
                         if df is not None and len(df) > 0:
                             row = df.iloc[0] if hasattr(df, 'iloc') else df
                             return self._market_data_from_snapshot(row, stock_code)
-                # 有返回但找不到目标股票
-                logger.warning(f"SDK 快照返回数据但无 {stock_code}: date_keys={list(result.keys())}")
-            else:
-                # 返回为空
-                logger.warning(f"SDK 快照返回空: stock_code={stock_code}")
         except Exception as e:
-            logger.warning(f"SDK 快照查询异常，回退 K 线: {e}")
+            logger.warning(f"SDK 快照查询异常: {e}")
 
-        # 2. 回退：K 线数据（不含真实五档，仅估算）
+        # 2. SDK 快照失败或无数据时，回退 K 线数据（五档用现价填充，不用估算价）
         return self._market_data_from_kline(stock_code, original_code)
 
     def _market_data_from_snapshot(self, row, stock_code: str) -> MarketData:
