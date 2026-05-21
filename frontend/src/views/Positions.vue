@@ -18,6 +18,38 @@
         </el-descriptions>
       </el-card>
 
+      <!-- 按策略分组统计 -->
+      <el-card v-if="strategyStats.length > 0" class="strategy-stats-card">
+        <template #header>
+          <div class="card-header">
+            <span>策略持仓统计</span>
+          </div>
+        </template>
+        <el-table :data="strategyStats" stripe size="small">
+          <el-table-column prop="strategy_name" label="策略名称" min-width="140" />
+          <el-table-column prop="position_count" label="持仓数" width="80" align="center" />
+          <el-table-column prop="total_mv" label="持仓市值" width="140" align="right">
+            <template #default="{ row }">¥{{ formatNumber(row.total_mv) }}</template>
+          </el-table-column>
+          <el-table-column prop="total_pnl" label="盈亏" width="140" align="right">
+            <template #default="{ row }">
+              <span :class="row.total_pnl >= 0 ? 'profit-positive' : 'profit-negative'">
+                {{ row.total_pnl >= 0 ? '+' : '' }}¥{{ formatNumber(Math.abs(row.total_pnl)) }}
+              </span>
+            </template>
+          </el-table-column>
+          <el-table-column prop="position_pct" label="仓位占比" width="90" align="center">
+            <template #default="{ row }">{{ row.position_pct.toFixed(1) }}%</template>
+          </el-table-column>
+          <el-table-column prop="max_position_amount" label="买入上限" width="120" align="right">
+            <template #default="{ row }">
+              <span v-if="row.max_position_amount">¥{{ formatNumber(row.max_position_amount) }}</span>
+              <span v-else class="text-muted">不限</span>
+            </template>
+          </el-table-column>
+        </el-table>
+      </el-card>
+
       <!-- 持仓明细 -->
       <el-card>
         <template #header>
@@ -343,6 +375,19 @@ const dsaResult = ref(null)
 const dsaError = ref('')
 
 const refreshing = ref(false)
+
+// 策略持仓统计
+const strategyStats = ref([])
+
+const loadStrategyStats = async () => {
+  try {
+    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/positions/strategy-stats`)
+    const data = await res.json()
+    strategyStats.value = data.strategy_stats || []
+  } catch (e) {
+    console.error('加载策略统计失败:', e)
+  }
+}
 
 // 已清仓明细
 const activeTab = ref('holding')
@@ -857,6 +902,7 @@ onMounted(async () => {
   // 先展示 DB 数据
   await loadPositions()
   await loadClosedPositions()
+  await loadStrategyStats()
   // 后台静默刷新实时行情
   refreshPrices()
 })
@@ -880,6 +926,14 @@ h2 {
 
 .overview-card {
   margin-bottom: 20px;
+}
+
+.strategy-stats-card {
+  margin-bottom: 20px;
+}
+
+.text-muted {
+  color: #909399;
 }
 
 .card-header {

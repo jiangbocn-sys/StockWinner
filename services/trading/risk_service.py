@@ -99,6 +99,59 @@ class RiskService:
 
         return True, ""
 
+    async def check_strategy_position(
+        self,
+        stock_code: str,
+        price: float,
+        quantity: int,
+        strategy_id: int,
+    ) -> Tuple[bool, str]:
+        """
+        策略级持仓上限检查
+
+        检查该策略下所有持仓股的总市值是否超过策略配置的 max_position_amount。
+
+        Returns:
+            (通过, 原因) — 通过返回 (True, "")
+        """
+        db = self.db
+
+        # 读取策略配置
+        strategy = await db.fetchone(
+            "SELECT name, config FROM strategies WHERE id = ? AND account_id = ?",
+            (strategy_id, self.account_id),
+        )
+        if not strategy:
+            return True, ""  # 策略不存在或不属此账户，不拦截
+
+        import json
+        config = strategy.get("config", {})
+        if isinstance(config, str):
+            try:
+                config = json.loads(config)
+            except (json.JSONDecodeError, TypeError):
+                config = {}
+
+        max_amount = config.get("max_position_amount")
+        if not max_amount or max_amount <= 0:
+            return True, ""  # 未配置上限，不拦截
+
+        # 查询该策略下当前持仓总市值
+        positions = await db.fetchall(
+            "SELECT SUM(market_value) as strategy_mv FROM stock_positions WHERE account_id = ? AND strategy_id = ? AND quantity > 0",
+            (self.account_id, strategy_id),
+        )
+        current_strategy_mv = positions[0]["strategy_mv"] if positions and positions[0]["strategy_mv"] else 0
+
+        # 买入后该策略的新持仓市值
+        new_strategy_mv = current_strategy_mv + price * quantity
+
+        if new_strategy_mv > max_amount:
+            strategy_name = strategy.get("name", str(strategy_id))
+            return False, f"策略「{strategy_name}」持仓市值将达 ¥{new_strategy_mv:,.0f}，超过上限 ¥{max_amount:,.0f}"
+
+        return True, ""
+
 
 # 全局单例
 _risk_services: Dict[str, RiskService] = {}

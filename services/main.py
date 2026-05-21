@@ -31,7 +31,7 @@ from services._version import VERSION, set_start_time
 _server_start_time = None
 
 # 数据库迁移版本号 —— 每次新增迁移时递增
-MIGRATION_VERSION = 7
+MIGRATION_VERSION = 9
 
 
 @asynccontextmanager
@@ -636,6 +636,11 @@ async def lifespan(app: FastAPI):
         "ALTER TABLE backtest_runs ADD COLUMN pool_schedule TEXT",
         "ALTER TABLE backtest_runs ADD COLUMN liquidate_at_end INTEGER DEFAULT 1",
         "ALTER TABLE backtest_runs ADD COLUMN current_trade_date TEXT",
+    ])
+
+    # v9: 策略链路追踪（2026-05-21）
+    await run_migration(9, "策略链路追踪", [
+        "ALTER TABLE stock_positions ADD COLUMN strategy_id INTEGER",
     ])
 
     # v7 数据源配置 seed（从 registry.json 初始化）

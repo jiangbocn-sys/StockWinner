@@ -724,6 +724,17 @@
             <el-input v-model="codeStrategyForm.function_name" style="width: 150px" />
             <span class="hint" style="margin-left: 8px">策略代码中的主函数名，默认 run</span>
           </el-form-item>
+          <el-form-item label="买入上限">
+            <el-input-number
+              v-model="codeStrategyForm.config.max_position_amount"
+              :min="0"
+              :precision="0"
+              :controls="false"
+              placeholder="不限"
+              style="width: 180px"
+            />
+            <span class="hint" style="margin-left: 8px">该策略下所有持仓总市值上限（元），留空表示不限</span>
+          </el-form-item>
           <el-form-item label="Python 代码">
             <el-collapse style="margin-bottom: 8px">
               <el-collapse-item title="📖 编写规则" name="rules">
@@ -1061,7 +1072,7 @@ const codeValidationResult = ref(null)
 const kronosStatus = ref(null)  // { available, error, device }
 const codeFileInput = ref(null)
 const importedFileName = ref(null)
-const codeStrategyForm = reactive({ name: '', description: '', code: '', function_name: 'run', code_scope: 'screening' })
+const codeStrategyForm = reactive({ name: '', description: '', code: '', function_name: 'run', code_scope: 'screening', config: { max_position_amount: null, quantity: null, position_pct: null } })
 
 // 代码型策略（独立数据源）
 const codeStrategies = ref([])
@@ -1476,6 +1487,7 @@ const resetCodeForm = () => {
   codeStrategyForm.description = ''
   codeStrategyForm.code = ''
   codeStrategyForm.function_name = 'run'
+  codeStrategyForm.config = { max_position_amount: null, quantity: null, position_pct: null }
   codeValidationResult.value = null
   importedFileName.value = null
 }
@@ -1488,6 +1500,17 @@ const editCodeStrategy = (row) => {
   codeStrategyForm.code = row.code || ''
   codeStrategyForm.function_name = row.function_name || 'run'
   codeStrategyForm.code_scope = row.code_scope || 'screening'
+  // Load existing config
+  try {
+    const cfg = typeof row.config === 'string' ? JSON.parse(row.config) : (row.config || {})
+    codeStrategyForm.config = {
+      max_position_amount: cfg.max_position_amount || null,
+      quantity: cfg.quantity || null,
+      position_pct: cfg.position_pct || null,
+    }
+  } catch {
+    codeStrategyForm.config = { max_position_amount: null, quantity: null, position_pct: null }
+  }
   showCreateCodeDialog.value = true
   codeValidationResult.value = null
   importedFileName.value = null
@@ -1544,6 +1567,7 @@ const saveCodeStrategy = async () => {
       code: codeStrategyForm.code,
       function_name: codeStrategyForm.function_name,
       status: 'draft',
+      config: JSON.stringify(codeStrategyForm.config),
     }
     const res = await fetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
     const data = await res.json()
@@ -1555,6 +1579,7 @@ const saveCodeStrategy = async () => {
       codeStrategyForm.description = ''
       codeStrategyForm.code = ''
       codeStrategyForm.function_name = 'run'
+      codeStrategyForm.config = { max_position_amount: null, quantity: null, position_pct: null }
       codeStrategyForm.code_scope = 'screening'
       codeValidationResult.value = null
       importedFileName.value = null

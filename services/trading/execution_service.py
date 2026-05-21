@@ -295,6 +295,18 @@ class TradeExecutionService:
                     "quantity": 0,
                     "fees": {"commission": 0, "transfer_fee": 0, "stamp_tax": 0, "total_fee": 0}
                 }
+
+            # 策略级仓位上限检查
+            if strategy_id:
+                passed, reason = await risk.check_strategy_position(stock_code, price, quantity, strategy_id)
+                if not passed:
+                    await order_svc.update_status(db_order_id, "rejected", reject_reason=reason)
+                    return {
+                        "success": False,
+                        "message": f"策略仓位超限: {reason}",
+                        "quantity": 0,
+                        "fees": {"commission": 0, "transfer_fee": 0, "stamp_tax": 0, "total_fee": 0}
+                    }
         except Exception as e:
             print(f"[RiskService] 风控检查异常: {e}，放行")
 
@@ -361,19 +373,19 @@ class TradeExecutionService:
                     await conn.execute(
                         """UPDATE stock_positions
                            SET quantity = ?, avg_cost = ?, available_quantity = ?, market_value = ?,
-                               updated_at = ?
+                               updated_at = ?, strategy_id = COALESCE(?, strategy_id)
                            WHERE account_id = ? AND stock_code = ?""",
                         (new_qty, new_cost, new_available, new_qty * price,
-                         format_china_time(), self.account_id, stock_code)
+                         format_china_time(), strategy_id, self.account_id, stock_code)
                     )
                 else:
                     await conn.execute(
                         """INSERT INTO stock_positions
                            (account_id, user_id, stock_code, stock_name, quantity, available_quantity,
-                            avg_cost, market_value, created_at, updated_at)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                            avg_cost, market_value, strategy_id, created_at, updated_at)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                         (self.account_id, user_id, stock_code, stock_name, quantity, 0, price,
-                         quantity * price, format_china_time(), format_china_time())
+                         quantity * price, strategy_id, format_china_time(), format_china_time())
                     )
 
                 # 3. 记录交易

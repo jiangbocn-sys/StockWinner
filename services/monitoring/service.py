@@ -991,6 +991,7 @@ class TradingMonitor:
             price=current_price,
             target_quantity=target_quantity,
             trigger_source=trigger_source,
+            strategy_id=stock.get('strategy_id'),
         )
 
         if result["success"]:

@@ -982,8 +982,7 @@ async def update_candidate_group(
     if not group:
         raise HTTPException(status_code=404, detail="候选组不存在")
 
-    if group['group_type'] == 'screening':
-        raise HTTPException(status_code=400, detail="策略自动创建的候选组不可手动修改")
+    # 检查组是否属于该账户（screening 类型组也允许手动修改）
 
     update_data = {"updated_at": format_china_time()}
     if name:
@@ -1022,9 +1021,6 @@ async def delete_candidate_group(
     )
     if not group:
         raise HTTPException(status_code=404, detail="候选组不存在")
-
-    if group['group_type'] == 'screening':
-        raise HTTPException(status_code=400, detail="策略自动创建的候选组不可删除")
 
     # 检查组内是否有 active 状态的股票（非 force 模式时提示）
     active_rows = await db.fetchall(

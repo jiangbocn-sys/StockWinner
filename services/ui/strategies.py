@@ -483,6 +483,7 @@ async def update_code_strategy(
     code_scope: Optional[str] = Body(None, description="代码范围"),
     function_name: Optional[str] = Body(None, description="入口函数名"),
     status: Optional[str] = Body(None, description="策略状态"),
+    config: Optional[str] = Body(None, description="策略配置JSON"),
 ):
     """更新代码型策略"""
     db = get_db_manager()
@@ -510,6 +511,7 @@ async def update_code_strategy(
     if code_scope is not None: update_data["code_scope"] = code_scope
     if function_name is not None: update_data["function_name"] = function_name
     if status is not None: update_data["status"] = status
+    if config is not None: update_data["config"] = config
 
     if len(update_data) > 1:
         await db.update("strategies", update_data, "id = ?", (strategy_id,))
