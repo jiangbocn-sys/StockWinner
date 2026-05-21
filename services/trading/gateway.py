@@ -378,11 +378,11 @@ class TradingGateway(TradingGatewayInterface):
         stock_name = get_str(row, 'stock_name', '') or get_str(row, 'name', stock_code)
 
         # 五档价格
-        bid = [get_float(f'bid{i}', 0) for i in range(1, 6)]
-        ask = [get_float(f'ask{i}', 0) for i in range(1, 6)]
+        bid = [get_float(f'bid_price{i}', 0) for i in range(1, 6)]
+        ask = [get_float(f'ask_price{i}', 0) for i in range(1, 6)]
         # 五档委托量（股）
-        bid_volume = [get_int(f'bid_vol{i}', 0) for i in range(1, 6)]
-        ask_volume = [get_int(f'ask_vol{i}', 0) for i in range(1, 6)]
+        bid_volume = [get_int(f'bid_volume{i}', 0) for i in range(1, 6)]
+        ask_volume = [get_int(f'ask_volume{i}', 0) for i in range(1, 6)]
 
         # DEBUG: 打印 SDK 快照原始字段
         raw_keys = {k: v for k, v in (row.items() if hasattr(row, 'items') else row.__dict__.items())
