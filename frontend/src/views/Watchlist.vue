@@ -168,6 +168,13 @@
                   <el-tag :type="getStatusType(row.status)" size="small">{{ getStatusText(row.status) }}</el-tag>
                 </template>
               </el-table-column>
+              <el-table-column prop="signal_type" label="信号" width="80" align="center">
+                <template #default="{ row }">
+                  <el-tag v-if="row.signal_type === 'buy'" type="danger" size="small">买入</el-tag>
+                  <el-tag v-else-if="row.signal_type === 'sell'" type="success" size="small">卖出</el-tag>
+                  <span v-else>-</span>
+                </template>
+              </el-table-column>
               <el-table-column prop="updated_at" label="更新时间" width="170" sortable>
                 <template #default="{ row }">{{ formatTime(row.updated_at) }}</template>
               </el-table-column>
@@ -630,6 +637,7 @@ const watchlistColumns = [
   { label: '止损价', prop: 'stop_loss_price' },
   { label: '止盈价', prop: 'take_profit_price' },
   { label: '目标数量', prop: 'target_quantity' },
+  { label: '信号', prop: 'signal_type' },
   { label: '状态', prop: 'status' },
   { label: '更新时间', prop: 'updated_at' },
 ]
