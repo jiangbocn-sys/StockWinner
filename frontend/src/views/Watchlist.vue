@@ -1700,7 +1700,6 @@ const handleDsaAnalysisSelected = async () => {
   }
 }
 
-import { onUnmounted } from 'vue'
 onUnmounted(() => {
   if (progressPollingTimer) { clearInterval(progressPollingTimer); progressPollingTimer = null }
   if (watchlistPriceTimer) { clearInterval(watchlistPriceTimer); watchlistPriceTimer = null }
