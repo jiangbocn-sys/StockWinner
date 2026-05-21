@@ -341,18 +341,31 @@ class TradingGateway(TradingGatewayInterface):
         # 1. 优先使用 SDK 快照（包含真实五档盘口）
         try:
             sdk_mgr = get_sdk_manager()
+            import datetime
+            from services.common.timezone import get_china_time
+            today_int = int(get_china_time().strftime("%Y%m%d"))
+            # SDK query_snapshot 返回 {date: {code: DataFrame}}
             result = sdk_mgr.query_snapshot(
                 code_list=[stock_code],
-                begin_date=0,
-                end_date=0,
+                begin_date=today_int,
+                end_date=today_int,
             )
-            if result and stock_code in result:
-                df = result[stock_code]
-                if df is not None and len(df) > 0:
-                    row = df.iloc[0] if hasattr(df, 'iloc') else df
-                    return self._market_data_from_snapshot(row, stock_code)
+            # 遍历嵌套结构查找目标股票
+            if result and isinstance(result, dict):
+                for date_key in result:
+                    inner = result[date_key]
+                    if isinstance(inner, dict) and stock_code in inner:
+                        df = inner[stock_code]
+                        if df is not None and len(df) > 0:
+                            row = df.iloc[0] if hasattr(df, 'iloc') else df
+                            return self._market_data_from_snapshot(row, stock_code)
+                # 有返回但找不到目标股票
+                logger.warning(f"SDK 快照返回数据但无 {stock_code}: date_keys={list(result.keys())}")
+            else:
+                # 返回为空
+                logger.warning(f"SDK 快照返回空: stock_code={stock_code}")
         except Exception as e:
-            logger.debug(f"SDK 快照查询失败，回退 K 线: {e}")
+            logger.warning(f"SDK 快照查询异常，回退 K 线: {e}")
 
         # 2. 回退：K 线数据（不含真实五档，仅估算）
         return self._market_data_from_kline(stock_code, original_code)
@@ -384,10 +397,11 @@ class TradingGateway(TradingGatewayInterface):
         bid_volume = [get_int(f'bid_volume{i}', 0) for i in range(1, 6)]
         ask_volume = [get_int(f'ask_volume{i}', 0) for i in range(1, 6)]
 
-        # DEBUG: 打印 SDK 快照原始字段
+        # DEBUG: 打印 SDK 快照所有字段名（用于确认列名格式）
+        all_keys = list(row.keys() if hasattr(row, 'keys') else row.__dict__.keys())
         raw_keys = {k: v for k, v in (row.items() if hasattr(row, 'items') else row.__dict__.items())
-                     if 'bid' in k.lower() or 'ask' in k.lower() or k == 'current_price'}
-        logger.debug(f"[snapshot] {stock_code} bid={bid} ask={ask} bid_vol={bid_volume} ask_vol={ask_volume} raw={raw_keys}")
+                     if 'bid' in k.lower() or 'ask' in k.lower()}
+        logger.info(f"[snapshot_debug] {stock_code} columns={all_keys} bid={bid} ask={ask} bid_vol={bid_volume} ask_vol={ask_volume} bid_ask_fields={raw_keys}")
 
         current_price = get_float('current_price', get_float('price', 0))
         prev_close = get_float('prev_close', get_float('preclose', 0))
@@ -497,6 +511,7 @@ class TradingGateway(TradingGatewayInterface):
 
                 trade_date = str(last_row.get('trade_date', last_row.get('kline_time', '')))
 
+                # 五档数据不可用：使用现价填充（实盘不允许估算）
                 return MarketData(
                     stock_code=stock_code,
                     stock_name=stock_name,
@@ -508,8 +523,8 @@ class TradingGateway(TradingGatewayInterface):
                     prev_close=prev_close,
                     volume=volume,
                     amount=amount,
-                    bid=[current_price * 0.999] * 5,
-                    ask=[current_price * 1.001] * 5,
+                    bid=[current_price] * 5,
+                    ask=[current_price] * 5,
                     bid_volume=[0] * 5,
                     ask_volume=[0] * 5,
                     trade_date=trade_date

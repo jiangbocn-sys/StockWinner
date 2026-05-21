@@ -587,7 +587,7 @@ async def submit_manual_order(
         # 已在"手动下单"分组中，更新价格、数量和信号类型
         await db.update(
             "watchlist",
-            {"trigger_price": price, "target_quantity": quantity, "signal_type": trade_type, "status": "pending", "updated_at": format_china_time()},
+            {"trigger_price": price, "target_quantity": quantity, "signal_type": trade_type, "source_type": "manual", "status": "pending", "updated_at": format_china_time()},
             "id = ?",
             (existing['id'],)
         )
@@ -738,7 +738,7 @@ async def immediate_sell_position(
             if existing:
                 await db.update(
                     "watchlist",
-                    {"trigger_price": trigger_price, "target_quantity": sell_qty, "signal_type": "sell", "status": "pending", "updated_at": format_china_time()},
+                    {"trigger_price": trigger_price, "target_quantity": sell_qty, "signal_type": "sell", "source_type": "manual", "status": "pending", "updated_at": format_china_time()},
                     "id = ?",
                     (existing['id'],)
                 )

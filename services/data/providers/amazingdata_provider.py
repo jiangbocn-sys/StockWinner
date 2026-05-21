@@ -178,11 +178,16 @@ class AmazingDataProvider(DataProvider):
             end_date=0,
         )
 
-        if not result or stock_code not in result:
-            return None
+        # SDK 返回结构: {date: {code: DataFrame}}
+        snap = None
+        if result and isinstance(result, dict):
+            for date_key in result:
+                inner = result[date_key]
+                if isinstance(inner, dict) and stock_code in inner:
+                    snap = inner[stock_code]
+                    break
 
-        snap = result[stock_code]
-        if snap is None or len(snap) == 0:
+        if snap is None or (hasattr(snap, "empty") and snap.empty) or len(snap) == 0:
             return None
 
         row = snap.iloc[0] if hasattr(snap, "iloc") else snap[0] if isinstance(snap, list) else snap
@@ -203,9 +208,18 @@ class AmazingDataProvider(DataProvider):
             end_date=0,
         )
 
+        # SDK 返回结构: {date: {code: DataFrame}} — 展平为单层
+        flat = {}
+        if result and isinstance(result, dict):
+            for date_key in result:
+                inner = result[date_key]
+                if isinstance(inner, dict):
+                    for code, df in inner.items():
+                        flat[code] = df
+
         output = {}
         for code in stock_codes:
-            snap = result.get(code)
+            snap = flat.get(code)
             if snap is None or (hasattr(snap, "empty") and snap.empty) or len(snap) == 0:
                 output[code] = None
             else:
@@ -334,16 +348,22 @@ class AmazingDataProvider(DataProvider):
             except (ValueError, TypeError):
                 return default
 
-        # 买1-5 / 卖1-5
+        # 买1-5 / 卖1-5（SDK 实际字段名）
         bid = []
         ask = []
         bid_volume = []
         ask_volume = []
         for i in range(1, 6):
-            bid.append(get_float(f"bid{i}", 0))
-            ask.append(get_float(f"ask{i}", 0))
-            bid_volume.append(get_float(f"bid_vol{i}", 0))
-            ask_volume.append(get_float(f"ask_vol{i}", 0))
+            bid.append(get_float(f"bid_price{i}", 0))
+            ask.append(get_float(f"ask_price{i}", 0))
+            bid_volume.append(get_float(f"bid_volume{i}", 0))
+            ask_volume.append(get_float(f"ask_volume{i}", 0))
+
+        # 如果五档价格全为 0，用现价填充
+        cp = get_float("current_price", get_float("price", 0))
+        if all(b == 0 for b in bid) and all(a == 0 for a in ask):
+            bid = [cp] * 5
+            ask = [cp] * 5
 
         return {
             "stock_code": stock_code,
