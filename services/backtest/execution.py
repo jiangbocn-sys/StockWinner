@@ -138,7 +138,8 @@ class BacktestExecutionEngine:
 
         if stock_code in self.positions:
             pos = self.positions[stock_code]
-            total_cost = pos.avg_cost * pos.quantity + fill_price * quantity
+            # 加权成本 = (旧持仓总成本 + 本次含费总成本) / 新持仓数量
+            total_cost = pos.avg_cost * pos.quantity + cost
             pos.quantity += quantity
             pos.avg_cost = total_cost / pos.quantity if pos.quantity > 0 else fill_price
             pos.total_cost += cost  # 累加总买入成本（含佣金）

@@ -84,7 +84,7 @@
           <el-table-column prop="stock_name" label="股票名称" width="120" />
           <el-table-column prop="quantity" label="数量" width="100" align="right" />
           <el-table-column prop="avg_cost" label="成本价" width="100" align="right">
-            <template #default="{ row }">¥{{ row.avg_cost }}</template>
+            <template #default="{ row }">¥{{ Number(row.avg_cost || 0).toFixed(2) }}</template>
           </el-table-column>
           <el-table-column prop="current_price" label="当前价" width="100" align="right">
             <template #default="{ row }">¥{{ row.current_price }}</template>
@@ -921,8 +921,9 @@ onMounted(async () => {
   await loadPositions()
   await loadClosedPositions()
   await loadStrategyStats()
-  // 后台静默刷新实时行情
-  refreshPrices()
+  // 先渲染页面，再异步刷新实时行情（不阻塞 UI）
+  await nextTick()
+  setTimeout(() => refreshPrices(), 0)
   // 启动定时静默刷新（从内存缓存取价）
   startPriceRefresh()
 })

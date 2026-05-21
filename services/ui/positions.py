@@ -59,8 +59,12 @@ async def refresh_position_prices(
 ):
     """刷新持仓当前价为最新行情，并返回更新后的持仓列表
 
-    使用 gateway 批量获取行情（一次 SDK 调用），替代逐个查询。
+    先从内存价格缓存返回数据（立即响应），后台异步刷新 SDK 行情并更新数据库。
     """
+    import asyncio
+    from services.common.structured_logger import get_logger
+
+    logger = get_logger("positions_api")
     db = get_db_manager()
 
     account = await db.fetchone(
@@ -88,55 +92,67 @@ async def refresh_position_prices(
             "available_cash": available_cash
         }
 
-    # 批量获取所有持仓股票的行情（一次 SDK 调用）
-    stock_codes = [pos["stock_code"] for pos in positions]
+    # 先从内存价格缓存注入现价，立即返回
     try:
-        from services.trading.gateway import get_gateway
-        gateway = await get_gateway()
-        market_data = await gateway.get_batch_market_data(stock_codes)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"批量获取行情失败: {e}")
-
-    # 更新每个持仓的价格
-    update_list = []
-    price_map = {}
-    for pos in positions:
-        code = pos["stock_code"]
-        md = market_data.get(code)
-        price = md.current_price if md and md.current_price and md.current_price > 0 else None
-
-        if price and price > 0:
-            quantity = pos["quantity"]
-            avg_cost = pos["avg_cost"]
-            new_market_value = price * quantity
-            new_profit_loss = new_market_value - (avg_cost * quantity)
-            update_list.append((
-                price, new_market_value, new_profit_loss,
-                datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8))).isoformat(),
-                pos["id"]
-            ))
-            price_map[code] = price
-        else:
-            price_map[code] = pos.get("current_price")
-
-    # 批量更新数据库
-    if update_list:
-        await db.executemany(
-            "UPDATE stock_positions SET current_price = ?, market_value = ?, profit_loss = ?, updated_at = ? WHERE id = ?",
-            update_list
-        )
-
-    # 重新读取最新数据返回
-    positions = await db.fetchall(
-        "SELECT * FROM stock_positions WHERE account_id = ? AND quantity > 0 ORDER BY stock_code",
-        (account_id,)
-    )
+        from services.common.price_cache import get_price_cache
+        cache = get_price_cache()
+        cached_prices = cache.get_all_for_account(account_id)
+        for pos in positions:
+            code = pos.get("stock_code")
+            if code and code in cached_prices:
+                price = cached_prices[code]
+                pos["current_price"] = price
+                pos["market_value"] = round(price * pos.get("quantity", 0), 2)
+                pos["profit_loss"] = round((price - pos.get("avg_cost", 0)) * pos.get("quantity", 0), 2)
+    except Exception:
+        pass
 
     account_data = await db.fetchone(
         "SELECT available_cash FROM accounts WHERE account_id = ?",
         (account_id,)
     )
     available_cash = float(account_data["available_cash"]) if account_data else 0.0
+
+    # 后台异步刷新 SDK 行情（不阻塞响应）
+    async def _async_refresh():
+        try:
+            from services.trading.gateway import get_gateway
+            gateway = await get_gateway()
+            stock_codes = [pos["stock_code"] for pos in positions]
+            market_data = await gateway.get_batch_market_data(stock_codes)
+
+            update_list = []
+            price_updates = {}
+            for pos in positions:
+                code = pos["stock_code"]
+                md = market_data.get(code)
+                price = md.get("current_price", 0) if md else 0
+
+                if price and price > 0:
+                    quantity = pos["quantity"]
+                    avg_cost = pos["avg_cost"]
+                    new_market_value = price * quantity
+                    new_profit_loss = new_market_value - (avg_cost * quantity)
+                    update_list.append((
+                        price, new_market_value, new_profit_loss,
+                        get_china_time().isoformat(),
+                        pos["id"]
+                    ))
+                    price_updates[code] = (price, md.get("change_percent", 0))
+
+            if update_list:
+                await db.executemany(
+                    "UPDATE stock_positions SET current_price = ?, market_value = ?, profit_loss = ?, updated_at = ? WHERE id = ?",
+                    update_list
+                )
+
+            # 同时更新内存价格缓存
+            cache.update_batch(account_id, price_updates)
+            logger.info(f"异步刷新持仓行情完成: account={account_id}, stocks={len(price_updates)}")
+        except Exception as e:
+            logger.warning(f"异步刷新持仓行情失败: {e}")
+
+    asyncio.create_task(_async_refresh())
 
     return {
         "success": True,

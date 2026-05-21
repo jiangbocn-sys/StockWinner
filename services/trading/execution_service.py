@@ -367,7 +367,8 @@ class TradeExecutionService:
                     old_cost = existing_position.get("avg_cost", 0)
                     old_available = existing_position.get("available_quantity", 0)
                     new_qty = old_qty + quantity
-                    new_cost = (old_qty * old_cost + quantity * price) / new_qty if new_qty > 0 else price
+                    # 加权成本 = (旧持仓总成本 + 本次含费总成本) / 新持仓数量
+                    new_cost = (old_qty * old_cost + total_amount) / new_qty if new_qty > 0 else price
                     new_available = old_available
 
                     await conn.execute(
@@ -561,11 +562,18 @@ class TradeExecutionService:
                         (self.account_id, stock_code)
                     )
                 else:
+                    # 盈亏摊薄成本法：卖出盈亏摊入剩余持仓
+                    # 新 avg_cost = (原总成本 - 卖出净收入) / 剩余数量
+                    old_total_cost = old_qty * avg_cost
+                    new_total_cost = old_total_cost - net_amount
+                    new_cost = new_total_cost / new_qty if new_qty > 0 else avg_cost
+
                     await conn.execute(
                         """UPDATE stock_positions
-                           SET quantity = ?, available_quantity = ?, market_value = ?, updated_at = ?
+                           SET quantity = ?, available_quantity = ?, avg_cost = ?,
+                               market_value = ?, updated_at = ?
                            WHERE account_id = ? AND stock_code = ?""",
-                        (new_qty, new_available, new_qty * price, format_china_time(),
+                        (new_qty, new_available, new_cost, new_qty * price, format_china_time(),
                          self.account_id, stock_code)
                     )
 
