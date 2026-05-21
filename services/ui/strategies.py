@@ -131,6 +131,13 @@ async def create_strategy(
 
     strategy_id = await db.insert("strategies", strategy_data)
 
+    # 版本存档：创建
+    try:
+        from services.strategy.version_archive import archive_strategy_version
+        await archive_strategy_version(account_id, strategy_id, "created", strategy_data)
+    except Exception as e:
+        print(f"[StrategyVersion] 创建存档失败: {e}")
+
     strategy = await db.fetchone(
         "SELECT * FROM strategies WHERE id = ?",
         (strategy_id,)
@@ -177,6 +184,12 @@ async def update_strategy(
     if not strategy:
         raise HTTPException(status_code=404, detail="策略不存在")
 
+    # 读取旧数据用于 diff
+    old_strategy = await db.fetchone(
+        "SELECT * FROM strategies WHERE id = ?",
+        (strategy_id,)
+    )
+
     update_data = {"updated_at": format_china_time()}
     if name is not None: update_data["name"] = name
     if description is not None: update_data["description"] = description
@@ -216,6 +229,15 @@ async def update_strategy(
     if len(update_data) > 1:
         await db.update("strategies", update_data, "id = ?", (strategy_id,))
 
+    # 版本存档：更新
+    try:
+        from services.strategy.version_archive import archive_strategy_version, compute_diff_summary
+        new_strategy = await db.fetchone("SELECT * FROM strategies WHERE id = ?", (strategy_id,))
+        diff = compute_diff_summary(dict(old_strategy) if old_strategy else {}, dict(new_strategy) if new_strategy else {})
+        await archive_strategy_version(account_id, strategy_id, "updated", dict(new_strategy) if new_strategy else {}, diff_summary=diff)
+    except Exception as e:
+        print(f"[StrategyVersion] 更新存档失败: {e}")
+
     return {"success": True, "message": "策略已更新"}
 
 
@@ -243,6 +265,13 @@ async def delete_strategy(
 
     if not strategy:
         raise HTTPException(status_code=404, detail="策略不存在")
+
+    # 删除前存档
+    try:
+        from services.strategy.version_archive import archive_before_delete
+        await archive_before_delete(account_id, strategy_id)
+    except Exception as e:
+        print(f"[StrategyVersion] 删除前存档失败: {e}")
 
     # 先删除关联数据（避免外键约束失败）
     await db.execute("DELETE FROM temp_candidates WHERE strategy_id = ?", (strategy_id,))
@@ -284,6 +313,14 @@ async def activate_strategy(
 
     await db.update("strategies", {"status": "active"}, "id = ?", (strategy_id,))
 
+    # 版本存档：状态变化
+    try:
+        from services.strategy.version_archive import archive_strategy_version
+        new_strategy = await db.fetchone("SELECT * FROM strategies WHERE id = ?", (strategy_id,))
+        await archive_strategy_version(account_id, strategy_id, "updated", dict(new_strategy) if new_strategy else {}, diff_summary="status: inactive→active")
+    except Exception as e:
+        print(f"[StrategyVersion] 激活存档失败: {e}")
+
     return {
         "success": True,
         "message": "策略已激活"
@@ -315,6 +352,14 @@ async def deactivate_strategy(
         raise HTTPException(status_code=404, detail="策略不存在")
 
     await db.update("strategies", {"status": "inactive"}, "id = ?", (strategy_id,))
+
+    # 版本存档：状态变化
+    try:
+        from services.strategy.version_archive import archive_strategy_version
+        new_strategy = await db.fetchone("SELECT * FROM strategies WHERE id = ?", (strategy_id,))
+        await archive_strategy_version(account_id, strategy_id, "updated", dict(new_strategy) if new_strategy else {}, diff_summary="status: active→inactive")
+    except Exception as e:
+        print(f"[StrategyVersion] 停用存档失败: {e}")
 
     return {
         "success": True,
@@ -504,6 +549,12 @@ async def update_code_strategy(
     if strategy["strategy_type"] != "python":
         raise HTTPException(status_code=400, detail="该接口只能更新代码型策略")
 
+    # 读取旧数据用于 diff
+    old_strategy = await db.fetchone(
+        "SELECT * FROM strategies WHERE id = ?",
+        (strategy_id,)
+    )
+
     update_data = {"updated_at": format_china_time()}
     if name is not None: update_data["name"] = name
     if description is not None: update_data["description"] = description
@@ -516,11 +567,91 @@ async def update_code_strategy(
     if len(update_data) > 1:
         await db.update("strategies", update_data, "id = ?", (strategy_id,))
 
+    # 版本存档：更新
+    try:
+        from services.strategy.version_archive import archive_strategy_version, compute_diff_summary
+        new_strategy = await db.fetchone("SELECT * FROM strategies WHERE id = ?", (strategy_id,))
+        diff = compute_diff_summary(dict(old_strategy) if old_strategy else {}, dict(new_strategy) if new_strategy else {})
+        await archive_strategy_version(account_id, strategy_id, "updated", dict(new_strategy) if new_strategy else {}, diff_summary=diff)
+    except Exception as e:
+        print(f"[StrategyVersion] 代码策略存档失败: {e}")
+
     strategy = await db.fetchone(
         "SELECT * FROM strategies WHERE id = ?",
         (strategy_id,)
     )
     return {"success": True, "message": "策略已更新", "strategy": strategy}
+
+
+# ============== 策略版本存档 ==============
+
+
+@router.get("/api/v1/ui/{account_id}/strategies/{strategy_id}/versions")
+async def get_strategy_versions_list(
+    account_id: str = Path(..., description="账户 ID"),
+    strategy_id: int = Path(..., description="策略 ID"),
+):
+    """查询策略版本历史（系统存档，不面向用户展示）"""
+    db = get_db_manager()
+
+    account = await db.fetchone(
+        "SELECT 1 FROM accounts WHERE account_id = ? AND is_active = 1",
+        (account_id,)
+    )
+    if not account:
+        raise HTTPException(status_code=404, detail=f"账户不存在：{account_id}")
+
+    strategy = await db.fetchone(
+        "SELECT id FROM strategies WHERE id = ? AND account_id = ?",
+        (strategy_id, account_id)
+    )
+    if not strategy:
+        raise HTTPException(status_code=404, detail="策略不存在")
+
+    from services.strategy.version_archive import get_strategy_versions
+    versions = await get_strategy_versions(account_id, strategy_id)
+
+    return {
+        "strategy_id": strategy_id,
+        "account_id": account_id,
+        "version_count": len(versions),
+        "versions": versions,
+    }
+
+
+@router.post("/api/v1/ui/{account_id}/strategies/{strategy_id}/restore")
+async def restore_strategy_version(
+    account_id: str = Path(..., description="账户 ID"),
+    strategy_id: int = Path(..., description="策略 ID"),
+    version: int = Body(..., embed=True, description="要恢复的版本号"),
+):
+    """从指定版本恢复策略数据"""
+    db = get_db_manager()
+
+    account = await db.fetchone(
+        "SELECT 1 FROM accounts WHERE account_id = ? AND is_active = 1",
+        (account_id,)
+    )
+    if not account:
+        raise HTTPException(status_code=404, detail=f"账户不存在：{account_id}")
+
+    strategy = await db.fetchone(
+        "SELECT id FROM strategies WHERE id = ? AND account_id = ?",
+        (strategy_id, account_id)
+    )
+    if not strategy:
+        raise HTTPException(status_code=404, detail="策略不存在")
+
+    from services.strategy.version_archive import restore_strategy_from_version
+    restored = await restore_strategy_from_version(account_id, strategy_id, version)
+    if not restored:
+        raise HTTPException(status_code=404, detail=f"版本 #{version} 不存在")
+
+    return {
+        "success": True,
+        "message": f"策略已恢复到版本 #{version}",
+        "restored_version": restored,
+    }
 
 
 # ============== 关联策略查询 ==============

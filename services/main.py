@@ -31,7 +31,7 @@ from services._version import VERSION, set_start_time
 _server_start_time = None
 
 # 数据库迁移版本号 —— 每次新增迁移时递增
-MIGRATION_VERSION = 9
+MIGRATION_VERSION = 10
 
 
 @asynccontextmanager
@@ -641,6 +641,34 @@ async def lifespan(app: FastAPI):
     # v9: 策略链路追踪（2026-05-21）
     await run_migration(9, "策略链路追踪", [
         "ALTER TABLE stock_positions ADD COLUMN strategy_id INTEGER",
+    ])
+
+    # v10: 策略版本存档（2026-05-21）
+    await run_migration(10, "策略版本存档", [
+        """CREATE TABLE IF NOT EXISTS strategy_versions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            strategy_id INTEGER NOT NULL,
+            account_id TEXT NOT NULL,
+            version INTEGER NOT NULL,
+            action TEXT NOT NULL,
+            name TEXT,
+            description TEXT,
+            strategy_type TEXT,
+            config TEXT,
+            code TEXT,
+            code_type TEXT,
+            code_scope TEXT,
+            function_name TEXT,
+            target_scope TEXT,
+            status TEXT,
+            match_score_threshold REAL,
+            buy_strategy_id INTEGER,
+            sell_strategy_id INTEGER,
+            diff_summary TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_strategy_versions_strategy ON strategy_versions(strategy_id)",
+        "CREATE INDEX IF NOT EXISTS idx_strategy_versions_account ON strategy_versions(account_id, strategy_id)",
     ])
 
     # v7 数据源配置 seed（从 registry.json 初始化）
