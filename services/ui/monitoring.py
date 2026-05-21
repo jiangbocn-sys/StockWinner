@@ -747,7 +747,7 @@ async def immediate_sell_position(
                     "account_id": account_id,
                     "stock_code": normalized_code,
                     "stock_name": market_data.stock_name or normalized_code,
-                    "buy_price": trigger_price,
+                    "trigger_price": trigger_price,
                     "target_quantity": sell_qty,
                     "signal_type": "sell",
                     "status": "pending",

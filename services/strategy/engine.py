@@ -105,7 +105,7 @@ class StrategyEngine:
             signals: [{
                 action: 'buy' | 'sell' | 'watch',
                 stock_code, stock_name,
-                buy_price, target_quantity,
+                trigger_price, target_quantity,
                 stop_loss_pct, take_profit_pct,
                 reason, expire_at
             }]
@@ -415,7 +415,7 @@ class StrategyEngine:
             "action": action,
             "stock_code": stock_code,
             "stock_name": item.get("stock_name", stock_code),
-            "buy_price": item.get("buy_price"),
+            "trigger_price": item.get("buy_price") or item.get("trigger_price"),
             "target_quantity": item.get("target_quantity", 0),
             "stop_loss_pct": item.get("stop_loss_pct", 0.05),
             "take_profit_pct": item.get("take_profit_pct", 0.15),
