@@ -545,7 +545,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted, computed, watch, nextTick } from 'vue'
+import { ref, reactive, onMounted, onUnmounted, computed, watch, nextTick } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Search, Refresh, Plus, MoreFilled, Upload, Loading, WarningFilled, Edit, Delete, ArrowLeft, ArrowRight, Download } from '@element-plus/icons-vue'
 import { useAccountStore } from '../stores/account'
@@ -1703,11 +1703,29 @@ const handleDsaAnalysisSelected = async () => {
 import { onUnmounted } from 'vue'
 onUnmounted(() => {
   if (progressPollingTimer) { clearInterval(progressPollingTimer); progressPollingTimer = null }
+  if (watchlistPriceTimer) { clearInterval(watchlistPriceTimer); watchlistPriceTimer = null }
   if (resizeMouseMoveRef.value) document.removeEventListener('mousemove', resizeMouseMoveRef.value)
   if (resizeMouseUpRef.value) document.removeEventListener('mouseup', resizeMouseUpRef.value)
   isResizing.value = false
   destroyKlineChart()
 })
+
+// 静默刷新候选列表现价（从内存 PriceCache 取，不调用 SDK）
+let watchlistPriceTimer = null
+const startWatchlistPriceRefresh = () => {
+  watchlistPriceTimer = setInterval(async () => {
+    try {
+      if (!selectedGroupId.value) return
+      let url = `/api/v1/ui/${currentAccountId.value}/watchlist?group_id=${selectedGroupId.value}`
+      if (filterStatus.value) url += `&status=${filterStatus.value}`
+      const res = await fetch(url)
+      const data = await res.json()
+      currentStocks.value = data.watchlist || []
+    } catch (e) {
+      // 静默失败
+    }
+  }, 10000)  // 每 10 秒
+}
 
 onMounted(async () => {
   await loadStrategies()
@@ -1717,6 +1735,8 @@ onMounted(async () => {
     await loadCurrentGroupStocks()
   }
   await checkTempCandidates()
+  // 启动定时静默刷新（从内存缓存取价）
+  startWatchlistPriceRefresh()
 })
 </script>
 
