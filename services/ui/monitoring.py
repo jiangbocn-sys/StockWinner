@@ -584,10 +584,10 @@ async def submit_manual_order(
         (account_id, normalized_code, manual_group_id)
     )
     if existing:
-        # 已在"手动下单"分组中，更新价格和数量
+        # 已在"手动下单"分组中，更新价格、数量和信号类型
         await db.update(
             "watchlist",
-            {"buy_price": price, "target_quantity": quantity, "status": "pending", "updated_at": format_china_time()},
+            {"trigger_price": price, "target_quantity": quantity, "signal_type": trade_type, "status": "pending", "updated_at": format_china_time()},
             "id = ?",
             (existing['id'],)
         )
@@ -597,8 +597,9 @@ async def submit_manual_order(
             "account_id": account_id,
             "stock_code": normalized_code,
             "stock_name": stock_name or normalized_code,
-            "buy_price": price,
+            "trigger_price": price,
             "target_quantity": quantity,
+            "signal_type": trade_type,
             "status": "pending",
             "source_type": "manual",
             "group_id": manual_group_id,
@@ -625,13 +626,13 @@ async def immediate_sell_position(
     account_id: str = Path(..., description="账户 ID"),
     stock_code: str = Path(..., description="股票代码"),
 ):
-    """交易时间内一键清仓：获取买盘价格，按持仓数量匹配价格，立即以对手价卖出
+    """交易时间内一键清仓：获取买盘价格，按持仓数量，立即以买一价卖出
 
     逻辑：
     1. 检查是否在交易时间
-    2. 获取买一至买五价格及对应挂单量
-    3. 从买一开始匹配，计算可成交均价
-    4. 以匹配价格提交卖出委托
+    2. 获取买一价
+    3. 直接调用 gateway.sell() 以买一价卖出全部可卖持仓
+    4. 非交易时间才创建 watchlist pending 等待开盘执行
     """
     from services.common.stock_code import normalize_stock_code
     normalized_code = normalize_stock_code(stock_code)
@@ -640,20 +641,6 @@ async def immediate_sell_position(
     account = await db.fetchone("SELECT * FROM accounts WHERE account_id = ? AND is_active = 1", (account_id,))
     if not account:
         raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
-
-    # 检查交易时间
-    from services.trading.trading_hours import can_trade, get_trading_phase, get_trading_status
-    trading_status = get_trading_status()
-
-    if not can_trade():
-        phase = get_trading_phase()
-        return {
-            "success": False,
-            "trading_time": False,
-            "phase": phase.value,
-            "phase_desc": trading_status["phase_desc"],
-            "message": f"当前非交易时间（{trading_status['phase_desc']}），已创建卖出委托，将在开盘后执行",
-        }
 
     # 检查持仓
     position = await db.fetchone(
@@ -673,7 +660,7 @@ async def immediate_sell_position(
     if conn_mgr.get_state() != ConnectionState.CONNECTED:
         return {"success": False, "message": "券商服务器连接失败，请检查网络后重试"}
 
-    # 获取实时行情（包含买盘价格）
+    # 获取实时行情
     try:
         from services.trading.gateway import get_gateway
         gateway = await get_gateway()
@@ -682,70 +669,101 @@ async def immediate_sell_position(
         bid_levels = market_data.bid[:5] if market_data.bid else []
         current_price = market_data.current_price
 
-        if not bid_levels or all(p == 0 for p in bid_levels):
-            # 买盘数据不可用，使用现价
-            sell_price = round(current_price * 0.999, 2) if current_price > 0 else 0
-            price_source = "现价-0.1%"
-        else:
-            # 以买一价成交（简化：未查询每档挂单量）
-            sell_price = bid_levels[0]
-            price_source = "买一价"
+        # 检查交易时间
+        from services.trading.trading_hours import can_trade, get_trading_phase, get_trading_status
+        trading_status = get_trading_status()
 
-        # 确保价格是 0.01 的整数倍
-        sell_price = round(sell_price, 2)
-        if sell_price <= 0:
-            return {"success": False, "message": "无法获取有效卖出价格"}
+        if can_trade():
+            # 交易时间内：直接以买一价卖出
+            if not bid_levels or all(p == 0 for p in bid_levels):
+                sell_price = round(current_price * 0.999, 2) if current_price > 0 else 0
+                price_source = "现价-0.1%"
+            else:
+                sell_price = bid_levels[0]
+                price_source = "买一价"
 
-        # 提交卖出委托（以计算出的价格）
-        from services.common.timezone import format_china_time
+            sell_price = round(sell_price, 2)
+            if sell_price <= 0:
+                return {"success": False, "message": "无法获取有效卖出价格"}
 
-        # 创建 watchlist 卖出信号
-        existing_group = await db.fetchone(
-            "SELECT id FROM candidate_groups WHERE account_id = ? AND name = '手动下单' AND group_type = 'manual'",
-            (account_id,)
-        )
-        manual_group_id = existing_group['id'] if existing_group else await db.insert("candidate_groups", {
-            "account_id": account_id,
-            "name": "手动下单",
-            "group_type": "manual",
-        })
-
-        existing = await db.fetchone(
-            "SELECT id FROM watchlist WHERE account_id = ? AND stock_code = ? AND group_id = ? AND status IN ('pending', 'watching', 'bought')",
-            (account_id, normalized_code, manual_group_id)
-        )
-        if existing:
-            await db.update(
-                "watchlist",
-                {"buy_price": sell_price, "target_quantity": sell_qty, "status": "pending", "updated_at": format_china_time()},
-                "id = ?",
-                (existing['id'],)
+            # 直接执行卖出
+            from services.trading.execution_service import get_trade_execution_service
+            execution = get_trade_execution_service(account_id)
+            result = await execution.execute_sell(
+                stock_code=normalized_code,
+                stock_name=market_data.stock_name or normalized_code,
+                price=sell_price,
+                target_quantity=sell_qty,
+                trigger_source="manual_clear",
             )
+
+            if result["success"]:
+                return {
+                    "success": True,
+                    "trading_time": True,
+                    "stock_code": normalized_code,
+                    "stock_name": market_data.stock_name,
+                    "sell_price": sell_price,
+                    "sell_quantity": result.get("quantity", sell_qty),
+                    "price_source": price_source,
+                    "bid_levels": bid_levels,
+                    "message": f"清仓卖出成功：{normalized_code} {result['quantity']}股 @ ¥{result['price']}（{price_source}）",
+                }
+            else:
+                return {"success": False, "message": f"清仓卖出失败：{result.get('message', '未知错误')}"}
+
         else:
-            await db.insert("watchlist", {
+            # 非交易时间：创建 watchlist pending 等待开盘
+            phase = get_trading_phase()
+            from services.common.timezone import format_china_time
+
+            existing_group = await db.fetchone(
+                "SELECT id FROM candidate_groups WHERE account_id = ? AND name = '手动下单' AND group_type = 'manual'",
+                (account_id,)
+            )
+            manual_group_id = existing_group['id'] if existing_group else await db.insert("candidate_groups", {
                 "account_id": account_id,
-                "stock_code": normalized_code,
-                "stock_name": market_data.stock_name or normalized_code,
-                "buy_price": sell_price,
-                "target_quantity": sell_qty,
-                "status": "pending",
-                "source_type": "manual",
-                "group_id": manual_group_id,
-                "created_at": format_china_time(),
-                "updated_at": format_china_time(),
+                "name": "手动下单",
+                "group_type": "manual",
             })
 
-        return {
-            "success": True,
-            "trading_time": True,
-            "stock_code": normalized_code,
-            "stock_name": market_data.stock_name,
-            "sell_price": sell_price,
-            "sell_quantity": sell_qty,
-            "price_source": price_source,
-            "bid_levels": bid_levels,
-            "message": f"已提交清仓卖出委托：{normalized_code} {sell_qty}股 @ ¥{sell_price}（{price_source}）",
-        }
+            # 用当前买一价作为触发价
+            trigger_price = bid_levels[0] if bid_levels and any(p > 0 for p in bid_levels) else current_price
+            trigger_price = round(trigger_price, 2) if trigger_price else 0
+
+            existing = await db.fetchone(
+                "SELECT id FROM watchlist WHERE account_id = ? AND stock_code = ? AND group_id = ? AND status IN ('pending', 'watching', 'bought')",
+                (account_id, normalized_code, manual_group_id)
+            )
+            if existing:
+                await db.update(
+                    "watchlist",
+                    {"trigger_price": trigger_price, "target_quantity": sell_qty, "signal_type": "sell", "status": "pending", "updated_at": format_china_time()},
+                    "id = ?",
+                    (existing['id'],)
+                )
+            else:
+                await db.insert("watchlist", {
+                    "account_id": account_id,
+                    "stock_code": normalized_code,
+                    "stock_name": market_data.stock_name or normalized_code,
+                    "buy_price": trigger_price,
+                    "target_quantity": sell_qty,
+                    "signal_type": "sell",
+                    "status": "pending",
+                    "source_type": "manual",
+                    "group_id": manual_group_id,
+                    "created_at": format_china_time(),
+                    "updated_at": format_china_time(),
+                })
+
+            return {
+                "success": False,
+                "trading_time": False,
+                "phase": phase.value,
+                "phase_desc": trading_status["phase_desc"],
+                "message": f"当前非交易时间（{trading_status['phase_desc']}），已创建清仓委托（触发价 ¥{trigger_price}），将在开盘后执行",
+            }
 
     except Exception as e:
         return {"success": False, "message": f"清仓失败：{str(e)}"}

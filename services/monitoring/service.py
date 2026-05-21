@@ -16,7 +16,7 @@ import time
 import threading
 from typing import Dict, List, Optional, Any
 from services.common.database import get_db_manager
-from services.common.timezone import get_china_time
+from services.common.timezone import get_china_time, format_china_time
 from services.trading.gateway import get_gateway, MarketData
 from services.trading.execution_service import get_trade_execution_service
 from services.trading.strategy_executor import get_strategy_executor
@@ -560,7 +560,7 @@ class TradingMonitor:
             "stock_code": stock_code,
             "stock_name": stock.get("stock_name", stock_code),
             "current_price": current_price,
-            "buy_price": stock.get("buy_price", 0),
+            "trigger_price": stock.get("trigger_price", 0),
             "stop_loss_price": stock.get("stop_loss_price", 0),
             "take_profit_price": stock.get("take_profit_price", 0),
             "kline_data": kline_data,
@@ -647,7 +647,7 @@ class TradingMonitor:
 
         if ts:
             strategy_type = ts.get("strategy_type", "fixed")
-            avg_cost = stock.get("buy_price", 0) or stock.get("current_price", 0)
+            avg_cost = stock.get("trigger_price", 0) or stock.get("current_price", 0)
 
             # --- 动态策略：回撤止盈（trailing_stop）---
             if strategy_type == "trailing_stop":
@@ -760,9 +760,11 @@ class TradingMonitor:
         """
         db = get_db_manager()
         stock_code = stock.get('stock_code')
-        buy_price = stock.get('buy_price', 0)
+        trigger_price = stock.get('trigger_price', 0)
         target_quantity = stock.get('target_quantity') or 0
         status = stock.get('status')
+        source_type = stock.get('source_type', 'screening')
+        signal_type = stock.get('signal_type', 'buy')
 
         # 获取交易网关
         gateway = None
@@ -784,14 +786,46 @@ class TradingMonitor:
         if current_price is None:
             return
 
-        # 检查买入条件
+        # 检查 pending 信号
         if status == 'pending':
-            if buy_price > 0 and current_price <= buy_price:
-                get_logger("monitor").log_event("buy_signal",
-                    f"触发买入信号：{stock_code}, 目标价：{buy_price:.2f}, 当前价：{current_price:.2f}",
-                    stock_code=stock_code, buy_price=buy_price, current_price=current_price)
-                await self._create_pending_signal(account_id, stock, 'buy', current_price, target_quantity)
-                await self._execute_buy_signal(account_id, stock, current_price, target_quantity)
+            # 手动创建的 pending 信号（source_type='manual'）：按 signal_type 区分买入/卖出
+            if source_type == 'manual':
+                if signal_type == 'sell':
+                    # 手动卖出 pending 信号（减仓/清仓）
+                    # 使用 watchlist 中保存的 trigger_price 作为卖出限价
+                    sell_price = trigger_price if trigger_price > 0 else current_price
+                    get_logger("monitor").log_event("manual_sell_signal",
+                        f"执行手动卖出信号：{stock_code}, 限价：{sell_price:.2f}, 数量：{target_quantity}",
+                        stock_code=stock_code, trigger_price=sell_price, quantity=target_quantity)
+                    await self._execute_sell_signal(
+                        account_id,
+                        {"stock_code": stock_code, "stock_name": stock.get("stock_name", stock_code)},
+                        sell_price,
+                        "sell",
+                        target_quantity,
+                        trigger_source="manual",
+                    )
+                    await db.update(
+                        "watchlist",
+                        {"status": "sold", "updated_at": format_china_time()},
+                        "account_id = ? AND stock_code = ?",
+                        (account_id, stock_code),
+                    )
+                else:
+                    # 手动买入 pending 信号（加仓）
+                    if trigger_price > 0 and current_price <= trigger_price:
+                        get_logger("monitor").log_event("manual_buy_signal",
+                            f"执行手动买入信号：{stock_code}, 触发价：{trigger_price:.2f}, 现价：{current_price:.2f}",
+                            stock_code=stock_code, trigger_price=trigger_price, current_price=current_price)
+                        await self._execute_buy_signal(account_id, stock, trigger_price, target_quantity)
+            else:
+                # 选股策略创建的 pending 信号（原有逻辑）
+                if trigger_price > 0 and current_price <= trigger_price:
+                    get_logger("monitor").log_event("buy_signal",
+                        f"触发买入信号：{stock_code}, 触发价：{trigger_price:.2f}, 当前价：{current_price:.2f}",
+                        stock_code=stock_code, trigger_price=trigger_price, current_price=current_price)
+                    await self._create_pending_signal(account_id, stock, 'buy', current_price, target_quantity)
+                    await self._execute_buy_signal(account_id, stock, trigger_price, target_quantity)
 
         # 检查止损/止盈条件（动态策略引擎）
         elif status == 'watching':
@@ -839,10 +873,12 @@ class TradingMonitor:
             kline_cache: K 线缓存
         """
         stock_code = stock.get('stock_code')
-        buy_price = stock.get('buy_price', 0)
+        trigger_price = stock.get('trigger_price', 0)
         target_quantity = stock.get('target_quantity') or 0
         status = stock.get('status')
         current_price = stock.get('current_price')
+        source_type = stock.get('source_type', 'screening')
+        signal_type = stock.get('signal_type', 'buy')
 
         db = get_db_manager()
 
@@ -855,14 +891,73 @@ class TradingMonitor:
                                         stock_code=stock_code, current_price=current_price)
             return
 
-        # 检查买入条件
+        # 检查 pending 信号
         if status == 'pending':
-            if buy_price > 0 and current_price <= buy_price:
-                get_logger("monitor").log_event("buy_signal",
-                    f"触发买入信号：{stock_code}, 目标价：{buy_price:.2f}, 当前价：{current_price:.2f}",
-                    stock_code=stock_code, buy_price=buy_price, current_price=current_price)
-                await self._create_pending_signal(account_id, stock, 'buy', current_price, target_quantity)
-                await self._execute_buy_signal(account_id, stock, current_price, target_quantity)
+            # 手动创建的 pending 信号（source_type='manual'）：按 signal_type 区分买入/卖出
+            # trigger_price 作为触发价（用户可接受的最高买入价 / 最低卖出价）
+            if source_type == 'manual':
+                if signal_type == 'sell':
+                    # 手动卖出：现价 >= 触发价 → 执行，以触发价限价卖出
+                    if trigger_price > 0 and current_price >= trigger_price:
+                        get_logger("monitor").log_event("manual_sell_signal",
+                            f"执行手动卖出信号：{stock_code}, 触发价：{trigger_price:.2f}, 现价：{current_price:.2f}, 数量：{target_quantity}",
+                            stock_code=stock_code, trigger_price=trigger_price, current_price=current_price, quantity=target_quantity)
+                        await self._execute_sell_signal(
+                            account_id,
+                            {"stock_code": stock_code, "stock_name": stock.get("stock_name", stock_code)},
+                            trigger_price,
+                            "sell",
+                            target_quantity,
+                            trigger_source="manual",
+                        )
+                        await db.update(
+                            "watchlist",
+                            {"status": "sold", "updated_at": format_china_time()},
+                            "account_id = ? AND stock_code = ?",
+                            (account_id, stock_code),
+                        )
+                    elif trigger_price > 0:
+                        get_logger("monitor").log_event("manual_sell_wait",
+                            f"手动卖出等待：{stock_code}, 触发价：{trigger_price:.2f}, 现价：{current_price:.2f}（未达触发价）",
+                            stock_code=stock_code, trigger_price=trigger_price, current_price=current_price)
+                    else:
+                        # 无触发价，直接以现价卖出
+                        get_logger("monitor").log_event("manual_sell_no_price",
+                            f"手动卖出（无触发价）：{stock_code}, 现价：{current_price:.2f}",
+                            stock_code=stock_code, current_price=current_price)
+                        await self._execute_sell_signal(
+                            account_id,
+                            {"stock_code": stock_code, "stock_name": stock.get("stock_name", stock_code)},
+                            current_price,
+                            "sell",
+                            target_quantity,
+                            trigger_source="manual",
+                        )
+                        await db.update(
+                            "watchlist",
+                            {"status": "sold", "updated_at": format_china_time()},
+                            "account_id = ? AND stock_code = ?",
+                            (account_id, stock_code),
+                        )
+                else:
+                    # 手动买入：现价 <= 触发价 → 执行，以触发价限价买入
+                    if trigger_price > 0 and current_price <= trigger_price:
+                        get_logger("monitor").log_event("manual_buy_signal",
+                            f"执行手动买入信号：{stock_code}, 触发价：{trigger_price:.2f}, 现价：{current_price:.2f}",
+                            stock_code=stock_code, trigger_price=trigger_price, current_price=current_price)
+                        await self._execute_buy_signal(account_id, stock, trigger_price, target_quantity)
+                    elif trigger_price > 0:
+                        get_logger("monitor").log_event("manual_buy_wait",
+                            f"手动买入等待：{stock_code}, 触发价：{trigger_price:.2f}, 现价：{current_price:.2f}（高于触发价）",
+                            stock_code=stock_code, trigger_price=trigger_price, current_price=current_price)
+            else:
+                # 选股策略创建的 pending 信号（原有逻辑）
+                if trigger_price > 0 and current_price <= trigger_price:
+                    get_logger("monitor").log_event("buy_signal",
+                        f"触发买入信号：{stock_code}, 触发价：{trigger_price:.2f}, 当前价：{current_price:.2f}",
+                        stock_code=stock_code, trigger_price=trigger_price, current_price=current_price)
+                    await self._create_pending_signal(account_id, stock, 'buy', current_price, target_quantity)
+                    await self._execute_buy_signal(account_id, stock, trigger_price, target_quantity)
 
         # 检查止损/止盈条件（动态策略引擎）
         elif status in ('watching', 'bought'):
@@ -1029,7 +1124,7 @@ class TradingMonitor:
             )
         else:
             get_logger("monitor").warn("monitor", f"买入失败: {result['message']}",
-                                        stock_code=stock_code, message=result['message'])
+                                        stock_code=stock_code, reason=result['message'])
             # 信号 pending → cancelled
             await self._update_signal_status(
                 account_id, stock_code, 'cancelled', target_quantity
@@ -1111,7 +1206,7 @@ class TradingMonitor:
             )
         else:
             get_logger("monitor").warn("monitor", f"卖出失败: {result['message']}",
-                                        stock_code=stock_code, message=result['message'])
+                                        stock_code=stock_code, reason=result['message'])
             # 信号 pending → cancelled
             await self._update_signal_status(
                 account_id, stock_code, 'cancelled', 0

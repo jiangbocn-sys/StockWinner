@@ -142,12 +142,12 @@
               <el-table-column prop="stock_code" label="股票代码" width="120" sortable />
               <el-table-column prop="stock_name" label="股票名称" width="120" sortable />
               <el-table-column prop="reason" label="入选原因" min-width="180" show-overflow-tooltip />
-              <el-table-column prop="buy_price" label="买入价" width="90" align="right" sortable>
-                <template #default="{ row }">¥{{ row.buy_price?.toFixed(2) }}</template>
+              <el-table-column prop="trigger_price" label="触发价" width="90" align="right" sortable>
+                <template #default="{ row }">¥{{ row.trigger_price?.toFixed(2) }}</template>
               </el-table-column>
               <el-table-column prop="current_price" label="现价" width="90" align="right" sortable>
                 <template #default="{ row }">
-                  <span :style="{ color: row.current_price > row.buy_price ? '#f56c6c' : row.current_price > 0 && row.current_price < row.buy_price ? '#67c23a' : '' }">
+                  <span :style="{ color: row.current_price > row.trigger_price ? '#f56c6c' : row.current_price > 0 && row.current_price < row.trigger_price ? '#67c23a' : '' }">
                     {{ row.current_price > 0 ? '¥' + row.current_price.toFixed(2) : '-' }}
                   </span>
                 </template>
@@ -282,7 +282,7 @@
           </el-form-item>
 
           <el-form-item label="买入价格">
-            <el-input-number v-model="addStockForm.buyPrice" :precision="2" :step="0.1" :min="0" />
+            <el-input-number v-model="addStockForm.triggerPrice" :precision="2" :step="0.1" :min="0" />
           </el-form-item>
           <el-form-item label="止损价格">
             <el-input-number v-model="addStockForm.stopLoss" :precision="2" :step="0.1" :min="0" />
@@ -357,8 +357,8 @@
           <el-table-column prop="stock_code" label="股票代码" width="120" />
           <el-table-column prop="stock_name" label="股票名称" width="120" />
           <el-table-column prop="reason" label="入选原因" min-width="150" show-overflow-tooltip />
-          <el-table-column prop="buy_price" label="买入价" width="80" align="right">
-            <template #default="{ row }">¥{{ row.buy_price?.toFixed(2) }}</template>
+          <el-table-column prop="trigger_price" label="触发价" width="80" align="right">
+            <template #default="{ row }">¥{{ row.trigger_price?.toFixed(2) }}</template>
           </el-table-column>
           <el-table-column prop="match_score" label="匹配度" width="80" align="right">
             <template #default="{ row }">{{ (row.match_score * 100).toFixed(0) }}%</template>
@@ -378,7 +378,7 @@
         <el-form :model="editingStock" label-width="100px">
           <el-form-item label="股票代码"><el-input v-model="editingStock.stock_code" disabled /></el-form-item>
           <el-form-item label="股票名称"><el-input v-model="editingStock.stock_name" /></el-form-item>
-          <el-form-item label="买入价格"><el-input-number v-model="editingStock.buy_price" :precision="2" :step="0.1" /></el-form-item>
+          <el-form-item label="买入价格"><el-input-number v-model="editingStock.trigger_price" :precision="2" :step="0.1" /></el-form-item>
           <el-form-item label="止损价格"><el-input-number v-model="editingStock.stop_loss_price" :precision="2" :step="0.1" /></el-form-item>
           <el-form-item label="止盈价格"><el-input-number v-model="editingStock.take_profit_price" :precision="2" :step="0.1" /></el-form-item>
           <el-form-item label="数量">
@@ -625,7 +625,7 @@ const watchlistColumns = [
   { label: '股票代码', prop: 'stock_code' },
   { label: '股票名称', prop: 'stock_name' },
   { label: '入选原因', prop: 'reason' },
-  { label: '买入价', prop: 'buy_price' },
+  { label: '触发价', prop: 'trigger_price' },
   { label: '现价', prop: 'current_price' },
   { label: '止损价', prop: 'stop_loss_price' },
   { label: '止盈价', prop: 'take_profit_price' },
@@ -709,7 +709,7 @@ const addStockForm = reactive({
   reason: '手动添加'
 })
 const strategySelectForm = reactive({ strategyId: null, useLocal: true, stockScope: 'group' })
-const editingStock = reactive({ stock_code: '', stock_name: '', buy_price: 0, stop_loss_price: 0, take_profit_price: 0, target_quantity: null, status: 'pending' })
+const editingStock = reactive({ stock_code: '', stock_name: '', trigger_price: 0, stop_loss_price: 0, take_profit_price: 0, target_quantity: null, status: 'pending' })
 
 // 候选
 const candidates = ref([])
@@ -1137,7 +1137,7 @@ const submitAddStock = async () => {
         stock_name: stockName,
         group_id: selectedGroupId.value,
         status: addStockForm.status,
-        buy_price: addStockForm.buyPrice,
+        trigger_price: addStockForm.triggerPrice,
         stop_loss_price: addStockForm.stopLoss,
         take_profit_price: addStockForm.takeProfit,
         target_quantity: addStockForm.quantity,
@@ -1164,7 +1164,7 @@ const submitAddStock = async () => {
 const resetAddStockForm = () => {
   addStockForm.selectedStockCode = ''
   addStockForm.status = 'watching'
-  addStockForm.buyPrice = null
+  addStockForm.triggerPrice = null
   addStockForm.stopLoss = null
   addStockForm.takeProfit = null
   addStockForm.quantity = null
@@ -1442,7 +1442,7 @@ const saveStock = async () => {
       body: JSON.stringify({
         group_id: selectedGroupId.value,
         stock_name: editingStock.stock_name,
-        buy_price: editingStock.buy_price,
+        trigger_price: editingStock.trigger_price,
         stop_loss_price: editingStock.stop_loss_price,
         take_profit_price: editingStock.take_profit_price,
         target_quantity: editingStock.target_quantity,

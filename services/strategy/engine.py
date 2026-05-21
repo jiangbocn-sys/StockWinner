@@ -472,7 +472,7 @@ class StrategyEngine:
 
         # 2. 查询账户下所有待交易/监控中的股票（不限组，用于跨组去重）
         existing_rows = await db.fetchall(
-            "SELECT stock_code, buy_price, stop_loss_price, take_profit_price FROM watchlist WHERE account_id = ? AND status IN ('pending', 'watching')",
+            "SELECT stock_code, trigger_price, stop_loss_price, take_profit_price FROM watchlist WHERE account_id = ? AND status IN ('pending', 'watching')",
             (account_id,)
         )
         existing = {row["stock_code"]: row for row in existing_rows}
@@ -483,7 +483,7 @@ class StrategyEngine:
 
         for signal in signals:
             code = signal["stock_code"]
-            new_price = signal.get("buy_price")
+            new_price = signal.get("trigger_price")
 
             # 当日已买入 → 跳过
             if code in bought_codes:
@@ -498,7 +498,7 @@ class StrategyEngine:
 
             if code in existing:
                 old = existing[code]
-                old_price = old.get("buy_price")
+                old_price = old.get("trigger_price")
 
                 # 新价格更优的判断：
                 # 1. 原信号无价格但新信号有 → 更新
@@ -511,7 +511,7 @@ class StrategyEngine:
 
                 if should_update:
                     await db.execute(
-                        "UPDATE watchlist SET buy_price = ?, stop_loss_price = ?, take_profit_price = ?, "
+                        "UPDATE watchlist SET trigger_price = ?, stop_loss_price = ?, take_profit_price = ?, "
                         "reason = ?, strategy_id = ?, status = 'pending', created_at = ?, updated_at = ? WHERE account_id = ? AND stock_code = ?",
                         (new_price, new_sl, new_tp, signal.get("reason", "价格更优"), strategy_id, now, now, account_id, code)
                     )
@@ -519,7 +519,7 @@ class StrategyEngine:
                     get_logger("strategy").log_event("strategy_signal_update",
                         f"策略信号更新为 pending: {code}",
                         account_id=account_id, stock_code=code,
-                        strategy_id=strategy_id, buy_price=new_price,
+                        strategy_id=strategy_id, trigger_price=new_price,
                         reason=signal.get("reason", "价格更优"))
                 else:
                     # 价格更高或无新价格 → 保留原信号
@@ -538,7 +538,7 @@ class StrategyEngine:
                     "stock_code": code,
                     "stock_name": signal.get("stock_name", code),
                     "reason": signal.get("reason", "策略信号"),
-                    "buy_price": new_price,
+                    "trigger_price": new_price,
                     "stop_loss_price": new_sl,
                     "take_profit_price": new_tp,
                     "target_quantity": signal.get("target_quantity", 0),
@@ -550,7 +550,7 @@ class StrategyEngine:
                 get_logger("strategy").log_event("strategy_signal_add",
                     f"策略新增 pending 信号: {code}",
                     account_id=account_id, stock_code=code,
-                    strategy_id=strategy_id, buy_price=new_price,
+                    strategy_id=strategy_id, trigger_price=new_price,
                     reason=signal.get("reason", "策略信号"))
 
                 # 发送信号触发通知
@@ -572,7 +572,7 @@ class StrategyEngine:
                             "stock_code": code,
                             "stock_name": signal.get("stock_name", code),
                             "price": f"{new_price:.2f}" if new_price else "-",
-                            "buy_price": f"{new_price:.2f}" if new_price else "-",
+                            "trigger_price": f"{new_price:.2f}" if new_price else "-",
                             "stop_loss_price": f"{new_sl:.2f}" if new_sl else "-",
                             "take_profit_price": f"{new_tp:.2f}" if new_tp else "-",
                             "reason": signal.get("reason", "策略信号"),
@@ -604,7 +604,7 @@ class StrategyEngine:
                             "stock_code": code,
                             "stock_name": signal.get("stock_name", code),
                             "price": f"{new_price:.2f}" if new_price else "-",
-                            "buy_price": f"{new_price:.2f}" if new_price else "-",
+                            "trigger_price": f"{new_price:.2f}" if new_price else "-",
                             "stop_loss_price": f"{new_sl:.2f}" if new_sl else "-",
                             "take_profit_price": f"{new_tp:.2f}" if new_tp else "-",
                             "reason": signal.get("reason", "价格更优"),

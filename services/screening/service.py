@@ -993,7 +993,7 @@ class ScreeningService:
                         'stock_code': signal['stock_code'],
                         'stock_name': signal['stock_name'],
                         'reason': signal.get('reason', ''),
-                        'current_price': signal.get('buy_price') or 0,
+                        'current_price': signal.get('trigger_price') or 0,
                         'match_score': 1.0,
                     },
                     strategy_config={},
@@ -1102,7 +1102,7 @@ class ScreeningService:
             "stock_code": candidate['stock_code'],
             "stock_name": candidate.get('stock_name', ''),
             "reason": candidate.get('reason', ''),
-            "buy_price": current_price,
+            "trigger_price": current_price,
             "stop_loss_price": stop_loss,
             "take_profit_price": take_profit,
             "target_quantity": target_quantity,
@@ -1117,7 +1117,7 @@ class ScreeningService:
             account_id=account_id, stock_code=candidate['stock_code'],
             stock_name=candidate.get('stock_name', ''),
             strategy_id=strategy.get("id") if strategy else strategy_id,
-            buy_price=current_price, stop_loss=stop_loss,
+            trigger_price=current_price, stop_loss=stop_loss,
             take_profit=take_profit, target_quantity=target_quantity)
 
     async def _add_to_temp_candidates(
@@ -1183,7 +1183,7 @@ class ScreeningService:
             "stock_code": candidate['stock_code'],
             "stock_name": candidate.get('stock_name', ''),
             "reason": candidate.get('reason', ''),
-            "buy_price": current_price,
+            "trigger_price": current_price,
             "stop_loss_price": stop_loss,
             "take_profit_price": take_profit,
             "target_quantity": target_quantity,
@@ -1234,7 +1234,7 @@ class ScreeningService:
                         "stock_code": stock_code,
                         "stock_name": candidate['stock_name'],
                         "reason": candidate['reason'],
-                        "buy_price": candidate['buy_price'],
+                        "trigger_price": candidate['trigger_price'],
                         "stop_loss_price": candidate['stop_loss_price'],
                         "take_profit_price": candidate['take_profit_price'],
                         "target_quantity": candidate['target_quantity'],
@@ -1248,7 +1248,7 @@ class ScreeningService:
                         account_id=account_id, stock_code=stock_code,
                         stock_name=candidate['stock_name'],
                         strategy_id=candidate['strategy_id'],
-                        buy_price=candidate['buy_price'])
+                        trigger_price=candidate['trigger_price'])
                 else:
                     result["rejected"] += 1
 
@@ -1271,7 +1271,7 @@ class ScreeningService:
                         "stock_code": candidate['stock_code'],
                         "stock_name": candidate['stock_name'],
                         "reason": candidate['reason'],
-                        "buy_price": candidate['buy_price'],
+                        "trigger_price": candidate['trigger_price'],
                         "stop_loss_price": candidate['stop_loss_price'],
                         "take_profit_price": candidate['take_profit_price'],
                         "target_quantity": candidate['target_quantity'],

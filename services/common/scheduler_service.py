@@ -1331,11 +1331,13 @@ class SchedulerService:
 
                 # 将该账户 watchlist 中 pending 状态重置为 watching
                 # 但排除今天有买入的股票（T+1 规则，次日才能交易）
+                # 同时排除手动卖出信号（清仓/减仓），避免监控程序执行前被重置丢失
                 from services.common.timezone import get_china_time
                 today = get_china_time().strftime("%Y-%m-%d")
                 result = await db.execute(
                     """UPDATE watchlist SET status = 'watching'
                        WHERE account_id = ? AND status = 'pending'
+                       AND NOT (source_type = 'manual' AND signal_type = 'sell')
                        AND stock_code NOT IN (
                            SELECT stock_code FROM trade_records
                            WHERE account_id = ? AND trade_type = 'buy'
@@ -1457,8 +1459,9 @@ class SchedulerService:
                     )
 
                 # 策略执行前：将该组 pending 状态重置为 watching（防重复买入）
+                # 同时排除手动卖出信号
                 await db.execute(
-                    "UPDATE watchlist SET status = 'watching' WHERE account_id = ? AND group_id = ? AND status = 'pending'",
+                    "UPDATE watchlist SET status = 'watching' WHERE account_id = ? AND group_id = ? AND status = 'pending' AND NOT (source_type = 'manual' AND signal_type = 'sell')",
                     (task["account_id"], task["group_id"])
                 )
 

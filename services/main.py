@@ -31,7 +31,7 @@ from services._version import VERSION, set_start_time
 _server_start_time = None
 
 # 数据库迁移版本号 —— 每次新增迁移时递增
-MIGRATION_VERSION = 10
+MIGRATION_VERSION = 12
 
 
 @asynccontextmanager
@@ -669,6 +669,17 @@ async def lifespan(app: FastAPI):
         )""",
         "CREATE INDEX IF NOT EXISTS idx_strategy_versions_strategy ON strategy_versions(strategy_id)",
         "CREATE INDEX IF NOT EXISTS idx_strategy_versions_account ON strategy_versions(account_id, strategy_id)",
+    ])
+
+    # v11: watchlist 添加 signal_type 字段（2026-05-21）
+    await run_migration(11, "watchlist 添加买卖信号类型", [
+        "ALTER TABLE watchlist ADD COLUMN signal_type TEXT DEFAULT 'buy'",
+        "UPDATE watchlist SET signal_type = 'sell' WHERE source_type = 'manual' AND target_quantity > 0 AND stock_code IN (SELECT stock_code FROM stock_positions WHERE quantity > 0 AND account_id = watchlist.account_id)",
+    ])
+
+    # v12: watchlist 重命名 buy_price → trigger_price（2026-05-21）
+    await run_migration(12, "watchlist 字段重命名", [
+        "ALTER TABLE watchlist RENAME COLUMN buy_price TO trigger_price",
     ])
 
     # v7 数据源配置 seed（从 registry.json 初始化）

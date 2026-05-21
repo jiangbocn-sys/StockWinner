@@ -166,7 +166,7 @@ async def get_strategy_selections(
         raise HTTPException(status_code=404, detail="策略不存在")
 
     selections = await db.fetchall("""
-        SELECT w.stock_code, w.stock_name, w.selected_at, w.buy_price, w.bought,
+        SELECT w.stock_code, w.stock_name, w.selected_at, w.trigger_price, w.bought,
                t.price as buy_price_actual, t.trade_time as buy_time,
                s.price as sell_price, s.trade_time as sell_time, s.profit_loss
         FROM watchlist w

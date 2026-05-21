@@ -120,7 +120,7 @@ async def get_agent_spec():
             },
             "watchlist": {
                 "description": "观察清单（候选股组 + 信号）",
-                "key_columns": ["account_id", "stock_code", "stock_name", "group_id", "source_type", "status", "current_price", "buy_price", "stop_loss_price", "take_profit_price", "bought", "strategy_id"],
+                "key_columns": ["account_id", "stock_code", "stock_name", "group_id", "source_type", "status", "current_price", "trigger_price", "stop_loss_price", "take_profit_price", "bought", "strategy_id"],
                 "note": "status: pending/watching/bought/sold/ignored; source_type: manual/strategy; bought=1 表示已实际买入",
                 "query": "SELECT * FROM watchlist WHERE account_id = ? AND status = ?",
             },

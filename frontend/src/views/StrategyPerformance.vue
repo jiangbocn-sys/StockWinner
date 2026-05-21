@@ -136,7 +136,7 @@
             <template #default="{ row }">{{ (row.selected_at || '').split('T')[0] }}</template>
           </el-table-column>
           <el-table-column label="选出价" width="100" align="right">
-            <template #default="{ row }">¥{{ row.buy_price || '-' }}</template>
+            <template #default="{ row }">¥{{ row.trigger_price || '-' }}</template>
           </el-table-column>
           <el-table-column label="买入价" width="100" align="right">
             <template #default="{ row }">¥{{ row.buy_price_actual || '-' }}</template>
@@ -211,7 +211,7 @@ const selectionColumns = [
   { label: '代码', prop: 'stock_code' },
   { label: '名称', prop: 'stock_name' },
   { label: '选出日期', prop: 'selected_at' },
-  { label: '选出价', prop: 'buy_price' },
+  { label: '选出价', prop: 'trigger_price' },
   { label: '买入价', prop: 'buy_price_actual' },
   { label: '卖出价', prop: 'sell_price' },
   { label: '盈亏', prop: 'profit_loss' },
@@ -232,7 +232,7 @@ const handleExportSelections = (format) => {
   const data = selections.value.map(s => ({
     ...s,
     selected_at: (s.selected_at || '').split('T')[0],
-    buy_price: s.buy_price != null ? '¥' + s.buy_price : '-',
+    trigger_price: s.trigger_price != null ? '¥' + s.trigger_price : '-',
     buy_price_actual: s.buy_price_actual != null ? '¥' + s.buy_price_actual : '-',
     sell_price: s.sell_price != null ? '¥' + s.sell_price : '-',
     profit_loss: s.profit_loss != null ? (s.profit_loss >= 0 ? '+' : '') + '¥' + formatNumber(Math.abs(s.profit_loss)) : '-',

@@ -773,7 +773,7 @@ async def batch_update_watchlist_status(
 async def update_watchlist_prices(
     account_id: str = Path(..., description="账户 ID"),
     stock_code: str = Path(..., description="股票代码"),
-    buy_price: Optional[float] = Body(None, description="买入价格"),
+    trigger_price: Optional[float] = Body(None, description="触发价格"),
     stop_loss_price: Optional[float] = Body(None, description="止损价格"),
     take_profit_price: Optional[float] = Body(None, description="止盈价格"),
     target_quantity: Optional[int] = Body(None, description="目标数量")
@@ -789,8 +789,8 @@ async def update_watchlist_prices(
     db = get_db_manager()
 
     update_data = {}
-    if buy_price is not None:
-        update_data["buy_price"] = buy_price
+    if trigger_price is not None:
+        update_data["trigger_price"] = trigger_price
     if stop_loss_price is not None:
         update_data["stop_loss_price"] = stop_loss_price
     if take_profit_price is not None:
@@ -818,7 +818,7 @@ async def update_watchlist_stock(
     stock_code: str = Path(..., description="股票代码"),
     group_id: int = Body(..., description="候选组 ID"),
     stock_name: Optional[str] = Body(None, description="股票名称"),
-    buy_price: Optional[float] = Body(None, description="买入价格"),
+    trigger_price: Optional[float] = Body(None, description="触发价格"),
     stop_loss_price: Optional[float] = Body(None, description="止损价格"),
     take_profit_price: Optional[float] = Body(None, description="止盈价格"),
     target_quantity: Optional[int] = Body(None, description="目标数量"),
@@ -842,7 +842,7 @@ async def update_watchlist_stock(
 
     update_data = {"updated_at": format_china_time()}
     if stock_name is not None: update_data["stock_name"] = stock_name
-    if buy_price is not None: update_data["buy_price"] = buy_price
+    if trigger_price is not None: update_data["trigger_price"] = trigger_price
     if stop_loss_price is not None: update_data["stop_loss_price"] = stop_loss_price
     if take_profit_price is not None: update_data["take_profit_price"] = take_profit_price
     if target_quantity is not None: update_data["target_quantity"] = target_quantity
@@ -1051,7 +1051,7 @@ async def add_to_watchlist_manual(
     group_id: int = Body(..., description="候选组 ID"),
     stock_name: Optional[str] = Body(None, description="股票名称"),
     status: Optional[str] = Body(None, description="状态：watching/pending/bought/sold/ignored"),
-    buy_price: Optional[float] = Body(None, description="买入价格"),
+    trigger_price: Optional[float] = Body(None, description="触发价格"),
     stop_loss_price: Optional[float] = Body(None, description="止损价格"),
     take_profit_price: Optional[float] = Body(None, description="止盈价格"),
     target_quantity: Optional[int] = Body(None, description="目标数量"),
@@ -1093,7 +1093,7 @@ async def add_to_watchlist_manual(
         "stock_code": stock_code,
         "stock_name": stock_name or stock_code,
         "reason": reason or "手动添加",
-        "buy_price": buy_price,
+        "trigger_price": trigger_price,
         "stop_loss_price": stop_loss_price,
         "take_profit_price": take_profit_price,
         "target_quantity": target_quantity,
@@ -1268,7 +1268,7 @@ async def batch_add_to_watchlist(
             "stock_code": stock_code,
             "stock_name": stock_name,
             "reason": "文件导入",
-            "buy_price": None,
+            "trigger_price": None,
             "stop_loss_price": None,
             "take_profit_price": None,
             "target_quantity": None,
