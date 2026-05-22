@@ -117,6 +117,10 @@ class SDKConnectionManager:
         self._state: ConnectionState = ConnectionState.DISCONNECTED
         self._state_lock = threading.Lock()  # 保护连接状态读写
 
+        # 连接健康检查
+        self._last_success_time: float = 0.0  # 最后一次成功查询的时间戳
+        self._health_check_interval: float = 300.0  # 健康检查间隔（秒），5 分钟
+
         # 错误信息
         self._error_message: str = ""
         self._last_error_time: Optional[str] = None
@@ -264,12 +268,32 @@ class SDKConnectionManager:
     def ensure_connected(self, timeout: float = 30.0) -> bool:
         """
         确保 SDK 连接可用（同步调用，供中间层使用）
+
+        如果连接已 CONNECTED 但长时间未成功查询（超过健康检查间隔），
+        先测试连接是否实际存活，死连接则触发重连。
         """
         logger = get_logger("sdk_connection")
         current_state = self.get_state()
 
         if current_state == ConnectionState.CONNECTED:
-            return True
+            # 连接标记为 CONNECTED，但可能已过期（TGW token 超时）
+            # 检查距离上次成功查询是否超过健康检查间隔
+            import time
+            if self._last_success_time > 0 and (time.time() - self._last_success_time) > self._health_check_interval:
+                # 需要健康检查
+                if not self._test_connection():
+                    logger.log_event("sdk_stale_detected", "检测到 SDK 连接已失效，准备重连")
+                    with self._state_lock:
+                        self._state = ConnectionState.FAILED
+                        self._consecutive_failures += 1
+                    # 下方继续重连逻辑
+                    current_state = ConnectionState.FAILED
+                else:
+                    # 连接仍然有效，更新时间戳
+                    self._last_success_time = time.time()
+                    return True
+            else:
+                return True
 
         # 需要连接/重连
         is_reconnect = current_state == ConnectionState.FAILED
@@ -281,9 +305,11 @@ class SDKConnectionManager:
         try:
             success = self._sdk_login()
             if success:
+                import time
                 with self._state_lock:
                     self._state = ConnectionState.CONNECTED
                     self._consecutive_failures = 0
+                    self._last_success_time = time.time()
                 self._stats["total_reconnects"] += 1
                 if is_reconnect:
                     logger.log_event("sdk_reconnect", "SDK 连接重连成功")
@@ -306,6 +332,11 @@ class SDKConnectionManager:
         with self._state_lock:
             self._state = ConnectionState.DISCONNECTED
             self._current_holder = None
+
+    def record_query_success(self):
+        """记录一次成功的 SDK 查询（更新健康检查时间戳）"""
+        import time
+        self._last_success_time = time.time()
 
     # ================================================================
     # 连接令牌管理（threading.Lock，跨线程串行化）

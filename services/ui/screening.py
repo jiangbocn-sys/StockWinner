@@ -572,17 +572,51 @@ async def get_watchlist(
 
     watchlist = await db.fetchall(base_sql, tuple(params))
 
-    # 从内存价格缓存注入实时现价
+    # 从内存价格缓存注入实时现价；缓存过期/缺失时通过 gateway 触发刷新
     try:
         from services.common.price_cache import get_price_cache
+        from services.common.stock_code import normalize_stock_code
+        from services.common.structured_logger import get_logger
         cache = get_price_cache()
+
+        # 收集 watchlist 中的股票代码
+        wl_codes = {normalize_stock_code(item["stock_code"]) for item in watchlist if item.get("stock_code")}
+
+        # 检查缓存新鲜度
+        freshness = cache.get_batch_freshness(wl_codes) if wl_codes else {}
+        stale_codes = {c for c, fresh in freshness.items() if not fresh}
+
+        logger = get_logger("watchlist")
+        logger.info("watchlist_price", f"wl_codes={len(wl_codes)}, stale={len(stale_codes)}, cache_total={len(cache._prices)}, stale_sample={list(stale_codes)[:3]}")
+
+        if stale_codes:
+            # 有过期/缺失数据，通过 gateway 批量刷新
+            from services.trading.gateway import get_gateway
+            gw = await get_gateway()
+            sub_id = f"wl:{account_id}"
+            gw.subscribe(sub_id, stale_codes, refresh_interval=0, priority=2)
+            sdk_results = await gw.refresh_now(sub_id)
+            gw.unsubscribe(sub_id)
+
+            sdk_valid = sum(1 for v in sdk_results.values() if v is not None and v.current_price > 0)
+            sdk_none = sum(1 for v in sdk_results.values() if v is None)
+            sample_prices = {c: (v.current_price if v else None) for c, v in list(sdk_results.items())[:3]}
+            logger.info("watchlist_refresh", f"requested={len(stale_codes)}, sdk_valid={sdk_valid}, sdk_none={sdk_none}, total_keys={len(sdk_results)}, sample={sample_prices}")
+
+        # 从刷新后的 PriceCache 取最新价
         cached_prices = cache.get_all_prices()
+        price_injected = 0
         for item in watchlist:
             code = item.get("stock_code")
-            if code and code in cached_prices:
-                item["current_price"] = cached_prices[code]
-    except Exception:
-        pass
+            if code:
+                norm = normalize_stock_code(code)
+                if norm in cached_prices and cached_prices[norm] > 0:
+                    item["current_price"] = cached_prices[norm]
+                    price_injected += 1
+        logger.info("watchlist_price_done", f"cached_prices_in_cache={len(cached_prices)}, injected={price_injected}/{len(watchlist)}, cache_sample={list(cached_prices.items())[:3]}")
+    except Exception as e:
+        import logging
+        logging.getLogger("watchlist").error(f"watchlist 价格刷新失败: {e}", exc_info=True)
 
     if grouped:
         # 返回分组结构
@@ -644,6 +678,21 @@ async def get_watchlist_stock(
         raise HTTPException(status_code=404, detail="股票不在 watchlist 中")
 
     return {"stock": stock}
+
+
+@router.post("/api/v1/ui/{account_id}/watchlist/unsubscribe-group/{group_id}")
+async def unsubscribe_watchlist_group(
+    account_id: str = Path(..., description="账户 ID"),
+    group_id: int = Path(..., description="候选组 ID"),
+):
+    """取消 watchlist 组的订阅（用户离开页面时调用）"""
+    try:
+        from services.trading.gateway import get_gateway
+        gw = await get_gateway()
+        gw.unsubscribe(f"wl:{account_id}:{group_id}")
+        return {"success": True}
+    except Exception as e:
+        return {"success": False, "message": str(e)}
 
 
 @router.delete("/api/v1/ui/{account_id}/watchlist/{stock_code}")

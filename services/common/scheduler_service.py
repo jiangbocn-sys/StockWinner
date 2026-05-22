@@ -984,69 +984,55 @@ class SchedulerService:
             logger.error(f"注册行情缓存心跳任务失败: {e}")
 
     def _price_cache_fallback_job(self):
-        """心跳检查：如果 price_cache 已过期（监控循环不工作了），则主动刷新"""
+        """心跳检查：管理 PriceCache TTL + 如果 monitor 订阅长时间未刷新或数据过期，通过 gateway dispatcher 强制刷新"""
         from services.data.local_data_service import is_trading_hours
-        if not is_trading_hours():
-            return
+        from services.common.price_cache import get_price_cache
+
+        # 动态调整 PriceCache TTL：非交易时段 12 小时，交易时段 10 分钟
+        cache = get_price_cache()
+        if is_trading_hours():
+            if cache._ttl != 600:
+                cache.set_ttl(600)
+        else:
+            if cache._ttl != 43200:
+                cache.set_ttl(43200)
 
         try:
-            from services.common.database import get_sync_connection
-            from services.common.sdk_manager import get_sdk_manager
-            from services.common.price_cache import get_price_cache
-            import time
+            from services.trading.gateway_dispatcher import get_gateway_dispatcher
+            dispatcher = get_gateway_dispatcher()
+            status = dispatcher.get_status()
+            monitor_age = status.get("monitor_age_seconds")
 
-            cache = get_price_cache()
-            stats = cache.get_stats()
-            age = stats.get("last_flush_age_seconds", 999)
+            if is_trading_hours():
+                # 交易时段：检查 monitor 订阅是否长时间未刷新
+                if monitor_age is not None and monitor_age < 300:
+                    return  # 监控循环正常，跳过
 
-            # 缓存新鲜（< 60 秒），说明监控循环正常工作，跳过
-            if age < 60:
-                return
+                if monitor_age is not None:
+                    logger.warning(f"price_cache 心跳: monitor 订阅已 {monitor_age:.0f} 秒未刷新，触发兜底")
+                else:
+                    logger.warning(f"price_cache 心跳: monitor 订阅不存在，触发兜底")
 
-            logger.warning(f"price_cache 心跳: 缓存已过期({age}秒)，监控循环可能未工作，触发兜底刷新")
+                if "monitor" in status.get("subscriptions", {}):
+                    import asyncio
+                    loop = asyncio.new_event_loop()
+                    try:
+                        loop.run_until_complete(dispatcher.refresh_now("monitor"))
+                    finally:
+                        loop.close()
+            else:
+                # 非交易时段：数据过期时触发一次刷新（SDK query_kline 可获取当日收盘价）
+                if not status.get("data_stale") and status.get("sdk_healthy"):
+                    return  # 数据正常，跳过
 
-            db_path = Path(__file__).parent.parent.parent / "data" / "stockwinner.db"
-            conn = get_sync_connection(path=db_path)
-            cursor = conn.cursor()
-            cursor.execute("SELECT DISTINCT stock_code FROM watchlist WHERE is_active = 1 AND status IN ('pending', 'watching', 'bought')")
-            codes = [row[0] for row in cursor.fetchall()]
-            conn.close()
-
-            if not codes:
-                return
-
-            sdk_mgr = get_sdk_manager()
-            today_int = int(get_china_time().strftime('%Y%m%d'))
-
-            # 分批查询，每批 500 只，避免单次超时
-            batch_size = 500
-            for i in range(0, len(codes), batch_size):
-                batch_codes = codes[i:i + batch_size]
-                if not sdk_mgr.connect():
-                    return
-                try:
-                    result = sdk_mgr.query_snapshot(code_list=batch_codes, begin_date=today_int, end_date=today_int)
-                    if result and isinstance(result, dict):
-                        for date_key in result:
-                            inner = result[date_key]
-                            if isinstance(inner, dict):
-                                for code, tick_df in inner.items():
-                                    if tick_df is None or not hasattr(tick_df, 'empty') or tick_df.empty:
-                                        continue
-                                    trade_ticks = tick_df[tick_df['volume'] > 0]
-                                    if trade_ticks.empty:
-                                        continue
-                                    cache.update_ohlcv(
-                                        code,
-                                        open=float(trade_ticks.iloc[0]['open']),
-                                        high=float(trade_ticks['high'].max()),
-                                        low=float(trade_ticks['low'].min()),
-                                        close=float(trade_ticks.iloc[-1]['last']),
-                                        volume=float(trade_ticks.iloc[-1]['volume']),
-                                        amount=float(trade_ticks.iloc[-1]['amount']),
-                                    )
-                except Exception as e:
-                    logger.warning(f"price_cache 心跳兜底批次 {i//batch_size + 1} 失败: {e}")
+                logger.info(f"price_cache 心跳: 非交易时段数据过期，触发 SDK kline 兜底")
+                if "monitor" in status.get("subscriptions", {}):
+                    import asyncio
+                    loop = asyncio.new_event_loop()
+                    try:
+                        loop.run_until_complete(dispatcher.refresh_now("monitor"))
+                    finally:
+                        loop.close()
         except Exception as e:
             logger.warning(f"price_cache 心跳兜底失败: {e}")
 
@@ -1607,7 +1593,7 @@ class SchedulerService:
                     from services.data.local_data_service import is_trading_hours
 
                     if is_trading_hours() and stock_codes:
-                        # ① 先从 price_cache 取（全局共享，监控循环和定时任务都在刷新）
+                        # ① 先从 price_cache 取（全局共享，监控循环和 dispatcher 都在刷新）
                         from services.common.price_cache import get_price_cache
                         cache = get_price_cache()
                         cached_ohlcv = cache.get_all_for_codes(set(stock_codes))
@@ -1624,44 +1610,34 @@ class SchedulerService:
                                         'amount': ohlcv.get('amount', 0),
                                     }
 
-                        # ② 对 price_cache 中没有的股票，调 SDK snapshot 补充
+                        # ② 对 price_cache 中没有的股票，通过 gateway dispatcher 刷新
                         missing_codes = [c for c in stock_codes if c not in _pre_fetched_realtime_quotes]
                         if missing_codes:
-                            from services.common.sdk_manager import get_sdk_manager
-                            sdk_mgr = get_sdk_manager()
-                            if sdk_mgr.connect():
-                                today_int = int(get_china_time().strftime('%Y%m%d'))
-                                batch_size = 50
-                                for i in range(0, len(missing_codes), batch_size):
-                                    batch_codes = missing_codes[i:i + batch_size]
-                                    try:
-                                        result = sdk_mgr.query_snapshot(
-                                            code_list=batch_codes,
-                                            begin_date=today_int,
-                                            end_date=today_int
-                                        )
-                                        if result and isinstance(result, dict):
-                                            for date_key in result:
-                                                inner = result[date_key]
-                                                for code, tick_df in inner.items():
-                                                    if tick_df is None or not hasattr(tick_df, 'empty') or tick_df.empty:
-                                                        continue
-                                                    trade_ticks = tick_df[tick_df['volume'] > 0]
-                                                    if trade_ticks.empty:
-                                                        continue
-                                                    _pre_fetched_realtime_quotes[code] = {
-                                                        'open': float(trade_ticks.iloc[0]['open']),
-                                                        'high': float(trade_ticks['high'].max()),
-                                                        'low': float(trade_ticks['low'].min()),
-                                                        'close': float(trade_ticks.iloc[-1]['last']),
-                                                        'volume': float(trade_ticks.iloc[-1]['volume']),
-                                                        'amount': float(trade_ticks.iloc[-1]['amount']),
-                                                    }
-                                    except Exception as batch_e:
-                                        logger.warning(f"SDK 预取批次 {i//batch_size + 1} 失败: {batch_e}")
+                            from services.trading.gateway import get_gateway
+                            gw = await get_gateway()
+                            sub_id = f"task:{task.get('id', 'unknown')}"
+                            gw.subscribe(sub_id, set(missing_codes), refresh_interval=0, priority=2)
+                            await gw.refresh_now(sub_id)
+                            gw.unsubscribe(sub_id)
+
+                            # 重新从 price_cache 读取（dispatcher 已写入）
+                            updated_ohlcv = cache.get_all_for_codes(set(missing_codes))
+                            for code in missing_codes:
+                                if code in updated_ohlcv:
+                                    ohlcv = updated_ohlcv[code]
+                                    if ohlcv.get('close', 0) > 0:
+                                        _pre_fetched_realtime_quotes[code] = {
+                                            'open': ohlcv.get('open', ohlcv['close']),
+                                            'high': ohlcv.get('high', ohlcv['close']),
+                                            'low': ohlcv.get('low', ohlcv['close']),
+                                            'close': ohlcv['close'],
+                                            'volume': ohlcv.get('volume', 0),
+                                            'amount': ohlcv.get('amount', 0),
+                                        }
 
                         cached_count = len([c for c in stock_codes if c in cached_ohlcv])
-                        logger.info(f"预取实时行情: {len(_pre_fetched_realtime_quotes)}/{len(stock_codes)} 只（price_cache={cached_count}, SDK补充={len(missing_codes)}）")
+                        sdk_count = len(_pre_fetched_realtime_quotes) - cached_count
+                        logger.info(f"预取实时行情: {len(_pre_fetched_realtime_quotes)}/{len(stock_codes)} 只（price_cache={cached_count}, dispatcher补充={sdk_count}）")
                     elif not is_trading_hours():
                         logger.info("非交易时段，跳过实时行情预取")
                 except Exception as e:

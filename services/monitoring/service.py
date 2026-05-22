@@ -145,45 +145,55 @@ class TradingMonitor:
         log.log_event("monitor_loop_stop", "交易监控服务已停止")
 
     async def _run_monitoring_global(self, account_ids: list[str]):
-        """全局监控：收集所有账户的股票去重，一次 SDK 调用，分发到各账户逻辑"""
+        """全局监控：收集实际需要监控的股票，通过 dispatcher 统一获取行情"""
         db = get_db_manager()
         log = get_logger("monitor")
 
-        # ① 收集所有账户需要监控股票（去重）
-        all_stock_codes: set = set()
-        account_stocks: Dict[str, set] = {}  # {account_id: set_of_codes}
+        # ① 收集所有账户需要监控股票（缩小范围：仅实际需要监控的）
+        monitoring_codes: set = set()
+        account_stocks: Dict[str, set] = {}  # {account_id: set_of_codes} — 用于分发
         for acct_id in account_ids:
             if not self._running:
                 return
             codes = set()
             try:
-                wl = await db.fetchall(
-                    "SELECT stock_code FROM watchlist WHERE account_id = ? AND is_active = 1 AND status IN ('pending', 'watching', 'bought')",
+                # pending 信号股（需要检查执行条件）
+                pending = await db.fetchall(
+                    "SELECT stock_code FROM watchlist WHERE account_id = ? AND is_active = 1 AND status = 'pending'",
                     (acct_id,),
                 )
-                codes.update(w["stock_code"] for w in wl)
-            except Exception:
-                pass
-            try:
+                codes.update(r["stock_code"] for r in pending)
+
+                # 有止损/止盈的 watching/bought 股（需要价格检查）
+                sl_tp = await db.fetchall(
+                    "SELECT stock_code FROM watchlist WHERE account_id = ? AND is_active = 1"
+                    " AND status IN ('watching', 'bought') AND (stop_loss_price > 0 OR take_profit_price > 0)",
+                    (acct_id,),
+                )
+                codes.update(r["stock_code"] for r in sl_tp)
+
+                # 持仓股（需要 PNL 跟踪）
                 pos = await db.fetchall(
                     "SELECT stock_code FROM stock_positions WHERE account_id = ?",
                     (acct_id,),
                 )
-                codes.update(p["stock_code"] for p in pos)
+                codes.update(r["stock_code"] for r in pos)
             except Exception:
                 pass
             account_stocks[acct_id] = codes
-            all_stock_codes.update(codes)
+            monitoring_codes.update(codes)
 
-        if not all_stock_codes:
+        if not monitoring_codes:
             return
 
-        # ② 一次 SDK 调用获取全部股票行情
+        # ② 通过 gateway 的 dispatcher 获取行情
         market_data_cache: Dict[str, Any] = {}
         try:
             from services.trading.gateway import get_gateway
-            gateway = await get_gateway()
-            market_data_cache = await gateway.get_batch_market_data(list(all_stock_codes))
+            gw = await get_gateway()
+            gw.subscribe("monitor", monitoring_codes, refresh_interval=120, priority=1)
+            market_data_cache = await gw.refresh_now("monitor")
+
             if not self._sdk_healthy:
                 log.log_event("sdk_recovered", "SDK/TGW 连接已恢复")
                 self._sdk_healthy = True
@@ -221,10 +231,11 @@ class TradingMonitor:
             if not acct_codes:
                 continue
             acct_market = {code: market_data_cache.get(code) for code in acct_codes if code in market_data_cache}
+            if not acct_market:
+                continue
             await self._run_per_account(acct_id, acct_market)
 
-        # ④ 更新 price_cache + 刷盘（全局一次）
-        self._update_price_cache("", market_data_cache=market_data_cache)
+        # ④ price_cache 已由 dispatcher 更新，保留刷盘逻辑
         if self._cache.should_flush():
             for acct_id in account_ids:
                 await self._flush_price_cache_to_db(acct_id)
@@ -326,19 +337,29 @@ class TradingMonitor:
 
         stock_codes = [w["stock_code"] for w in watchlist]
 
-        # 批量获取行情数据（优先用预取缓存，否则自己调用）
+        # 批量获取行情数据（优先用预取缓存，其次读 price_cache，最后用 dispatcher 刷新）
         if market_data_cache:
             batch_data = market_data_cache
         else:
-            try:
-                from services.trading.gateway import get_gateway
-                gateway = await get_gateway()
-                batch_data = await gateway.get_batch_market_data(stock_codes)
-            except Exception as e:
+            from services.common.price_cache import get_price_cache
+            cache = get_price_cache()
+            batch_ohlcv = cache.get_all_for_codes(set(stock_codes))
+            if batch_ohlcv:
+                # 从 price_cache 构造轻量 MarketData-like 对象
+                from services.trading.gateway import MarketData
+                batch_data = {}
+                for code, ohlcv in batch_ohlcv.items():
+                    batch_data[code] = MarketData(
+                        stock_code=code, stock_name="",
+                        current_price=ohlcv.get('close', 0),
+                        change_percent=ohlcv.get('change_pct', 0),
+                        high=ohlcv.get('high', 0), low=ohlcv.get('low', 0),
+                        open_price=ohlcv.get('open', 0), prev_close=ohlcv.get('close', 0),
+                        volume=int(ohlcv.get('volume', 0)), amount=ohlcv.get('amount', 0),
+                    )
+            else:
                 log = get_logger("monitor")
-                log.error("monitor", f"批量获取行情失败: {e}")
-                for stock in watchlist:
-                    await self._check_stock_signals(account_id, stock)
+                log.warning("monitor", f"_monitor_watchlist 无缓存数据，跳过账户 {account_id}")
                 return
 
         # === 优化 1：一次 SQL JOIN 预加载所有股票的策略配置 ===
@@ -448,6 +469,8 @@ class TradingMonitor:
     def _update_price_cache(self, account_id: str, market_data_cache: Optional[Dict[str, Any]] = None):
         """将实时行情写入内存价格缓存（完整 OHLCV，不写 DB）"""
         from services.common.price_cache import get_price_cache
+        from services.common.structured_logger import get_logger
+
         self._cache = get_price_cache()
 
         if not market_data_cache:
@@ -455,8 +478,12 @@ class TradingMonitor:
 
         # 从预取行情中提取完整 OHLCV
         count = 0
+        none_count = 0
         for code, md in market_data_cache.items():
-            if md and md.current_price and md.current_price > 0:
+            if md is None:
+                none_count += 1
+                continue
+            if md.current_price and md.current_price > 0:
                 self._cache.update_ohlcv(
                     code,
                     open=getattr(md, 'open_price', 0) or getattr(md, 'open', 0) or md.current_price,
@@ -469,8 +496,9 @@ class TradingMonitor:
                 )
                 count += 1
         if count > 0:
-            from services.common.structured_logger import get_logger
-            get_logger("monitor").log_event("price_cache_update", f"price_cache 更新: stocks={count}")
+            get_logger("monitor").log_event("price_cache_update", f"price_cache 更新: stocks={count}, none={none_count}")
+        elif none_count > 0:
+            get_logger("monitor").log_event("price_cache_empty", f"price_cache 无有效数据: total={len(market_data_cache)}, none={none_count}")
 
     async def _flush_price_cache_to_db(self, account_id: str):
         """每 15 分钟将内存缓存的价格兜底写入数据库"""
@@ -1287,16 +1315,27 @@ class TradingMonitor:
 
         stock_codes = [s['stock_code'] for s in signals]
 
-        # 使用预取的行情数据，或自行获取
+        # 使用预取的行情数据，或从 price_cache 读取
         if market_data_cache:
             market_data = market_data_cache
         else:
-            try:
-                from services.trading.gateway import get_gateway
-                gateway = await get_gateway()
-                market_data = await gateway.get_batch_market_data(stock_codes)
-            except Exception as e:
-                get_logger("monitor").error("monitor", f"批量获取行情失败: {e}")
+            from services.common.price_cache import get_price_cache
+            from services.trading.gateway import MarketData
+            cache = get_price_cache()
+            batch_ohlcv = cache.get_all_for_codes(set(stock_codes))
+            if batch_ohlcv:
+                market_data = {}
+                for code, ohlcv in batch_ohlcv.items():
+                    market_data[code] = MarketData(
+                        stock_code=code, stock_name="",
+                        current_price=ohlcv.get('close', 0),
+                        change_percent=ohlcv.get('change_pct', 0),
+                        high=ohlcv.get('high', 0), low=ohlcv.get('low', 0),
+                        open_price=ohlcv.get('open', 0), prev_close=ohlcv.get('close', 0),
+                        volume=int(ohlcv.get('volume', 0)), amount=ohlcv.get('amount', 0),
+                    )
+            else:
+                get_logger("monitor").warning("monitor", f"_execute_pending_signals 无缓存数据，跳过账户 {account_id}")
                 return
 
         for signal in signals:

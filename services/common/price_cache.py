@@ -40,6 +40,7 @@ class PriceCache:
         self._prices: Dict[str, PriceEntry] = {}
         self._flush_interval = 900  # 15 分钟
         self._last_flush = time.time()
+        self._ttl = 600  # 缓存过期时间（秒），默认 10 分钟
 
     def update(self, stock_code: str, price: float,
                open: float = 0, high: float = 0, low: float = 0,
@@ -125,11 +126,31 @@ class PriceCache:
             entry = self._prices.get(stock_code)
             if not entry:
                 return None
-            if time.time() - entry.timestamp > 600:
+            if time.time() - entry.timestamp > self._ttl:
                 return None
             return entry.price
 
-    def get_ohlcv(self, stock_code: str) -> Optional[Dict[str, float]]:
+    def is_expired(self, stock_code: str, max_age: int = None) -> bool:
+        """判断某股票缓存是否过期"""
+        with self._lock:
+            entry = self._prices.get(stock_code)
+            if not entry:
+                return True
+            age = time.time() - entry.timestamp
+            return age > (max_age or self._ttl)
+
+    def get_batch_freshness(self, codes: Set[str], max_age: int = None) -> Dict[str, bool]:
+        """返回 {stock_code: is_fresh} 映射"""
+        with self._lock:
+            now = time.time()
+            limit = max_age or self._ttl
+            result = {}
+            for code in codes:
+                entry = self._prices.get(code)
+                result[code] = entry is not None and (now - entry.timestamp <= limit)
+            return result
+
+    def get_ohlcv(self, stock_code: str, max_age: int = None) -> Optional[Dict[str, float]]:
         """获取完整 OHLCV 行情，未找到或过期返回 None
         Returns: {open, high, low, close, volume, amount, change_pct}
         """
@@ -137,7 +158,7 @@ class PriceCache:
             entry = self._prices.get(stock_code)
             if not entry:
                 return None
-            if time.time() - entry.timestamp > 600:
+            if time.time() - entry.timestamp > (max_age or self._ttl):
                 return None
             return {
                 'open': entry.open, 'high': entry.high, 'low': entry.low,
@@ -145,15 +166,36 @@ class PriceCache:
                 'change_pct': entry.change_pct,
             }
 
-    def get_all(self) -> Dict[str, Dict[str, float]]:
+    def get_ohlcv_with_ttl(self, stock_code: str, max_age: int = None) -> Optional[Dict[str, Any]]:
+        """获取 OHLCV + 新鲜度标记
+        Returns: {'data': {...}, 'is_fresh': bool} 或 None（缓存不存在）
+        """
+        with self._lock:
+            entry = self._prices.get(stock_code)
+            if not entry:
+                return None
+            now = time.time()
+            limit = max_age or self._ttl
+            is_fresh = (now - entry.timestamp) <= limit
+            return {
+                'data': {
+                    'open': entry.open, 'high': entry.high, 'low': entry.low,
+                    'close': entry.close, 'volume': entry.volume, 'amount': entry.amount,
+                    'change_pct': entry.change_pct,
+                },
+                'is_fresh': is_fresh,
+            }
+
+    def get_all(self, max_age: int = None) -> Dict[str, Dict[str, float]]:
         """获取所有股票的完整 OHLCV 行情
         Returns: {stock_code: {open, high, low, close, volume, amount, change_pct}}
         """
         with self._lock:
             result = {}
             now = time.time()
+            limit = max_age or self._ttl
             for code, entry in self._prices.items():
-                if now - entry.timestamp <= 600:
+                if now - entry.timestamp <= limit:
                     result[code] = {
                         'open': entry.open, 'high': entry.high, 'low': entry.low,
                         'close': entry.close, 'volume': entry.volume, 'amount': entry.amount,
@@ -161,16 +203,17 @@ class PriceCache:
                     }
             return result
 
-    def get_all_for_codes(self, codes: Set[str]) -> Dict[str, Dict[str, float]]:
+    def get_all_for_codes(self, codes: Set[str], max_age: int = None) -> Dict[str, Dict[str, float]]:
         """获取指定股票列表的 OHLCV 行情（过滤过期条目）
         Returns: {stock_code: {open, high, low, close, volume, amount, change_pct}}
         """
         with self._lock:
             result = {}
             now = time.time()
+            limit = max_age or self._ttl
             for code in codes:
                 entry = self._prices.get(code)
-                if entry and now - entry.timestamp <= 600:
+                if entry and now - entry.timestamp <= limit:
                     result[code] = {
                         'open': entry.open, 'high': entry.high, 'low': entry.low,
                         'close': entry.close, 'volume': entry.volume, 'amount': entry.amount,
@@ -178,15 +221,27 @@ class PriceCache:
                     }
             return result
 
-    def get_all_prices(self) -> Dict[str, float]:
+    def get_all_prices(self, max_age: int = None) -> Dict[str, float]:
         """获取所有股票最新价 {stock_code: price}（兼容旧接口）"""
         with self._lock:
             result = {}
             now = time.time()
+            limit = max_age or self._ttl
             for code, entry in self._prices.items():
-                if now - entry.timestamp <= 600:
+                if now - entry.timestamp <= limit:
                     result[code] = entry.price
             return result
+
+    def get_fresh_count(self, codes: Set[str], max_age: int = 60) -> int:
+        """统计指定股票中缓存新鲜的数量（max_age 秒内）"""
+        with self._lock:
+            now = time.time()
+            count = 0
+            for code in codes:
+                entry = self._prices.get(code)
+                if entry and now - entry.timestamp <= max_age:
+                    count += 1
+            return count
 
     def should_flush(self) -> bool:
         """是否需要刷盘"""
@@ -195,6 +250,10 @@ class PriceCache:
     def mark_flushed(self):
         """标记已刷盘"""
         self._last_flush = time.time()
+
+    def set_ttl(self, seconds: int):
+        """动态调整缓存过期时间（秒）"""
+        self._ttl = max(seconds, 60)  # 最低 60 秒
 
     def get_stats(self) -> Dict[str, Any]:
         """获取缓存统计"""

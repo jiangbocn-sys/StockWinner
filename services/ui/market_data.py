@@ -177,10 +177,12 @@ async def get_batch_quotes(
         raise HTTPException(status_code=400, detail="单次最多查询 50 只股票")
 
     try:
-        gateway = await get_gateway()
-
-        # 批量获取行情
-        results = await gateway.get_batch_market_data(stock_codes)
+        from services.trading.gateway import get_gateway
+        gw = await get_gateway()
+        sub_id = f"api:{account_id}"
+        gw.subscribe(sub_id, set(stock_codes), refresh_interval=0, priority=2)
+        results = await gw.refresh_now(sub_id)
+        gw.unsubscribe(sub_id)
 
         quotes = []
         errors = []

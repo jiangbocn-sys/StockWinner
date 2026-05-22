@@ -113,46 +113,71 @@ async def refresh_position_prices(
     )
     available_cash = float(account_data["available_cash"]) if account_data else 0.0
 
-    # 后台异步刷新 SDK 行情（不阻塞响应）
-    async def _async_refresh():
-        try:
-            from services.trading.gateway import get_gateway
-            gateway = await get_gateway()
-            stock_codes = [pos["stock_code"] for pos in positions]
-            market_data = await gateway.get_batch_market_data(stock_codes)
+    # 检查缓存新鲜度
+    from services.trading.gateway import get_gateway
+    from services.trading.trading_hours import can_trade
+    stock_codes = [pos["stock_code"] for pos in positions]
+    cache = get_price_cache()
+    gw = await get_gateway()
+    sub_id = f"pos:{account_id}"
 
-            update_list = []
-            price_updates = {}
+    # fresh_count = 60 秒内刷新的股票数
+    fresh_count = cache.get_fresh_count(set(stock_codes), max_age=60)
+
+    if fresh_count == 0:
+        # 缓存无数据，同步刷新后返回
+        gw.subscribe(sub_id, set(stock_codes), refresh_interval=0, priority=2)
+        await gw.refresh_now(sub_id)
+        gw.unsubscribe(sub_id)
+        # 刷新后重新注入
+        try:
+            cached_prices = cache.get_all_prices()
             for pos in positions:
                 code = pos["stock_code"]
-                md = market_data.get(code)
-                price = md.get("current_price", 0) if md else 0
-
-                if price and price > 0:
-                    quantity = pos["quantity"]
-                    avg_cost = pos["avg_cost"]
-                    new_market_value = price * quantity
-                    new_profit_loss = new_market_value - (avg_cost * quantity)
-                    update_list.append((
-                        price, new_market_value, new_profit_loss,
-                        get_china_time().isoformat(),
-                        pos["id"]
-                    ))
-                    price_updates[code] = (price, md.get("change_percent", 0))
-
+                if code in cached_prices and cached_prices[code] > 0:
+                    price = cached_prices[code]
+                    pos["current_price"] = price
+                    pos["market_value"] = round(price * pos.get("quantity", 0), 2)
+                    pos["profit_loss"] = round((price - pos.get("avg_cost", 0)) * pos.get("quantity", 0), 2)
+        except Exception:
+            pass
+        # 更新 DB
+        try:
+            update_list = []
+            for pos in positions:
+                if pos.get("current_price", 0) > 0:
+                    price = pos["current_price"]
+                    new_market_value = round(price * pos.get("quantity", 0), 2)
+                    new_profit_loss = round((price - pos.get("avg_cost", 0)) * pos.get("quantity", 0), 2)
+                    update_list.append((price, new_market_value, new_profit_loss, get_china_time().isoformat(), pos["id"]))
             if update_list:
                 await db.executemany(
                     "UPDATE stock_positions SET current_price = ?, market_value = ?, profit_loss = ?, updated_at = ? WHERE id = ?",
                     update_list
                 )
-
-            # 同时更新内存价格缓存
-            cache.update_batch(account_id, price_updates)
-            logger.info(f"异步刷新持仓行情完成: account={account_id}, stocks={len(price_updates)}")
-        except Exception as e:
-            logger.warning(f"异步刷新持仓行情失败: {e}")
-
-    asyncio.create_task(_async_refresh())
+        except Exception:
+            pass
+    elif fresh_count < len(stock_codes):
+        # 部分过期，同步刷新补全
+        gw.subscribe(sub_id, set(stock_codes), refresh_interval=0, priority=2)
+        await gw.refresh_now(sub_id)
+        gw.unsubscribe(sub_id)
+        # 刷新后重新注入
+        try:
+            cached_prices = cache.get_all_prices()
+            for pos in positions:
+                code = pos["stock_code"]
+                if code in cached_prices and cached_prices[code] > 0:
+                    price = cached_prices[code]
+                    pos["current_price"] = price
+                    pos["market_value"] = round(price * pos.get("quantity", 0), 2)
+                    pos["profit_loss"] = round((price - pos.get("avg_cost", 0)) * pos.get("quantity", 0), 2)
+        except Exception:
+            pass
+        if can_trade():
+            dispatcher.update_subscription(sub_id, set(stock_codes), interval=60, priority=2)
+            import asyncio
+            asyncio.create_task(dispatcher.refresh_now(sub_id))
 
     return {
         "success": True,

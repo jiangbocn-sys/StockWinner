@@ -81,6 +81,12 @@ class SDKManager:
             SDKManager._sdk_total_calls += 1
             if success:
                 SDKManager._sdk_success_calls += 1
+                # 通知连接管理器更新健康检查时间戳
+                try:
+                    from services.common.sdk_connection_manager import get_connection_manager
+                    get_connection_manager().record_query_success()
+                except Exception:
+                    pass
             SDKManager._sdk_total_rows += row_count
             if SDKManager._sdk_call_log is not None:
                 SDKManager._sdk_call_log.append((time.time(), method, row_count, success))
@@ -474,7 +480,7 @@ class SDKManager:
             is_timeout = isinstance(e, (TimeoutError,))
             if is_timeout:
                 logger.log_sdk_call("query_kline", duration_ms, task_type, "timeout", error=str(e), stock_count=stock_count, timeout=timeout)
-                SDKManager._market_data_instance = None
+                # 不清空实例，避免超时后需要重新 login 触发 TGW 连接数超限
             else:
                 logger.log_sdk_call("query_kline", duration_ms, task_type, "error", error=str(e), stock_count=stock_count, timeout=timeout)
             return {}
@@ -508,7 +514,7 @@ class SDKManager:
             is_timeout = isinstance(e, (TimeoutError,))
             if is_timeout:
                 logger.log_sdk_call("query_snapshot", duration_ms, "query", "timeout", error=str(e), stock_count=stock_count, timeout=30.0)
-                SDKManager._market_data_instance = None
+                # 不清空实例，避免超时后需要重新 login 触发 TGW 连接数超限
             else:
                 logger.log_sdk_call("query_snapshot", duration_ms, "query", "error", error=str(e), stock_count=stock_count, timeout=30.0)
             return {}

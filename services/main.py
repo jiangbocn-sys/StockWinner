@@ -65,6 +65,25 @@ async def lifespan(app: FastAPI):
     start_scheduler()
     log.log_event("scheduler_started", "调度服务已启动")
 
+    # 启动行情调度器（统一管理 SDK 行情查询）
+    from services.trading.gateway_dispatcher import get_gateway_dispatcher
+    dispatcher = get_gateway_dispatcher()
+    await dispatcher.start()
+    log.log_event("dispatcher_started", "行情调度器已启动")
+
+    # 初始化 PriceCache TTL：非交易时段 12 小时，交易时段 10 分钟
+    try:
+        from services.common.price_cache import get_price_cache
+        from services.data.local_data_service import is_trading_hours
+        cache = get_price_cache()
+        if is_trading_hours():
+            cache.set_ttl(600)
+        else:
+            cache.set_ttl(43200)
+            log.log_event("price_cache_ttl_extended", f"非交易时段 PriceCache TTL 延长至 12 小时")
+    except Exception as e:
+        log.error("price_cache_ttl", f"初始化 PriceCache TTL 失败: {e}")
+
     # 设置 FastAPI 事件循环引用
     loop = asyncio.get_running_loop()
     _set_fastapi_loop(loop)
@@ -742,6 +761,14 @@ async def lifespan(app: FastAPI):
 
     from services.common.scheduler_service import stop_scheduler
     stop_scheduler()
+
+    # 停止行情调度器
+    try:
+        from services.trading.gateway_dispatcher import get_gateway_dispatcher
+        await get_gateway_dispatcher().stop()
+        log.log_event("dispatcher_stopped", "行情调度器已停止")
+    except Exception as e:
+        log.error("shutdown", f"停止行情调度器失败: {e}")
 
     # 关闭 Agent 审计日志消费者（等待队列清空）
     try:

@@ -8,7 +8,7 @@ import logging
 import math
 import datetime
 from datetime import timedelta
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Set
 from abc import ABC, abstractmethod
 
 import numpy as np
@@ -278,18 +278,43 @@ class TradingGateway(TradingGatewayInterface):
         get_sdk_manager().disconnect()
 
     async def get_market_data(self, stock_code: str) -> Optional[MarketData]:
-        """获取真实行情数据 - 使用 AmazingData SDK，失败后回退到 ChannelRouter"""
+        """获取真实行情数据 — 优先读 PriceCache（TTL 检查），未命中则触发 dispatcher 刷新"""
         if not self.connected:
             raise Exception("网关未连接")
 
-        # 第一优先：现有 AmazingData 路径（已测试通过，保持不变）
+        # ① 优先从 PriceCache 读取（带 TTL 检查）
         try:
-            result = await asyncio.to_thread(self._query_market_data_sync, stock_code)
-            return result
-        except Exception as sdk_error:
-            logger.warning(f"AmazingData 行情查询失败，尝试备用通道: {sdk_error}")
+            from services.common.price_cache import get_price_cache
+            cache = get_price_cache()
+            entry = cache.get_ohlcv_with_ttl(stock_code)
+            if entry and entry.get('is_fresh') and entry.get('data', {}).get('close', 0) > 0:
+                return self._market_data_from_ohlcv(entry['data'], stock_code)
+        except Exception:
+            pass
 
-        # 回退：ChannelRouter 备用数据源
+        # ② 缓存未命中或已过期，通过 dispatcher 即时刷新
+        try:
+            from services.trading.gateway_dispatcher import get_gateway_dispatcher
+            dispatcher = get_gateway_dispatcher()
+            dispatcher.subscribe("_single", {stock_code}, interval=0, priority=1)
+            results = await dispatcher.refresh_now("_single")
+            dispatcher.unsubscribe("_single")
+
+            md = results.get(stock_code)
+            if md and md.current_price > 0:
+                return md
+        except Exception as sdk_error:
+            logger.warning(f"dispatcher 行情查询失败，尝试备用通道: {sdk_error}")
+
+        # ③ kline.db 兜底（16:30 后有当日数据）
+        try:
+            kline_results = await self._fill_stale_from_kline_db({stock_code})
+            if stock_code in kline_results:
+                return kline_results[stock_code]
+        except Exception:
+            pass
+
+        # ④ 回退：ChannelRouter 备用数据源
         try:
             from services.data.channel import get_channel_router, ChannelType
             from services.data.providers.base import DataProviderError
@@ -325,206 +350,112 @@ class TradingGateway(TradingGatewayInterface):
         logger.error(f"获取行情失败：{stock_code}")
         raise Exception(f"获取行情失败：所有数据源均不可用")
 
-    def _query_market_data_sync(self, stock_code: str) -> Optional[MarketData]:
-        """同步查询行情数据（在线程池中执行）— 优先使用 SDK 快照获取五档盘口"""
-        from services.common.sdk_manager import get_sdk_manager
-        from services.common.timezone import get_china_time
-
-        original_code = stock_code
-        if '.' not in stock_code:
-            if stock_code.startswith('6'):
-                stock_code = f"{stock_code}.SH"
-            else:
-                stock_code = f"{stock_code}.SZ"
-
-        # 1. 优先使用 SDK 快照（包含真实五档盘口）
-        try:
-            sdk_mgr = get_sdk_manager()
-            today_int = int(get_china_time().strftime("%Y%m%d"))
-            # SDK query_snapshot 返回 {date: {code: DataFrame}}
-            result = sdk_mgr.query_snapshot(
-                code_list=[stock_code],
-                begin_date=today_int,
-                end_date=today_int,
-            )
-            # 遍历嵌套结构查找目标股票
-            if result and isinstance(result, dict):
-                for date_key in result:
-                    inner = result[date_key]
-                    if isinstance(inner, dict) and stock_code in inner:
-                        df = inner[stock_code]
-                        if df is not None and len(df) > 0:
-                            row = df.iloc[0] if hasattr(df, 'iloc') else df
-                            return self._market_data_from_snapshot(row, stock_code)
-        except Exception as e:
-            logger.warning(f"SDK 快照查询异常: {e}")
-
-        # 2. SDK 快照失败或无数据时，回退 K 线数据（五档用现价填充，不用估算价）
-        return self._market_data_from_kline(stock_code, original_code)
-
-    def _market_data_from_snapshot(self, row, stock_code: str) -> MarketData:
-        """从 SDK 快照行构造 MarketData（含真实五档盘口）"""
-
-        def get_float(key, default=0.0):
-            v = row.get(key, default) if hasattr(row, 'get') else getattr(row, key, default)
-            try:
-                return float(v) if v is not None else default
-            except (ValueError, TypeError):
-                return default
-
-        def get_int(key, default=0):
-            return int(get_float(key, default))
-
-        def get_str(key, default=''):
-            v = row.get(key, default) if hasattr(row, 'get') else getattr(row, key, default)
-            return str(v) if v is not None else default
-
-        # 股票名称
-        stock_name = get_str(row, 'stock_name', '') or get_str(row, 'name', stock_code)
-
-        # 五档价格
-        bid = [get_float(f'bid_price{i}', 0) for i in range(1, 6)]
-        ask = [get_float(f'ask_price{i}', 0) for i in range(1, 6)]
-        # 五档委托量（股）
-        bid_volume = [get_int(f'bid_volume{i}', 0) for i in range(1, 6)]
-        ask_volume = [get_int(f'ask_volume{i}', 0) for i in range(1, 6)]
-
-        # DEBUG: 打印 SDK 快照所有字段名（用于确认列名格式）
-        all_keys = list(row.keys() if hasattr(row, 'keys') else row.__dict__.keys())
-        raw_keys = {k: v for k, v in (row.items() if hasattr(row, 'items') else row.__dict__.items())
-                     if 'bid' in k.lower() or 'ask' in k.lower()}
-        logger.info(f"[snapshot_debug] {stock_code} columns={all_keys} bid={bid} ask={ask} bid_vol={bid_volume} ask_vol={ask_volume} bid_ask_fields={raw_keys}")
-
-        current_price = get_float('current_price', get_float('price', 0))
-        prev_close = get_float('prev_close', get_float('preclose', 0))
-        if prev_close == 0:
-            prev_close = current_price
-        change_percent = ((current_price - prev_close) / prev_close * 100) if prev_close != 0 else 0
-
-        trade_date = str(get_str(row, 'trade_date', ''))
-
+    def _market_data_from_ohlcv(self, ohlcv: Dict[str, float], stock_code: str) -> MarketData:
+        """从 OHLCV 字典构造 MarketData（缓存数据，五档用现价填充）"""
+        close = ohlcv.get('close', 0)
         return MarketData(
             stock_code=stock_code,
-            stock_name=stock_name,
-            current_price=current_price,
-            change_percent=change_percent,
-            high=get_float('high', current_price),
-            low=get_float('low', current_price),
-            open_price=get_float('open', get_float('open_price', current_price)),
-            prev_close=prev_close,
-            volume=get_int('volume', 0),
-            amount=get_float('amount', 0),
-            bid=bid,
-            ask=ask,
-            bid_volume=bid_volume,
-            ask_volume=ask_volume,
-            trade_date=trade_date,
+            stock_name=stock_code,
+            current_price=close,
+            change_percent=ohlcv.get('change_pct', 0),
+            high=ohlcv.get('high', close),
+            low=ohlcv.get('low', close),
+            open_price=ohlcv.get('open', close),
+            prev_close=close,
+            volume=int(ohlcv.get('volume', 0)),
+            amount=ohlcv.get('amount', 0),
+            bid=[close] * 5,
+            ask=[close] * 5,
+            bid_volume=[0] * 5,
+            ask_volume=[0] * 5,
+            trade_date='',
         )
 
-    def _market_data_from_kline(self, stock_code: str, original_code: str) -> MarketData:
-        """从 K 线数据构造 MarketData（无真实五档，仅估算）"""
-        import datetime
+    async def _fill_stale_from_kline_db(self, codes: Set[str]) -> Dict[str, MarketData]:
+        """从 kline.db 读取最新收盘价兜底（仅非交易时段，避免用昨收价误导策略）"""
+        from services.trading.trading_hours import can_trade
+        if can_trade():
+            return {}  # 交易时段不使用 kline.db 兜底
+
         import sqlite3
         from pathlib import Path
+        from services.common.database import configure_kline_connection
 
-        stock_name = original_code
+        kline_db = Path(__file__).parent.parent.parent / "data" / "kline.db"
+        if not kline_db.exists():
+            return {}
+
+        results: Dict[str, MarketData] = {}
         try:
-            kline_db_path = Path(__file__).parent.parent.parent / "data" / "kline.db"
-            if kline_db_path.exists():
-                from services.common.database import configure_kline_connection
-                conn = sqlite3.connect(str(kline_db_path))
-                configure_kline_connection(conn)
-                cursor = conn.cursor()
-                cursor.execute(
-                    "SELECT stock_name FROM stock_base_info WHERE stock_code = ? LIMIT 1",
-                    (stock_code,)
-                )
-                row = cursor.fetchone()
-                if row and row[0]:
-                    stock_name = row[0]
-                else:
-                    cursor.execute(
-                        "SELECT stock_name FROM stock_monthly_factors WHERE stock_code = ? LIMIT 1",
-                        (stock_code,)
+            conn = sqlite3.connect(str(kline_db), timeout=10)
+            configure_kline_connection(conn)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            placeholders = ','.join(['?'] * len(codes))
+            cursor.execute(f"""
+                SELECT k.stock_code, k.close, k.open, k.high, k.low, k.volume, k.amount, k.trade_date
+                FROM kline_data k
+                INNER JOIN (
+                    SELECT stock_code, MAX(trade_date) as max_date
+                    FROM kline_data
+                    WHERE stock_code IN ({placeholders})
+                    GROUP BY stock_code
+                ) latest ON k.stock_code = latest.stock_code AND k.trade_date = latest.max_date
+            """, list(codes))
+            for row in cursor.fetchall():
+                code = row['stock_code']
+                close = float(row['close'] or 0)
+                if close > 0:
+                    open_p = float(row['open'] or close)
+                    high = float(row['high'] or close)
+                    low = float(row['low'] or close)
+                    vol = float(row['volume'] or 0)
+                    amt = float(row['amount'] or 0)
+                    results[code] = MarketData(
+                        stock_code=code,
+                        stock_name=code,
+                        current_price=close,
+                        change_percent=0,
+                        high=high,
+                        low=low,
+                        open_price=open_p,
+                        prev_close=close,
+                        volume=int(vol),
+                        amount=amt,
+                        bid=[close] * 5,
+                        ask=[close] * 5,
+                        bid_volume=[0] * 5,
+                        ask_volume=[0] * 5,
+                        trade_date=str(row['trade_date'] or '').replace('-', ''),
                     )
-                    row = cursor.fetchone()
-                    if row and row[0]:
-                        stock_name = row[0]
-                    else:
-                        cursor.execute(
-                            "SELECT DISTINCT stock_name FROM kline_data WHERE stock_code = ? LIMIT 1",
-                            (stock_code,)
-                        )
-                        row = cursor.fetchone()
-                        if row and row[0]:
-                            stock_name = row[0]
-                cursor.close()
-                conn.close()
+            conn.close()
         except Exception as e:
-            logger.debug(f"从本地数据库获取股票名称失败：{e}")
+            logger.debug(f"kline.db 兜底查询失败: {e}")
 
-        end_dt = get_china_time()
-        begin_dt = end_dt - datetime.timedelta(days=2)
-        end_date = int((end_dt + datetime.timedelta(days=1)).strftime('%Y%m%d'))
-        begin_date = int(begin_dt.strftime('%Y%m%d'))
+        return results
 
-        kline_data = self._query_kline_via_sdk(
-            code_list=[stock_code],
-            begin_date=begin_date,
-            end_date=end_date,
-            period=self.constant.Period.day.value,
-            task_type="query"
-        )
+    # ── Dispatcher 委托方法 ──
 
-        if kline_data and stock_code in kline_data:
-            df = kline_data[stock_code]
-            if df is not None and len(df) > 0:
-                last_row = df.iloc[-1]
+    def subscribe(self, subscriber_id: str, stock_codes: Set[str],
+                  refresh_interval: int = 30, priority: int = 2):
+        """注册或更新订阅（委托给 gateway dispatcher）"""
+        from services.trading.gateway_dispatcher import get_gateway_dispatcher
+        get_gateway_dispatcher().subscribe(subscriber_id, stock_codes, refresh_interval, priority)
 
-                current_price = float(last_row.get('close', 0)) if 'close' in last_row else 0
-                high = float(last_row.get('high', current_price)) if 'high' in last_row else current_price
-                low = float(last_row.get('low', current_price)) if 'low' in last_row else current_price
-                open_price = float(last_row.get('open', current_price)) if 'open' in last_row else current_price
+    def unsubscribe(self, subscriber_id: str):
+        """移除订阅"""
+        from services.trading.gateway_dispatcher import get_gateway_dispatcher
+        get_gateway_dispatcher().unsubscribe(subscriber_id)
 
-                prev_close = None
-                if 'pre_close' in last_row:
-                    prev_close = float(last_row.get('pre_close', 0))
-                elif len(df) >= 2:
-                    prev_row = df.iloc[-2]
-                    prev_close = float(prev_row.get('close', current_price))
+    async def refresh_now(self, subscriber_id: str) -> Dict[str, Any]:
+        """立即刷新指定订阅的股票"""
+        from services.trading.gateway_dispatcher import get_gateway_dispatcher
+        return await get_gateway_dispatcher().refresh_now(subscriber_id)
 
-                if prev_close is None or prev_close == 0:
-                    prev_close = current_price
-
-                volume = int(last_row.get('volume', 0)) if 'volume' in last_row else 0
-                amount = float(last_row.get('amount', 0)) if 'amount' in last_row else 0
-
-                change_percent = ((current_price - prev_close) / prev_close * 100) if prev_close != 0 else 0
-
-                trade_date = str(last_row.get('trade_date', last_row.get('kline_time', '')))
-
-                # 五档数据不可用：使用现价填充（实盘不允许估算）
-                return MarketData(
-                    stock_code=stock_code,
-                    stock_name=stock_name,
-                    current_price=current_price,
-                    change_percent=change_percent,
-                    high=high,
-                    low=low,
-                    open_price=open_price,
-                    prev_close=prev_close,
-                    volume=volume,
-                    amount=amount,
-                    bid=[current_price] * 5,
-                    ask=[current_price] * 5,
-                    bid_volume=[0] * 5,
-                    ask_volume=[0] * 5,
-                    trade_date=trade_date
-                )
-
-        logger.warning(f"未获取到 {stock_code} 的 K 线数据")
-        raise Exception(f"未获取到 {stock_code} 的行情数据")
-
+    def get_dispatch_status(self) -> Dict[str, Any]:
+        """获取调度器状态（含健康度、数据新鲜度）"""
+        from services.trading.gateway_dispatcher import get_gateway_dispatcher
+        return get_gateway_dispatcher().get_status()
 
     async def get_stock_list(self) -> List[Dict[str, str]]:
         """获取股票列表"""
@@ -1095,97 +1026,58 @@ class TradingGateway(TradingGatewayInterface):
         return []
 
     async def get_batch_market_data(self, stock_codes: List[str]) -> Dict[str, Optional[MarketData]]:
-        """批量获取行情数据 — 一次SDK调用获取所有代码的行情，失败回退 ChannelRouter"""
+        """批量获取行情数据 — 优先读 PriceCache（TTL 检查），过期/缺失的通过 dispatcher 补齐，SDK 不可用时 kline.db 兜底"""
         if not stock_codes:
             return {}
 
-        end_dt = get_china_time()
-        begin_dt = end_dt - datetime.timedelta(days=2)
-        end_date = int((end_dt + datetime.timedelta(days=1)).strftime('%Y%m%d'))
-        begin_date = int(begin_dt.strftime('%Y%m%d'))
+        from services.common.price_cache import get_price_cache
+        from services.common.stock_code import normalize_stock_code
 
-        # 第一优先：现有 AmazingData 路径
-        try:
-            kline_data = self._query_kline_via_sdk(
-                code_list=stock_codes,
-                begin_date=begin_date,
-                end_date=end_date,
-                period=self.constant.Period.day.value,
-                task_type="query"
-            )
+        cache = get_price_cache()
+        results: Dict[str, Optional[MarketData]] = {}
+        stale_codes: Set[str] = set()
 
-            results = {}
+        # ① 遍历每只股票，检查 freshness
+        for code in stock_codes:
+            norm = normalize_stock_code(code)
+            entry = cache.get_ohlcv_with_ttl(norm)
+            if entry and entry.get('is_fresh') and entry.get('data', {}).get('close', 0) > 0:
+                results[code] = self._market_data_from_ohlcv(entry['data'], code)
+            else:
+                stale_codes.add(norm)
+
+        # ② 对过期/缺失的股票，通过 dispatcher 刷新
+        if stale_codes:
+            try:
+                from services.trading.gateway_dispatcher import get_gateway_dispatcher
+                dispatcher = get_gateway_dispatcher()
+                sub_id = "_batch"
+                dispatcher.subscribe(sub_id, stale_codes, interval=0, priority=1)
+                sdk_results = await dispatcher.refresh_now(sub_id)
+                dispatcher.unsubscribe(sub_id)
+
+                for code in stock_codes:
+                    norm = normalize_stock_code(code)
+                    if code not in results and norm in sdk_results:
+                        md = sdk_results[norm]
+                        results[code] = md if md and md.current_price > 0 else None
+            except Exception as e:
+                logger.warning(f"dispatcher 批量行情查询失败: {e}")
+
+        # ③ 验证：仍有 None 且 SDK 也失败的代码 → kline.db 兜底（16:30 后 kline.db 有当日数据）
+        still_missing = {
+            normalize_stock_code(code)
+            for code in stock_codes
+            if code not in results or results[code] is None
+        }
+        if still_missing:
+            kline_results = await self._fill_stale_from_kline_db(still_missing)
             for code in stock_codes:
-                if code in kline_data:
-                    df = kline_data[code]
-                    if df is not None and len(df) > 0:
-                        last_row = df.iloc[-1]
-                        current_price = float(last_row.get('close', 0)) if 'close' in last_row else 0
-                        high = float(last_row.get('high', current_price)) if 'high' in last_row else current_price
-                        low = float(last_row.get('low', current_price)) if 'low' in last_row else current_price
-                        open_price = float(last_row.get('open', current_price)) if 'open' in last_row else current_price
-                        prev_close = float(last_row.get('pre_close', 0)) if 'pre_close' in last_row else 0
-                        if prev_close == 0 and len(df) >= 2:
-                            prev_close = float(df.iloc[-2].get('close', current_price))
-                        if prev_close == 0:
-                            prev_close = current_price
-                        volume = int(last_row.get('volume', 0)) if 'volume' in last_row else 0
-                        amount = float(last_row.get('amount', 0)) if 'amount' in last_row else 0
-                        change_percent = ((current_price - prev_close) / prev_close * 100) if prev_close != 0 else 0
-                        stock_name = last_row.get('stock_name', '')
-                        trade_date = str(last_row.get('trade_date', last_row.get('kline_time', '')))
-                        results[code] = MarketData(
-                            stock_code=code, stock_name=stock_name, current_price=current_price,
-                            change_percent=change_percent, high=high, low=low, open_price=open_price,
-                            prev_close=prev_close, volume=volume, amount=amount,
-                            trade_date=trade_date,
-                        )
-                    else:
-                        results[code] = None
-                else:
-                    results[code] = None
-            return results
-        except Exception as e:
-            logger.warning(f"AmazingData 批量行情查询失败，尝试备用通道: {e}")
+                norm = normalize_stock_code(code)
+                if (code not in results or results[code] is None) and norm in kline_results:
+                    results[code] = kline_results[norm]
 
-        # 回退：ChannelRouter
-        try:
-            from services.data.channel import get_channel_router, ChannelType
-            from services.data.providers.base import DataProviderError
-
-            router = get_channel_router()
-            raw_results = await router.execute(
-                ChannelType.TRADING,
-                "get_batch_market_data",
-                stock_codes=stock_codes,
-            )
-
-            results = {}
-            for code, raw in raw_results.items():
-                if raw:
-                    results[code] = MarketData(
-                        stock_code=raw.get("stock_code", code),
-                        stock_name=raw.get("stock_name", ""),
-                        current_price=float(raw.get("current_price", 0)),
-                        change_percent=float(raw.get("change_percent", 0)),
-                        high=float(raw.get("high", 0)),
-                        low=float(raw.get("low", 0)),
-                        open_price=float(raw.get("open_price", 0)),
-                        prev_close=float(raw.get("prev_close", 0)),
-                        volume=int(raw.get("volume", 0)),
-                        amount=float(raw.get("amount", 0)),
-                        bid=raw.get("bid", []),
-                        ask=raw.get("ask", []),
-                        bid_volume=raw.get("bid_volume", []),
-                        ask_volume=raw.get("ask_volume", []),
-                        trade_date=raw.get("trade_date", ""),
-                    )
-                else:
-                    results[code] = None
-            return results
-        except DataProviderError as e:
-            logger.error(f"所有备用通道批量行情失败: {e}")
-            return {code: None for code in stock_codes}
+        return results
 
     async def get_kline_data(
         self,
