@@ -1127,41 +1127,49 @@ class SchedulerService:
                         ).fetchall()
                         positions_conn.close()
 
-                        # 先尝试自动重启
+                        # 先尝试自动重启（用 run_async_safe 确保数据库连接池正常初始化）
                         import asyncio
-                        loop = asyncio.new_event_loop()
-                        asyncio.set_event_loop(loop)
-                        try:
-                            result = loop.run_until_complete(
-                                monitor.start_monitoring(interval=30)
-                            )
-                            if result.get("success"):
-                                logger.info(f"交易监控已自动重启: {result.get('message')}")
+                        from services.common.async_helper import run_async_safe
+
+                        result: dict = {}
+                        def _restart_monitor():
+                            loop = asyncio.new_event_loop()
+                            asyncio.set_event_loop(loop)
+                            try:
+                                result.update(loop.run_until_complete(
+                                    monitor.start_monitoring(interval=30)
+                                ))
+                            finally:
+                                loop.close()
+
+                        run_async_safe(_restart_monitor)
+                        if result.get("success"):
+                            logger.info(f"交易监控已自动重启: {result.get('message')}")
+                        else:
+                            logger.warning(f"交易监控重启失败: {result.get('message')}")
+                            # 重启失败才发通知
+                            if position_count > 0:
+                                notification = get_notification_service()
+                                for acct_id in [r["account_id"] for r in acct_rows]:
+                                    import asyncio as _asyncio
+                                    nloop = _asyncio.new_event_loop()
+                                    _asyncio.set_event_loop(nloop)
+                                    try:
+                                        nloop.run_until_complete(notification.emit(
+                                            event_type="monitor_interrupted",
+                                            account_id=acct_id,
+                                            payload={
+                                                "detected_at": now_str,
+                                                "account_id": acct_id,
+                                                "position_count": position_count,
+                                                "restart_result": result.get("message"),
+                                            },
+                                        ))
+                                    finally:
+                                        nloop.close()
+                                logger.warning(f"已发送交易监控中断飞书通知（{position_count} 只持仓，重启失败）")
                             else:
-                                logger.warning(f"交易监控重启失败: {result.get('message')}")
-                                # 重启失败才发通知
-                                if position_count > 0:
-                                    notification = get_notification_service()
-                                    for acct_id in [r["account_id"] for r in acct_rows]:
-                                        asyncio.set_event_loop(loop)
-                                        try:
-                                            loop.run_until_complete(notification.emit(
-                                                event_type="monitor_interrupted",
-                                                account_id=acct_id,
-                                                payload={
-                                                    "detected_at": now_str,
-                                                    "account_id": acct_id,
-                                                    "position_count": position_count,
-                                                    "restart_result": result.get("message"),
-                                                },
-                                            ))
-                                        finally:
-                                            pass
-                                    logger.warning(f"已发送交易监控中断飞书通知（{position_count} 只持仓，重启失败）")
-                                else:
-                                    logger.info("交易监控未运行，但无持仓，不发通知")
-                        finally:
-                            loop.close()
+                                logger.info("交易监控未运行，但无持仓，不发通知")
 
                     # ② 检查数据是否过期（监控活着但 SDK 取不到数据）
                     elif monitor._data_stale:
