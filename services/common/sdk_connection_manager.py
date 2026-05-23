@@ -173,9 +173,18 @@ class SDKConnectionManager:
     def _sdk_login(self) -> bool:
         """发起 SDK 登录（同步阻塞，带超时保护）
 
-        先尝试主 IP，失败后自动尝试备 IP
+        先调用 logout() 释放旧连接（防止 TGW 用户连接数超限），再尝试登录。
+        先尝试主 IP，失败后自动尝试备 IP。
         """
         logger = get_logger("sdk_connection")
+
+        # 先尝试 logout 释放可能残留的旧连接（TGW 限制单用户单连接）
+        try:
+            from AmazingData import logout
+            logout(_SDK_USERNAME)
+            logger.log_event("sdk_pre_logout", f"登录前 logout @ {_SDK_USERNAME}（释放旧连接）")
+        except Exception:
+            pass
 
         # 构建候选主机列表
         hosts = [_SDK_HOST] if _SDK_HOST else []
