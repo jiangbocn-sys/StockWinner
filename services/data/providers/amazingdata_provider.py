@@ -63,11 +63,34 @@ class AmazingDataProvider(DataProvider):
         try:
             from services.common.sdk_manager import get_sdk_manager
             sdk_mgr = get_sdk_manager()
-            connected = sdk_mgr.is_connected()
+
+            # 先检查连接状态
+            if not sdk_mgr.is_connected():
+                latency_ms = (time.monotonic() - start) * 1000
+                return {
+                    "ok": False,
+                    "message": "SDK 未连接",
+                    "latency_ms": round(latency_ms, 1),
+                }
+
+            # 实际调用 SDK 获取一只股票行情来验证连接有效性
+            try:
+                market_data = sdk_mgr.get_market_data()
+                # get_market_data 返回 DataFrame，检查是否有数据
+                if market_data is not None and hasattr(market_data, 'empty') and not market_data.empty:
+                    connected = True
+                elif market_data is not None:
+                    connected = True
+                else:
+                    # 即使返回空 DataFrame 也说明连接正常
+                    connected = True
+            except Exception:
+                connected = False
+
             latency_ms = (time.monotonic() - start) * 1000
             return {
                 "ok": connected,
-                "message": "已连接" if connected else "未连接",
+                "message": "已连接" if connected else "SDK 调用失败",
                 "latency_ms": round(latency_ms, 1),
             }
         except Exception as e:

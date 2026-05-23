@@ -306,15 +306,7 @@ class TradingGateway(TradingGatewayInterface):
         except Exception as sdk_error:
             logger.warning(f"dispatcher 行情查询失败，尝试备用通道: {sdk_error}")
 
-        # ③ kline.db 兜底（16:30 后有当日数据）
-        try:
-            kline_results = await self._fill_stale_from_kline_db({stock_code})
-            if stock_code in kline_results:
-                return kline_results[stock_code]
-        except Exception:
-            pass
-
-        # ④ 回退：ChannelRouter 备用数据源
+        # ③ 回退：ChannelRouter 备用数据源（按优先级遍历所有 provider）
         try:
             from services.data.channel import get_channel_router, ChannelType
             from services.data.providers.base import DataProviderError
@@ -345,7 +337,15 @@ class TradingGateway(TradingGatewayInterface):
                     trade_date=raw_data.get("trade_date", ""),
                 )
         except DataProviderError as e:
-            logger.error(f"所有备用通道均失败: {e}")
+            logger.warning(f"所有备用通道均失败，回退 kline.db: {e}")
+
+        # ④ kline.db 最终兜底
+        try:
+            kline_results = await self._fill_stale_from_kline_db({stock_code})
+            if stock_code in kline_results:
+                return kline_results[stock_code]
+        except Exception:
+            pass
 
         logger.error(f"获取行情失败：{stock_code}")
         raise Exception(f"获取行情失败：所有数据源均不可用")
@@ -376,7 +376,6 @@ class TradingGateway(TradingGatewayInterface):
         from services.trading.trading_hours import can_trade
         if can_trade():
             return {}  # 交易时段不使用 kline.db 兜底
-
         import sqlite3
         from pathlib import Path
         from services.common.database import configure_kline_connection

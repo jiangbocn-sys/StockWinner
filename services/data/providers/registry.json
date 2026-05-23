@@ -62,6 +62,69 @@
         "market_data": 3,
         "download": 3
       }
+    },
+    {
+      "provider_id": "sina",
+      "display_name": "新浪财经",
+      "description": "新浪财经免费行情接口，支持实时行情和五档盘口",
+      "capabilities": {
+        "supports_kline": false,
+        "supports_realtime": true,
+        "supports_fundamentals": false,
+        "supports_stock_list": false,
+        "supports_industry": false,
+        "supports_trading": false,
+        "supports_realtime_snapshot": true
+      },
+      "requires_config": false,
+      "default_enabled": true,
+      "priority": {
+        "trading": 3,
+        "market_data": 2,
+        "download": 999
+      }
+    },
+    {
+      "provider_id": "akshare",
+      "display_name": "Akshare",
+      "description": "Akshare 聚合数据源（新浪/腾讯），支持日K线、实时行情、股票列表、财务报表",
+      "capabilities": {
+        "supports_kline": true,
+        "supports_realtime": false,
+        "supports_fundamentals": true,
+        "supports_stock_list": true,
+        "supports_industry": false,
+        "supports_trading": false,
+        "supports_realtime_snapshot": false
+      },
+      "requires_config": false,
+      "default_enabled": true,
+      "priority": {
+        "trading": 999,
+        "market_data": 4,
+        "download": 4
+      }
+    },
+    {
+      "provider_id": "tencent",
+      "display_name": "腾讯行情",
+      "description": "腾讯免费行情接口，支持实时行情和五档盘口",
+      "capabilities": {
+        "supports_kline": false,
+        "supports_realtime": true,
+        "supports_fundamentals": false,
+        "supports_stock_list": false,
+        "supports_industry": false,
+        "supports_trading": false,
+        "supports_realtime_snapshot": true
+      },
+      "requires_config": false,
+      "default_enabled": true,
+      "priority": {
+        "trading": 4,
+        "market_data": 3,
+        "download": 999
+      }
     }
   ]
 }

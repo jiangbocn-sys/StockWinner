@@ -19,6 +19,58 @@
         </el-form>
       </el-card>
 
+      <!-- 数据源管理 -->
+      <el-card style="margin-top: 20px">
+        <template #header>
+          <div class="card-header">
+            <span>数据源管理</span>
+            <div>
+              <el-button size="small" @click="openPriorityDialog">
+                调整优先级
+              </el-button>
+              <el-button size="small" @click="loadDataSources" :loading="dsLoading">
+                刷新
+              </el-button>
+            </div>
+          </div>
+        </template>
+
+        <el-table :data="dataSources" border>
+          <el-table-column prop="display_name" label="数据源" width="130" />
+          <el-table-column label="启用" width="80">
+            <template #default="{ row }">
+              <el-switch
+                v-model="row.is_enabled"
+                @change="toggleDataSource(row)"
+                :loading="row._toggling"
+              />
+            </template>
+          </el-table-column>
+          <el-table-column label="状态" width="100">
+            <template #default="{ row }">
+              <el-tag :type="dsStatusTag(row.status)" size="small">
+                {{ dsStatusText(row.status) }}
+              </el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="通道优先级" min-width="200">
+            <template #default="{ row }">
+              <template v-if="row.channel_priority_json">
+                <el-tag size="small" style="margin-right: 4px" v-if="row.channel_priority_json.trading">交易 {{ row.channel_priority_json.trading }}</el-tag>
+                <el-tag size="small" style="margin-right: 4px" type="success" v-if="row.channel_priority_json.market_data">行情 {{ row.channel_priority_json.market_data }}</el-tag>
+                <el-tag size="small" type="warning" v-if="row.channel_priority_json.download">下载 {{ row.channel_priority_json.download }}</el-tag>
+              </template>
+            </template>
+          </el-table-column>
+          <el-table-column label="操作" width="100">
+            <template #default="{ row }">
+              <el-button size="small" v-if="row.requires_config" @click="openConfigDialog(row)">配置</el-button>
+              <span v-else class="text-muted" style="color: #c0c4cc">无需配置</span>
+            </template>
+          </el-table-column>
+        </el-table>
+      </el-card>
+
       <!-- 通知配置 -->
       <el-card style="margin-top: 20px">
         <template #header>
@@ -294,6 +346,108 @@
         <el-button @click="keyVisible = false">关闭</el-button>
       </template>
     </el-dialog>
+
+    <!-- 数据源配置对话框 -->
+    <el-dialog v-model="dsConfigVisible" :title="'配置数据源 - ' + (dsConfigForm.provider_id || '')" width="500px">
+      <el-form label-width="120px">
+        <el-form-item v-if="dsConfigForm.provider_id === 'tushare'" label="API Token">
+          <el-input
+            v-model="dsConfigForm.api_token"
+            type="password"
+            placeholder="输入 Tushare Pro API Token"
+            show-password
+          />
+        </el-form-item>
+        <el-form-item v-if="dsConfigForm.provider_id === 'amazingdata'" label="Host">
+          <el-input :value="'101.230.159.234'" disabled />
+        </el-form-item>
+        <el-form-item v-if="dsConfigForm.provider_id === 'amazingdata'" label="Port">
+          <el-input :value="'8600'" disabled />
+        </el-form-item>
+        <el-form-item v-if="!dsConfigForm.requires_config" label="配置">
+          <span style="color: #909399;">该数据源无需配置</span>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="dsConfigVisible = false">取消</el-button>
+        <el-button type="primary" @click="saveDsConfig" :loading="dsSaving">保存</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 通道优先级调整对话框 -->
+    <el-dialog v-model="priorityVisible" title="调整通道优先级" width="550px">
+      <el-alert type="info" :closable="false" style="margin-bottom: 20px">
+        数字越小越优先。拖动排序可调整 provider 顺序，系统按从上到下的顺序依次尝试。
+      </el-alert>
+
+      <el-tabs v-model="priorityTab">
+        <el-tab-pane label="交易通道" name="trading">
+          <el-table :data="priorityForm.trading" border style="width: 100%">
+            <el-table-column type="index" label="顺序" width="60" />
+            <el-table-column prop="provider_id" label="数据源" width="130" />
+            <el-table-column label="状态" width="100">
+              <template #default="{ row }">
+                <el-tag :type="dsStatusTag(row.status)" size="small">{{ dsStatusText(row.status) }}</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column>
+              <template #header>
+                <span>操作</span>
+              </template>
+              <template #default="{ $index }">
+                <el-button size="small" :disabled="$index === 0" @click="moveUp('trading', $index)">↑</el-button>
+                <el-button size="small" :disabled="$index === priorityForm.trading.length - 1" @click="moveDown('trading', $index)">↓</el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+        </el-tab-pane>
+        <el-tab-pane label="行情通道" name="market_data">
+          <el-table :data="priorityForm.market_data" border style="width: 100%">
+            <el-table-column type="index" label="顺序" width="60" />
+            <el-table-column prop="provider_id" label="数据源" width="130" />
+            <el-table-column label="状态" width="100">
+              <template #default="{ row }">
+                <el-tag :type="dsStatusTag(row.status)" size="small">{{ dsStatusText(row.status) }}</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column>
+              <template #header>
+                <span>操作</span>
+              </template>
+              <template #default="{ $index }">
+                <el-button size="small" :disabled="$index === 0" @click="moveUp('market_data', $index)">↑</el-button>
+                <el-button size="small" :disabled="$index === priorityForm.market_data.length - 1" @click="moveDown('market_data', $index)">↓</el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+        </el-tab-pane>
+        <el-tab-pane label="下载通道" name="download">
+          <el-table :data="priorityForm.download" border style="width: 100%">
+            <el-table-column type="index" label="顺序" width="60" />
+            <el-table-column prop="provider_id" label="数据源" width="130" />
+            <el-table-column label="状态" width="100">
+              <template #default="{ row }">
+                <el-tag :type="dsStatusTag(row.status)" size="small">{{ dsStatusText(row.status) }}</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column>
+              <template #header>
+                <span>操作</span>
+              </template>
+              <template #default="{ $index }">
+                <el-button size="small" :disabled="$index === 0" @click="moveUp('download', $index)">↑</el-button>
+                <el-button size="small" :disabled="$index === priorityForm.download.length - 1" @click="moveDown('download', $index)">↓</el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+        </el-tab-pane>
+      </el-tabs>
+
+      <template #footer>
+        <el-button @click="priorityVisible = false">取消</el-button>
+        <el-button type="primary" @click="savePriority" :loading="dsSaving">保存</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -559,6 +713,7 @@ onMounted(() => {
   loadLLMConfig()
   loadNotificationConfig()
   loadAgents()
+  loadDataSources()
 })
 
 // === Agent 管理 ===
@@ -571,6 +726,173 @@ const rotating = ref(false)
 const keyResult = ref(null)
 const newApiKey = ref('')
 
+// === 数据源管理 ===
+const dataSources = ref([])
+const dsLoading = ref(false)
+const dsConfigVisible = ref(false)
+const dsSaving = ref(false)
+const dsConfigForm = reactive({ provider_id: '', api_token: '', requires_config: false })
+const currentDsRow = ref(null)
+
+const dsStatusTag = (status) => {
+  const map = { connected: 'success', disconnected: 'warning', error: 'danger', not_configured: 'info' }
+  return map[status] || 'info'
+}
+const dsStatusText = (status) => {
+  const map = { connected: '已连接', disconnected: '未连接', error: '连接失败', not_configured: '未配置' }
+  return map[status] || '未知'
+}
+
+const getToken = () => localStorage.getItem('auth_token') || ''
+
+const loadDataSources = async () => {
+  dsLoading.value = true
+  try {
+    const res = await fetch('/api/v1/ui/data-sources', {
+      headers: { 'X-Auth-Token': getToken() }
+    })
+    const data = await res.json()
+    if (data.success) {
+      dataSources.value = data.data
+    }
+  } catch (e) {
+    console.error('加载数据源失败:', e)
+  } finally {
+    dsLoading.value = false
+  }
+}
+
+const toggleDataSource = async (row) => {
+  row._toggling = true
+  try {
+    const res = await fetch(`/api/v1/ui/data-sources/${row.provider_id}/toggle`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Auth-Token': getToken() },
+      body: JSON.stringify({ is_enabled: row.is_enabled })
+    })
+    const data = await res.json()
+    if (data.success) {
+      ElMessage.success(data.message)
+    } else {
+      ElMessage.error(data.message || '操作失败')
+      row.is_enabled = !row.is_enabled  // 回滚
+    }
+  } catch (e) {
+    ElMessage.error('操作失败: ' + e.message)
+    row.is_enabled = !row.is_enabled  // 回滚
+  } finally {
+    row._toggling = false
+  }
+}
+
+const openConfigDialog = (row) => {
+  currentDsRow.value = row
+  dsConfigForm.provider_id = row.provider_id
+  dsConfigForm.api_token = ''
+  dsConfigForm.requires_config = row.requires_config
+  dsConfigVisible.value = true
+}
+
+const saveDsConfig = async () => {
+  dsSaving.value = true
+  try {
+    const payload = {}
+    if (dsConfigForm.provider_id === 'tushare') {
+      if (!dsConfigForm.api_token) {
+        ElMessage.warning('请输入 API Token')
+        dsSaving.value = false
+        return
+      }
+      payload.api_token = dsConfigForm.api_token
+    }
+
+    const res = await fetch(`/api/v1/ui/data-sources/${dsConfigForm.provider_id}/config`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Auth-Token': getToken() },
+      body: JSON.stringify(payload)
+    })
+    const data = await res.json()
+    if (data.success) {
+      ElMessage.success(data.message)
+      dsConfigVisible.value = false
+      loadDataSources()
+    } else {
+      ElMessage.error(data.message || '保存失败')
+    }
+  } catch (e) {
+    ElMessage.error('保存失败: ' + e.message)
+  } finally {
+    dsSaving.value = false
+  }
+}
+
+// === 通道优先级管理 ===
+const priorityVisible = ref(false)
+const priorityTab = ref('trading')
+const priorityForm = reactive({
+  trading: [],
+  market_data: [],
+  download: [],
+})
+
+const openPriorityDialog = () => {
+  const enabledProviders = dataSources.value.filter(ds => ds.is_enabled)
+  for (const channel of ['trading', 'market_data', 'download']) {
+    const sorted = [...enabledProviders].sort((a, b) => {
+      const pa = a.channel_priority_json?.[channel] ?? 999
+      const pb = b.channel_priority_json?.[channel] ?? 999
+      return pa - pb
+    })
+    priorityForm[channel] = sorted.map(ds => ({
+      provider_id: ds.provider_id,
+      display_name: ds.display_name,
+      status: ds.status,
+    }))
+  }
+  priorityTab.value = 'trading'
+  priorityVisible.value = true
+}
+
+const moveUp = (channel, index) => {
+  if (index === 0) return
+  const arr = priorityForm[channel]
+  ;[arr[index - 1], arr[index]] = [arr[index], arr[index - 1]]
+}
+
+const moveDown = (channel, index) => {
+  const arr = priorityForm[channel]
+  if (index >= arr.length - 1) return
+  ;[arr[index], arr[index + 1]] = [arr[index + 1], arr[index]]
+}
+
+const savePriority = async () => {
+  dsSaving.value = true
+  try {
+    for (const channel of ['trading', 'market_data', 'download']) {
+      const provider_order = priorityForm[channel].map(p => p.provider_id)
+      if (provider_order.length === 0) continue
+      const res = await fetch('/api/v1/ui/data-sources/priority', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Auth-Token': getToken() },
+        body: JSON.stringify({ channel_type: channel, provider_order })
+      })
+      const data = await res.json()
+      if (!data.success) {
+        ElMessage.error(`保存 ${channel} 优先级失败: ${data.message}`)
+        dsSaving.value = false
+        return
+      }
+    }
+    ElMessage.success('通道优先级已更新')
+    priorityVisible.value = false
+    loadDataSources()
+  } catch (e) {
+    ElMessage.error('保存失败: ' + e.message)
+  } finally {
+    dsSaving.value = false
+  }
+}
+
 const createForm = reactive({
   name: '',
   agent_type: 'claude_code',
@@ -582,7 +904,6 @@ const roleTagType = (role) => {
   return map[role] || 'info'
 }
 
-const getToken = () => localStorage.getItem('auth_token') || ''
 
 const loadAgents = async () => {
   try {

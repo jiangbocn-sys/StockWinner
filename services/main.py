@@ -19,7 +19,7 @@ from services.common.timezone import get_china_time
 from services.common.database import get_db_manager, reset_db_manager
 from services.common.account_manager import get_account_manager, reset_account_manager
 from services.common.structured_logger import get_logger
-from services.ui import dashboard, accounts, positions, trades, strategies, screening, monitoring, market_data, data_explorer, position_rules, factors, scheduler, notifications, trading_strategies, strategy_performance, data_service
+from services.ui import dashboard, accounts, positions, trades, strategies, screening, monitoring, market_data, data_explorer, position_rules, factors, scheduler, notifications, trading_strategies, strategy_performance, data_service, data_sources
 from services.backtest.api import router as backtest_router
 from services.strategy.api import router as strategy_v2_router
 from services.account_management.api import router as account_management_router
@@ -722,10 +722,52 @@ async def lifespan(app: FastAPI):
         from services.data.channel.router import get_channel_router, ChannelType, ChannelConfig
         from services.data.channel.config_manager import load_channel_order
         from services.data.providers.amazingdata_provider import AmazingDataProvider
+        from services.data.providers.eastmoney_provider import EastmoneyDataProvider
+        from services.data.providers.tushare_provider import TushareDataProvider
+        from services.data.providers.sina_provider import SinaDataProvider
+        from services.data.providers.tencent_provider import TencentDataProvider
+        from services.data.providers.akshare_provider import AkshareDataProvider
 
         router = get_channel_router()
+
+        # 注册 AmazingData provider
         amazing_provider = AmazingDataProvider()
         router.register_provider(amazing_provider)
+
+        # 注册 Eastmoney provider（无需配置，直接初始化）
+        eastmoney_provider = EastmoneyDataProvider()
+        await eastmoney_provider.initialize({})
+        router.register_provider(eastmoney_provider)
+
+        # 注册 Tushare provider（需要从 DB 读取 api_token）
+        tushare_provider = TushareDataProvider()
+        db = get_db_manager()
+        tushare_cfg = await db.fetchone(
+            "SELECT system_config_json FROM data_source_config WHERE provider_id = 'tushare'"
+        )
+        if tushare_cfg and tushare_cfg.get("system_config_json"):
+            import json
+            system_config = json.loads(tushare_cfg["system_config_json"])
+            await tushare_provider.initialize(system_config)
+            log.log_event("data_source_init", "Tushare provider 已从 DB 配置初始化")
+        else:
+            log.log_event("data_source_init", "Tushare provider 未配置 API Token，跳过初始化")
+        router.register_provider(tushare_provider)
+
+        # 注册 Sina provider（无需配置）
+        sina_provider = SinaDataProvider()
+        await sina_provider.initialize({})
+        router.register_provider(sina_provider)
+
+        # 注册 Tencent provider（无需配置）
+        tencent_provider = TencentDataProvider()
+        await tencent_provider.initialize({})
+        router.register_provider(tencent_provider)
+
+        # 注册 Akshare provider（无需配置）
+        akshare_provider = AkshareDataProvider()
+        await akshare_provider.initialize({})
+        router.register_provider(akshare_provider)
 
         for ct in [ChannelType.TRADING, ChannelType.MARKET_DATA, ChannelType.DATA_DOWNLOAD]:
             provider_order = await load_channel_order(ct.value)
@@ -736,7 +778,7 @@ async def lifespan(app: FastAPI):
                     timeout_seconds=15.0,
                 ))
 
-        log.log_event("data_source_init", "多数据源 ChannelRouter 已初始化")
+        log.log_event("data_source_init", "多数据源 ChannelRouter 已初始化（amazingdata + eastmoney + tushare + sina + tencent + akshare）")
     except Exception as e:
         log.error("data_source_init", f"ChannelRouter 初始化失败: {e}")
 
@@ -1086,6 +1128,7 @@ app.include_router(notifications.router)  # 通知 API 路由
 app.include_router(strategy_performance.router)  # 策略效能评估 API 路由
 app.include_router(data_service.router)  # 扩展数据服务 API（指数/行业/财报/龙虎榜/两融等）
 app.include_router(backtest_router)  # 回测系统 API 路由
+app.include_router(data_sources.router)  # 数据源管理 API
 
 # Agent API 路由（独立路径，不影响 UI）
 register_agent_routers(app)

@@ -1508,8 +1508,12 @@ class SchedulerService:
         finally:
             loop.close()
 
-    async def _execute_strategy_task(self, task_id: int):
-        """异步执行任务（支持 builtin 和 strategy 两种类型）"""
+    async def _execute_strategy_task(self, task_id: int, force: bool = False):
+        """异步执行任务（支持 builtin 和 strategy 两种类型）
+
+        Args:
+            force: True=手动触发，跳过 require_trading_day 检查
+        """
         from services.common.database import get_db_manager
         import json
 
@@ -1523,8 +1527,9 @@ class SchedulerService:
 
         task_type = task.get("task_type", "strategy")
 
-        # 交易日检查：require_trading_day=1 且今天不是交易日时跳过
-        if task.get("require_trading_day"):
+        # 交易日检查：require_trading_day=1 且今天不是交易日时跳过执行
+        # 手动触发（force=True）时跳过此检查
+        if not force and task.get("require_trading_day"):
             from services.trading.trading_hours import is_today_trading_day
             if not is_today_trading_day():
                 logger.info(f"任务 {task_id} 要求交易日，今天非交易日，跳过执行")
@@ -1845,10 +1850,50 @@ class SchedulerService:
             except Exception as notify_err:
                 logger.warning(f"发送任务失败通知失败: {notify_err}")
 
+    def _reload_channel_router(self):
+        """重新加载 ChannelRouter（数据源配置变更后调用）"""
+        try:
+            import asyncio
+            from services.data.channel.router import get_channel_router, ChannelType, ChannelConfig
+            from services.data.channel.config_manager import load_channel_order
+
+            router = get_channel_router()
+            # 重新加载通道优先级配置
+            async def _reload():
+                for ct in [ChannelType.TRADING, ChannelType.MARKET_DATA, ChannelType.DATA_DOWNLOAD]:
+                    provider_order = await load_channel_order(ct.value)
+                    if provider_order:
+                        router.set_channel_config(ct, ChannelConfig(
+                            channel_type=ct,
+                            provider_order=provider_order,
+                            timeout_seconds=15.0,
+                        ))
+
+            from services.common.async_helper import run_async_safe
+            result = {}
+            def _do_reload():
+                loop = asyncio.new_event_loop()
+                try:
+                    loop.run_until_complete(_reload())
+                    result['success'] = True
+                except Exception as e:
+                    result['success'] = False
+                    result['error'] = str(e)
+                finally:
+                    loop.close()
+
+            run_async_safe(_do_reload)
+            if result.get('success'):
+                logger.info("ChannelRouter 配置已重新加载")
+            else:
+                logger.warning(f"ChannelRouter 重新加载失败: {result.get('error')}")
+        except Exception as e:
+            logger.error(f"_reload_channel_router 失败: {e}")
+
     def run_manual_strategy_task(self, task_id: int) -> Dict:
-        """手动触发策略任务"""
+        """手动触发策略任务（force=True 跳过 require_trading_day 检查）"""
         logger.info(f"手动触发策略任务 ID={task_id}")
-        run_async_safe(self._execute_strategy_task, task_id)
+        run_async_safe(self._execute_strategy_task, task_id, True)
         return {'success': True, 'message': f'策略任务 {task_id} 已启动'}
 
 

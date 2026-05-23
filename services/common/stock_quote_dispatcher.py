@@ -1,17 +1,12 @@
 """
-GatewayDispatcher — 整合到 gateway 模块的行情调度器
+股票行情调度器 — StockQuoteDispatcher
 
-职责：
-1. 管理订阅（subscriber_id → stock_codes + priority + interval）
-2. 后台定时刷新（合并去重后分批调 SDK snapshot）
-3. 即时刷新（refresh_now）
-4. 结果写入 PriceCache
-5. 通过 gateway 的 _serial_lock 排队，消除多头竞争
+统一管理所有 SDK 行情查询，支持按需订阅、去重、优先级调度。
 
-调用方通过 gateway 访问：
-    gateway.subscribe(sub_id, codes, interval, priority)
-    await gateway.refresh_now(sub_id)
-    gateway.unsubscribe(sub_id)
+替代方案：各模块直接调用 gateway.get_batch_market_data → 所有股票一次性查询。
+新方案：各模块订阅关心的股票集合，dispatcher 合并去重后分批查询 SDK snapshot。
+
+调用链：subscriber → dispatcher → sdk_mgr.query_snapshot (直接调用，不经过 gateway)
 """
 
 import asyncio
@@ -33,11 +28,11 @@ class Subscription:
     priority: int = 2               # 1=高(监控), 2=中(UI), 3=低(后台)
 
 
-class GatewayDispatcher:
-    """行情刷新调度器 — 作为 gateway 的内部组件
+class StockQuoteDispatcher:
+    """行情刷新调度器
 
     - 管理多个订阅者的股票集合
-    - 合并去重后分批调 SDK snapshot（通过 gateway 的 _serial_lock 排队）
+    - 合并去重后分批调 SDK snapshot
     - 结果写入 PriceCache
     - 后台循环自动刷新活跃的订阅
     """
@@ -52,12 +47,6 @@ class GatewayDispatcher:
         self._tick_interval: float = 10.0    # 后台循环 tick 间隔
         self._sdk_batch_size: int = 15       # 每批 SDK 查询股票数（snapshot 30s 超时限制）
         self._loop_id: Optional[int] = None  # 记录当前事件循环 ID
-        self._sdk_healthy = True
-        self._sdk_error_time: Optional[str] = None
-        self._sdk_error_msg: str = ""
-        self._consecutive_errors = 0
-        self._last_data_time: Optional[str] = None
-        self._data_stale = False
 
     def _get_lock(self) -> asyncio.Lock:
         """延迟初始化 Lock，支持事件循环切换"""
@@ -88,6 +77,11 @@ class GatewayDispatcher:
     def unsubscribe(self, subscriber_id: str):
         """移除订阅"""
         self._subscriptions.pop(subscriber_id, None)
+
+    def update_subscription(self, subscriber_id: str, stock_codes: Set[str],
+                             interval: int = 30, priority: int = 2):
+        """更新或注册订阅（兼容别名）"""
+        self.subscribe(subscriber_id, stock_codes, interval, priority)
 
     def update_codes(self, subscriber_id: str, stock_codes: Set[str]):
         """更新某订阅的股票列表"""
@@ -121,7 +115,7 @@ class GatewayDispatcher:
             return
         self._running = True
         self._bg_task = asyncio.create_task(self._dispatch_loop())
-        get_logger("dispatcher").info("dispatcher", "GatewayDispatcher 已启动")
+        get_logger("dispatcher").info("dispatcher", "StockQuoteDispatcher 已启动")
 
     async def stop(self):
         """停止后台调度循环"""
@@ -133,7 +127,7 @@ class GatewayDispatcher:
             except asyncio.CancelledError:
                 pass
             self._bg_task = None
-        get_logger("dispatcher").info("dispatcher", "GatewayDispatcher 已停止")
+        get_logger("dispatcher").info("dispatcher", "StockQuoteDispatcher 已停止")
 
     async def _dispatch_loop(self):
         """后台调度循环，每 tick_interval 秒执行一次"""
@@ -181,7 +175,7 @@ class GatewayDispatcher:
         if not all_codes:
             return
 
-        # 执行 SDK 查询（通过 gateway 的 _serial_lock 排队）
+        # 执行 SDK 查询
         async with self._get_lock():
             result = await self._query_sdk(list(all_codes))
 
@@ -236,13 +230,7 @@ class GatewayDispatcher:
             else:
                 row = snap.iloc[0] if hasattr(snap, "iloc") else snap
                 try:
-                    md = self._build_market_data(row, code)
-                    # 非交易时段 snapshot 可能返回有行但价格全为 0 的数据，当作失败处理
-                    if md and md.current_price > 0:
-                        results[code] = md
-                    else:
-                        snapshot_failed.append(code)
-                        results[code] = None
+                    results[code] = self._build_market_data(row, code)
                 except Exception as e:
                     get_logger("dispatcher").log_event("parse_error", f"快照数据解析失败 {code}: {e}")
                     results[code] = None
@@ -254,36 +242,7 @@ class GatewayDispatcher:
                 if code in kline_results:
                     results[code] = kline_results[code]
 
-        # ③ 仍有 None 的代码 → 从本地 kline.db 兜底（仅非交易时段）
-        # 交易时段不使用 kline.db 兜底，避免用昨收价冒充实时价误导策略
-        still_none = [c for c in codes if results.get(c) is None]
-        if still_none:
-            from services.trading.trading_hours import can_trade
-            if not can_trade():
-                kline_db_results = self._fill_from_kline_db_local(set(still_none))
-                for code, md in kline_db_results.items():
-                    if md and md.current_price > 0:
-                        results[code] = md
-
         valid_count = sum(1 for v in results.values() if v is not None)
-
-        # 更新健康状态
-        if valid_count > 0:
-            self._last_data_time = get_china_time().strftime("%Y-%m-%d %H:%M:%S")
-            if self._data_stale:
-                get_logger("dispatcher").log_event("data_recovered", f"行情数据已恢复，有效股票数={valid_count}")
-                self._data_stale = False
-            if not self._sdk_healthy:
-                self._sdk_healthy = True
-                self._sdk_error_time = None
-                self._sdk_error_msg = ""
-                self._consecutive_errors = 0
-        elif len(codes) > 0:
-            self._data_stale = True
-            self._sdk_healthy = False
-            self._sdk_error_msg = f"SDK 返回 {len(codes)} 只股票但全部现价无效"
-            self._consecutive_errors += 1
-
         get_logger("dispatcher").info("dispatcher",
             f"SDK 行情: requested={len(codes)}, snapshot_valid={len(codes)-len(snapshot_failed)}, "
             f"kline_fallback={sum(1 for c in snapshot_failed if c in results and results[c] is not None)}, "
@@ -291,7 +250,11 @@ class GatewayDispatcher:
         return results
 
     async def _fallback_kline(self, codes: List[str]) -> Dict[str, Any]:
-        """snapshot 失败时回退到 K 线数据获取价格（不限股票数，分批 15 只）"""
+        """snapshot 失败时回退到 K 线数据获取价格
+
+        注意：snapshot 超时后 SDK 连接可能处于不稳定状态，K 线查询也会很慢。
+        策略：只尝试前 10 只股票，每批 5 只快速查询，避免进一步阻塞。
+        """
         import datetime
         from datetime import timedelta
         from services.common.sdk_manager import get_sdk_manager
@@ -300,18 +263,22 @@ class GatewayDispatcher:
         if not codes:
             return {}
 
+        # snapshot 超时后连接可能已坏，只尝试少量股票
+        max_fallback = 10
+        codes_to_try = codes[:max_fallback]
+
         sdk_mgr = get_sdk_manager()
         end_dt = get_china_time()
-        begin_dt = end_dt - timedelta(days=3)
+        begin_dt = end_dt - timedelta(days=2)
         end_date_int = int((end_dt + timedelta(days=1)).strftime('%Y%m%d'))
         begin_date_int = int(begin_dt.strftime('%Y%m%d'))
 
         results: Dict[str, Any] = {}
 
-        # 分批查询 K 线，每批 15 只
-        batch_size = 15
-        for i in range(0, len(codes), batch_size):
-            batch = codes[i:i + batch_size]
+        # 分批查询 K 线，每批 5 只（snapshot 超时后 K 线也会很慢）
+        batch_size = 5
+        for i in range(0, len(codes_to_try), batch_size):
+            batch = codes_to_try[i:i + batch_size]
             if not sdk_mgr.is_connected():
                 break
             result = sdk_mgr.query_kline(
@@ -346,6 +313,7 @@ class GatewayDispatcher:
         current_price = get_float('close', 0)
         prev_close = get_float('pre_close', 0)
         if prev_close == 0:
+            # 尝试从上一行获取 prev_close，或用当前 close
             prev_close = current_price
         change_percent = ((current_price - prev_close) / prev_close * 100) if prev_close != 0 else 0
 
@@ -366,70 +334,14 @@ class GatewayDispatcher:
             prev_close=prev_close,
             volume=int(get_float('volume', 0)),
             amount=get_float('amount', 0),
-            bid=[current_price] * 5,
+            bid=[current_price] * 5,      # 五档不可用，用现价填充
             ask=[current_price] * 5,
             bid_volume=[0] * 5,
             ask_volume=[0] * 5,
             trade_date=str(row.get('trade_date', row.get('kline_time', ''))),
         )
 
-    @staticmethod
-    def _fill_from_kline_db_local(codes: Set[str]) -> Dict[str, Any]:
-        """从本地 kline.db 读取最新收盘价兜底（不依赖 SDK）"""
-        import sqlite3
-        from pathlib import Path
-        from services.trading.gateway import MarketData
-
-        kline_db = Path(__file__).parent.parent.parent / "data" / "kline.db"
-        if not kline_db.exists():
-            return {}
-
-        results: Dict[str, Any] = {}
-        try:
-            conn = sqlite3.connect(str(kline_db), timeout=10)
-            conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
-            placeholders = ','.join(['?'] * len(codes))
-            cursor.execute(f"""
-                SELECT k.stock_code, k.close, k.open, k.high, k.low, k.volume, k.amount, k.trade_date
-                FROM kline_data k
-                INNER JOIN (
-                    SELECT stock_code, MAX(trade_date) as max_date
-                    FROM kline_data
-                    WHERE stock_code IN ({placeholders})
-                    GROUP BY stock_code
-                ) latest ON k.stock_code = latest.stock_code AND k.trade_date = latest.max_date
-            """, list(codes))
-            for row in cursor.fetchall():
-                code = row['stock_code']
-                close = float(row['close'] or 0)
-                if close > 0:
-                    open_p = float(row['open'] or close)
-                    high = float(row['high'] or close)
-                    low = float(row['low'] or close)
-                    vol = float(row['volume'] or 0)
-                    amt = float(row['amount'] or 0)
-                    results[code] = MarketData(
-                        stock_code=code,
-                        stock_name=code,
-                        current_price=close,
-                        change_percent=0,
-                        high=high,
-                        low=low,
-                        open_price=open_p,
-                        prev_close=close,
-                        volume=int(vol),
-                        amount=amt,
-                        bid=[close] * 5,
-                        ask=[close] * 5,
-                        bid_volume=[0] * 5,
-                        ask_volume=[0] * 5,
-                        trade_date=str(row['trade_date'] or '').replace('-', ''),
-                    )
-            conn.close()
-        except Exception:
-            pass
-        return results
+    # ── 工具方法 ──
 
     @staticmethod
     def _build_market_data(row, stock_code: str) -> Any:
@@ -450,28 +362,18 @@ class GatewayDispatcher:
             v = row.get(key, default) if hasattr(row, 'get') else getattr(row, key, default)
             return str(v) if v is not None else default
 
-        def get_first_float(candidates, default=0.0):
-            """依次尝试多个列名，返回第一个非零且非 NaN 的值"""
-            import math
-            for key in candidates:
-                try:
-                    v = row.get(key) if hasattr(row, 'get') else getattr(row, key, None)
-                    fval = float(v)
-                    if fval == 0 or math.isnan(fval) or fval is None:
-                        continue
-                    return fval
-                except (ValueError, TypeError, AttributeError):
-                    continue
-            return default
-
+        # 股票名称
         stock_name = get_str('stock_name') or get_str('name') or stock_code
+
+        # 五档价格
         bid = [get_float(f'bid_price{i}', 0) for i in range(1, 6)]
         ask = [get_float(f'ask_price{i}', 0) for i in range(1, 6)]
         bid_volume = [get_int(f'bid_volume{i}', 0) for i in range(1, 6)]
         ask_volume = [get_int(f'ask_volume{i}', 0) for i in range(1, 6)]
 
-        current_price = get_first_float(['last', 'current_price', 'price', 'close'], 0)
-        prev_close = get_first_float(['pre_close', 'prev_close', 'preclose'], 0)
+        # current_price：与 gateway 一致
+        current_price = get_float('current_price', get_float('price', 0))
+        prev_close = get_float('prev_close', get_float('preclose', 0))
         if prev_close == 0:
             prev_close = current_price
         change_percent = ((current_price - prev_close) / prev_close * 100) if prev_close != 0 else 0
@@ -535,31 +437,26 @@ class GatewayDispatcher:
             "subscription_count": len(self._subscriptions),
             "subscriptions": sub_info,
             "monitor_age_seconds": monitor_age,
-            "sdk_healthy": self._sdk_healthy,
-            "sdk_error_time": self._sdk_error_time,
-            "sdk_error_msg": self._sdk_error_msg,
-            "data_stale": self._data_stale,
-            "last_data_time": self._last_data_time,
         }
 
 
 # ── 全局单例 ──
 
-_dispatcher: Optional[GatewayDispatcher] = None
+_dispatcher: Optional[StockQuoteDispatcher] = None
 _dispatcher_lock = __import__('threading').Lock()
 
 
-def get_gateway_dispatcher() -> GatewayDispatcher:
+def get_stock_quote_dispatcher() -> StockQuoteDispatcher:
     """获取全局调度器单例"""
     global _dispatcher
     if _dispatcher is None:
         with _dispatcher_lock:
             if _dispatcher is None:
-                _dispatcher = GatewayDispatcher()
+                _dispatcher = StockQuoteDispatcher()
     return _dispatcher
 
 
-def reset_gateway_dispatcher():
+def reset_stock_quote_dispatcher():
     """重置调度器（用于测试）"""
     global _dispatcher
     _dispatcher = None

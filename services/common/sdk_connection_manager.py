@@ -329,6 +329,16 @@ class SDKConnectionManager:
 
     def disconnect(self):
         """主动断开连接（系统关闭时使用）"""
+        logger = get_logger("sdk_connection")
+
+        # 调用 SDK logout 关闭 C 层 TGW socket
+        try:
+            from AmazingData import logout
+            logout(_SDK_USERNAME)
+            logger.log_event("sdk_logout", f"SDK logout 调用成功: {_SDK_USERNAME}")
+        except Exception as e:
+            logger.warn("sdk_logout", f"logout 异常: {e}")
+
         with self._state_lock:
             self._state = ConnectionState.DISCONNECTED
             self._current_holder = None

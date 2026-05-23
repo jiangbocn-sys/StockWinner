@@ -59,6 +59,44 @@
             </el-alert>
           </el-card>
 
+          <!-- 数据通道状态 -->
+          <el-card class="data-sources-card" v-if="dataSources.length > 0">
+            <template #header>
+              <div class="card-header">
+                <span>数据通道状态</span>
+                <div>
+                  <el-tag size="small" :type="allSourcesConnected ? 'success' : 'warning'">
+                    {{ connectedCount }}/{{ dataSources.length }} 已连接
+                  </el-tag>
+                  <el-button size="small" @click="refreshDataSources" :loading="checkingHealth" style="margin-left: 8px">
+                    <el-icon><Refresh /></el-icon> 检测
+                  </el-button>
+                </div>
+              </div>
+            </template>
+            <el-descriptions :column="3" border>
+              <el-descriptions-item
+                v-for="ds in dataSources"
+                :key="ds.provider_id"
+                :label="ds.display_name"
+              >
+                <el-tag :type="statusTagType(ds.status)" size="small">
+                  {{ statusText(ds.status) }}
+                  <el-icon v-if="ds._checking" class="is-loading" style="margin-left: 4px"><Loading /></el-icon>
+                </el-tag>
+                <span v-if="ds.latency_ms >= 0" style="color: #909399; font-size: 12px; margin-left: 6px">
+                  {{ ds.latency_ms }}ms
+                </span>
+                <div v-if="ds._checking" style="margin-top: 4px; font-size: 12px; color: #409eff">
+                  正在检测...
+                </div>
+                <div v-else-if="ds.error_message" class="error-text" style="margin-top: 4px; font-size: 12px">
+                  {{ ds.error_message }}
+                </div>
+              </el-descriptions-item>
+            </el-descriptions>
+          </el-card>
+
           <!-- 系统实时指标 -->
           <el-row :gutter="20" class="stats-row">
             <el-col :span="12">
@@ -199,7 +237,7 @@
 <script setup>
 import { ref, onMounted, onUnmounted, computed } from 'vue'
 import { useAccountStore } from '../stores/account'
-import { WarningFilled } from '@element-plus/icons-vue'
+import { WarningFilled, Refresh, Loading } from '@element-plus/icons-vue'
 import NavBar from '../components/NavBar.vue'
 
 const accountStore = useAccountStore()
@@ -265,6 +303,114 @@ const sdkMetrics = ref({
   recent_60s: { calls: 0, rows: 0, success_rate: 0, active_methods: [] },
   session: { total_calls: 0, success_calls: 0, total_rows: 0 },
 })
+
+// 数据通道状态
+const dataSources = ref([])
+const statusTagType = (status) => {
+  const map = { connected: 'success', disconnected: 'warning', error: 'danger', not_configured: 'info' }
+  return map[status] || 'info'
+}
+const statusText = (status) => {
+  const map = { connected: '已连接', disconnected: '未连接', error: '连接失败', not_configured: '未配置' }
+  return map[status] || '未知'
+}
+const connectedCount = computed(() => dataSources.value.filter(ds => ds.status === 'connected').length)
+const allSourcesConnected = computed(() => dataSources.value.length > 0 && dataSources.value.every(ds => ds.status === 'connected'))
+
+// 手动检测数据源健康（SSE 流式）
+const checkingHealth = ref(false)
+const refreshDataSources = async () => {
+  checkingHealth.value = true
+  // 重置所有数据源的检测状态
+  for (const ds of dataSources.value) {
+    ds._checking = false
+    ds.error_message = ds.error_message && ds.status !== 'connected' ? ds.error_message : null
+  }
+
+  try {
+    const response = await fetch('/api/v1/ui/data-sources/health/stream')
+    if (!response.ok) throw new Error('SSE 请求失败')
+
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split('\n')
+      buffer = lines.pop() || '' // 保留最后一个不完整的行
+
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue
+        try {
+          const msg = JSON.parse(line.slice(6))
+
+          if (msg.provider_id === '__meta__' || msg.provider_id === '__done__' || msg.provider_id === '__error__') {
+            if (msg.provider_id === '__error__') {
+              console.error('健康检查错误:', msg.message)
+            }
+            continue
+          }
+
+          if (msg.status === 'checking') {
+            // 标记该 provider 正在检测
+            const ds = dataSources.value.find(d => d.provider_id === msg.provider_id)
+            if (ds) ds._checking = true
+          } else if (msg.status === 'done') {
+            // 更新检测结果
+            const ds = dataSources.value.find(d => d.provider_id === msg.provider_id)
+            if (ds) {
+              ds._checking = false
+              if (msg.ok) {
+                ds.status = 'connected'
+                ds.error_message = null
+              } else {
+                ds.status = 'error'
+                ds.error_message = msg.message || '健康检查失败'
+              }
+              ds.latency_ms = msg.latency_ms >= 0 ? msg.latency_ms : ds.latency_ms
+            }
+          }
+        } catch (e) {
+          console.warn('SSE 解析失败:', e)
+        }
+      }
+    }
+  } catch (e) {
+    console.error('健康检查失败:', e)
+    // 回退到旧接口
+    try {
+      const res = await fetch('/api/v1/ui/data-sources/health')
+      const data = await res.json()
+      if (data.success && data.data) {
+        for (const ds of dataSources.value) {
+          const health = data.data[ds.provider_id]
+          if (health) {
+            if (health.ok) {
+              ds.status = 'connected'
+              ds.error_message = null
+            } else {
+              ds.status = 'error'
+              ds.error_message = health.message || '健康检查失败'
+            }
+            ds.latency_ms = health.latency_ms ?? ds.latency_ms
+          }
+        }
+      }
+    } catch (e2) {
+      console.error('回退健康检查也失败:', e2)
+    }
+  } finally {
+    checkingHealth.value = false
+    // 清除所有 _checking 标记
+    for (const ds of dataSources.value) {
+      delete ds._checking
+    }
+  }
+}
 
 // 本地时钟自动更新运行时长
 let uptimeTimer = null
@@ -368,6 +514,11 @@ const loadDashboard = async (silent = false) => {
       recent_60s: sm.recent_60s || { calls: 0, rows: 0, success_rate: 0, active_methods: [] },
       session: sm.session || { total_calls: 0, success_calls: 0, total_rows: 0 },
     }
+
+    // 数据通道状态
+    if (data.data_sources_status) {
+      dataSources.value = data.data_sources_status.map(ds => ({ ...ds, _checking: false }))
+    }
   } catch (error) {
     if (!silent) console.error('加载仪表盘数据失败:', error)
   }
@@ -457,6 +608,14 @@ onUnmounted(() => {
 
 .db-card {
   margin-bottom: 20px;
+}
+
+.data-sources-card {
+  margin-bottom: 20px;
+}
+
+.error-text {
+  color: #f56c6c;
 }
 
 .stat-card {

@@ -60,16 +60,25 @@ case "$1" in
         if [ -f "$PID_FILE" ]; then
             PID=$(cat "$PID_FILE")
             if kill -0 "$PID" 2>/dev/null; then
-                kill "$PID"
-                sleep 2
-                if ! kill -0 "$PID" 2>/dev/null; then
-                    echo "服务已停止"
-                    rm -f "$PID_FILE"
-                else
-                    echo "强制停止服务..."
+                # 先发送 SIGTERM 让应用执行 shutdown 钩子（调用 SDK logout 关闭 TGW 连接）
+                kill -15 "$PID"
+                echo "已发送 SIGTERM (PID: $PID)，等待优雅退出..."
+                # 等待最多 10 秒让 shutdown 钩子执行
+                for i in $(seq 1 10); do
+                    sleep 1
+                    if ! kill -0 "$PID" 2>/dev/null; then
+                        echo "服务已优雅退出"
+                        break
+                    fi
+                done
+                # 如果进程仍然存在，强制 kill
+                if kill -0 "$PID" 2>/dev/null; then
+                    echo "超时，强制 kill (PID: $PID)"
                     kill -9 "$PID"
-                    rm -f "$PID_FILE"
+                    sleep 1
                 fi
+                rm -f "$PID_FILE"
+                echo "服务已停止"
             else
                 echo "服务未运行"
                 rm -f "$PID_FILE"
@@ -78,6 +87,12 @@ case "$1" in
             echo "PID 文件不存在，服务可能未运行"
             # 尝试查找并停止 uvicorn 进程
             pkill -f "uvicorn services.main:app" && echo "已停止相关进程"
+        fi
+        # 确认 SDK TCP 连接已断开
+        sleep 1
+        if ss -tn | grep -q ':8600'; then
+            echo "WARNING: SDK 连接 (port 8600) 仍处于连接状态，可能是服务端超时未释放"
+            ss -tn | grep ':8600'
         fi
         ;;
     restart)

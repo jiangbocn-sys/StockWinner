@@ -40,6 +40,60 @@ def get_uptime_text() -> str:
     return "0天0小时0分0秒"
 
 
+async def _get_data_sources_status() -> list:
+    """获取所有数据源的连接状态"""
+    from services.data.channel.config_manager import get_all_provider_configs
+    from services.data.channel.router import get_channel_router
+    from services.common.timezone import get_china_time
+
+    try:
+        configs = await get_all_provider_configs()
+    except Exception:
+        return []
+
+    try:
+        router = get_channel_router()
+        registered = router.get_providers()
+    except Exception:
+        registered = {}
+
+    result = []
+    for cfg in configs:
+        pid = cfg["provider_id"]
+        provider = registered.get(pid)
+
+        if provider:
+            try:
+                hc = await provider.health_check()
+                status = "connected" if hc.get("ok") else "error"
+                error_msg = None if hc.get("ok") else hc.get("message", "")
+                latency_ms = hc.get("latency_ms", -1)
+            except Exception as e:
+                status = "error"
+                error_msg = str(e)
+                latency_ms = -1
+        elif cfg.get("is_enabled"):
+            status = "disconnected"
+            error_msg = None
+            latency_ms = -1
+        else:
+            status = "not_configured"
+            error_msg = None
+            latency_ms = -1
+
+        result.append({
+            "provider_id": pid,
+            "display_name": cfg.get("display_name", pid),
+            "is_enabled": bool(cfg.get("is_enabled", False)),
+            "status": status,
+            "error_message": error_msg,
+            "latency_ms": latency_ms,
+            "last_check_time": get_china_time().isoformat(),
+        })
+
+    return result
+
+
 def check_sdk_connection() -> str:
     """检测 Galaxy SDK 连接状态（只读状态，不触发登录）"""
     try:
@@ -229,6 +283,7 @@ async def get_dashboard(account_id: str = Path(..., description="账户 ID")):
             "memory_mb": resources["memory_mb"],
             "disk_percent": resources["disk_percent"],
         },
+        "data_sources_status": await _get_data_sources_status(),
         "today_trading": {
             "trade_count": trade_stats["total_count"],
             "buy_count": trade_stats["buy_count"],
