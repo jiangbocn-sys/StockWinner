@@ -64,7 +64,14 @@ class AmazingDataProvider(DataProvider):
             from services.common.sdk_manager import get_sdk_manager
             sdk_mgr = get_sdk_manager()
 
-            # 先检查连接状态
+            # 如果未连接，先尝试重连
+            if not sdk_mgr.is_connected():
+                try:
+                    sdk_mgr.connect()
+                except Exception:
+                    pass
+
+            # 检查当前连接状态（可能是刚重连成功的 CONNECTED，也可能是仍然未连接）
             if not sdk_mgr.is_connected():
                 latency_ms = (time.monotonic() - start) * 1000
                 return {
