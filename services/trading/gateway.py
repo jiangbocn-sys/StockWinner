@@ -278,7 +278,7 @@ class TradingGateway(TradingGatewayInterface):
         get_sdk_manager().disconnect()
 
     async def get_market_data(self, stock_code: str) -> Optional[MarketData]:
-        """获取真实行情数据 — 优先读 PriceCache（TTL 检查），未命中则触发 dispatcher 刷新"""
+        """获取真实行情数据 — 优先读 PriceCache（TTL 检查），未命中则并发走 SDK + 备用通道，先赢者胜"""
         if not self.connected:
             raise Exception("网关未连接")
 
@@ -292,54 +292,12 @@ class TradingGateway(TradingGatewayInterface):
         except Exception:
             pass
 
-        # ② 缓存未命中或已过期，通过 dispatcher 即时刷新
-        try:
-            from services.trading.gateway_dispatcher import get_gateway_dispatcher
-            dispatcher = get_gateway_dispatcher()
-            dispatcher.subscribe("_single", {stock_code}, interval=0, priority=1)
-            results = await dispatcher.refresh_now("_single")
-            dispatcher.unsubscribe("_single")
+        # ② 缓存未命中/过期 → 并发：SDK 路径 + 备用 Provider 路径，先赢者胜
+        md = await self._race_market_data(stock_code)
+        if md and md.current_price > 0:
+            return md
 
-            md = results.get(stock_code)
-            if md and md.current_price > 0:
-                return md
-        except Exception as sdk_error:
-            logger.warning(f"dispatcher 行情查询失败，尝试备用通道: {sdk_error}")
-
-        # ③ 回退：ChannelRouter 备用数据源（按优先级遍历所有 provider）
-        try:
-            from services.data.channel import get_channel_router, ChannelType
-            from services.data.providers.base import DataProviderError
-
-            router = get_channel_router()
-            raw_data = await router.execute(
-                ChannelType.TRADING,
-                "get_market_data",
-                stock_code=stock_code,
-            )
-
-            if raw_data:
-                return MarketData(
-                    stock_code=raw_data.get("stock_code", stock_code),
-                    stock_name=raw_data.get("stock_name", ""),
-                    current_price=float(raw_data.get("current_price", 0)),
-                    change_percent=float(raw_data.get("change_percent", 0)),
-                    high=float(raw_data.get("high", 0)),
-                    low=float(raw_data.get("low", 0)),
-                    open_price=float(raw_data.get("open_price", 0)),
-                    prev_close=float(raw_data.get("prev_close", 0)),
-                    volume=int(raw_data.get("volume", 0)),
-                    amount=float(raw_data.get("amount", 0)),
-                    bid=raw_data.get("bid", []),
-                    ask=raw_data.get("ask", []),
-                    bid_volume=raw_data.get("bid_volume", []),
-                    ask_volume=raw_data.get("ask_volume", []),
-                    trade_date=raw_data.get("trade_date", ""),
-                )
-        except DataProviderError as e:
-            logger.warning(f"所有备用通道均失败，回退 kline.db: {e}")
-
-        # ④ kline.db 最终兜底
+        # ③ kline.db 最终兜底（仅非交易时段）
         try:
             kline_results = await self._fill_stale_from_kline_db({stock_code})
             if stock_code in kline_results:
@@ -349,6 +307,76 @@ class TradingGateway(TradingGatewayInterface):
 
         logger.error(f"获取行情失败：{stock_code}")
         raise Exception(f"获取行情失败：所有数据源均不可用")
+
+    async def _race_market_data(self, stock_code: str) -> Optional[MarketData]:
+        """并发获取行情数据：SDK 与备用 Provider 同时启动，先赢者胜
+
+        当 SDK 被占用时，备用通道（sina/tencent 等 HTTP 接口）通常 100ms 内返回，
+        无需等待 SDK 15s 超时。SDK 空闲时两者几乎同时完成，SDK 通常更快。
+        """
+        sdk_result: Optional[MarketData] = None
+        fallback_result: Optional[Dict[str, Any]] = None
+        sdk_done = False
+        fallback_done = False
+
+        async def try_sdk():
+            nonlocal sdk_result, sdk_done
+            try:
+                from services.trading.gateway_dispatcher import get_gateway_dispatcher
+                dispatcher = get_gateway_dispatcher()
+                dispatcher.subscribe("_single_race", {stock_code}, interval=0, priority=1)
+                results = await dispatcher.refresh_now("_single_race")
+                dispatcher.unsubscribe("_single_race")
+                md = results.get(stock_code)
+                if md and md.current_price > 0:
+                    sdk_result = md
+            except Exception as e:
+                logger.debug(f"SDK 行情查询失败: {e}")
+            finally:
+                sdk_done = True
+
+        async def try_fallback():
+            nonlocal fallback_result, fallback_done
+            try:
+                from services.data.channel import get_channel_router, ChannelType
+                router = get_channel_router()
+                raw_data = await router.execute(
+                    ChannelType.TRADING,
+                    "get_market_data",
+                    stock_code=stock_code,
+                )
+                if raw_data and raw_data.get("current_price", 0) > 0:
+                    fallback_result = raw_data
+            except Exception:
+                pass
+            finally:
+                fallback_done = True
+
+        # 并发执行两条路径
+        await asyncio.gather(try_sdk(), try_fallback(), return_exceptions=True)
+
+        # 优先用 SDK 结果（数据质量更高，含五档），备用结果作为降级
+        if sdk_result:
+            return sdk_result
+        if fallback_result:
+            return MarketData(
+                stock_code=fallback_result.get("stock_code", stock_code),
+                stock_name=fallback_result.get("stock_name", ""),
+                current_price=float(fallback_result.get("current_price", 0)),
+                change_percent=float(fallback_result.get("change_percent", 0)),
+                high=float(fallback_result.get("high", 0)),
+                low=float(fallback_result.get("low", 0)),
+                open_price=float(fallback_result.get("open_price", 0)),
+                prev_close=float(fallback_result.get("prev_close", 0)),
+                volume=int(fallback_result.get("volume", 0)),
+                amount=float(fallback_result.get("amount", 0)),
+                bid=fallback_result.get("bid", []),
+                ask=fallback_result.get("ask", []),
+                bid_volume=fallback_result.get("bid_volume", []),
+                ask_volume=fallback_result.get("ask_volume", []),
+                trade_date=fallback_result.get("trade_date", ""),
+            )
+        return None
 
     def _market_data_from_ohlcv(self, ohlcv: Dict[str, float], stock_code: str) -> MarketData:
         """从 OHLCV 字典构造 MarketData（缓存数据，五档用现价填充）"""
@@ -1025,7 +1053,7 @@ class TradingGateway(TradingGatewayInterface):
         return []
 
     async def get_batch_market_data(self, stock_codes: List[str]) -> Dict[str, Optional[MarketData]]:
-        """批量获取行情数据 — 优先读 PriceCache（TTL 检查），过期/缺失的通过 dispatcher 补齐，SDK 不可用时 kline.db 兜底"""
+        """批量获取行情数据 — 优先读 PriceCache（TTL 检查），过期/缺失的并发走 SDK + 备用通道，先赢者胜"""
         if not stock_codes:
             return {}
 
@@ -1045,25 +1073,71 @@ class TradingGateway(TradingGatewayInterface):
             else:
                 stale_codes.add(norm)
 
-        # ② 对过期/缺失的股票，通过 dispatcher 刷新
+        # ② 对过期/缺失的股票，并发走 SDK + 备用 Provider
         if stale_codes:
-            try:
-                from services.trading.gateway_dispatcher import get_gateway_dispatcher
-                dispatcher = get_gateway_dispatcher()
-                sub_id = "_batch"
-                dispatcher.subscribe(sub_id, stale_codes, interval=0, priority=1)
-                sdk_results = await dispatcher.refresh_now(sub_id)
-                dispatcher.unsubscribe(sub_id)
+            sdk_results: Dict[str, Optional[MarketData]] = {}
+            fallback_results: Dict[str, Optional[Dict[str, Any]]] = {}
 
-                for code in stock_codes:
-                    norm = normalize_stock_code(code)
-                    if code not in results and norm in sdk_results:
-                        md = sdk_results[norm]
-                        results[code] = md if md and md.current_price > 0 else None
-            except Exception as e:
-                logger.warning(f"dispatcher 批量行情查询失败: {e}")
+            async def try_sdk_batch():
+                nonlocal sdk_results
+                try:
+                    from services.trading.gateway_dispatcher import get_gateway_dispatcher
+                    dispatcher = get_gateway_dispatcher()
+                    sub_id = "_batch_race"
+                    dispatcher.subscribe(sub_id, stale_codes, interval=0, priority=1)
+                    sdk_results = await dispatcher.refresh_now(sub_id)
+                    dispatcher.unsubscribe(sub_id)
+                except Exception as e:
+                    logger.debug(f"SDK 批量行情查询失败: {e}")
 
-        # ③ 验证：仍有 None 且 SDK 也失败的代码 → kline.db 兜底（16:30 后 kline.db 有当日数据）
+            async def try_fallback_batch():
+                nonlocal fallback_results
+                try:
+                    from services.data.channel import get_channel_router, ChannelType
+                    router = get_channel_router()
+                    fallback_results = await router.execute(
+                        ChannelType.TRADING,
+                        "get_batch_market_data",
+                        stock_codes=list(stale_codes),
+                    )
+                except Exception as e:
+                    logger.debug(f"备用通道批量行情查询失败: {e}")
+
+            # 并发执行
+            await asyncio.gather(try_sdk_batch(), try_fallback_batch(), return_exceptions=True)
+
+            # 合并结果：优先 SDK，缺失用备用
+            for code in stock_codes:
+                norm = normalize_stock_code(code)
+                if code in results:
+                    continue
+                md = sdk_results.get(norm) or sdk_results.get(code)
+                if md and md.current_price > 0:
+                    results[code] = md
+                else:
+                    fb = fallback_results.get(norm) or fallback_results.get(code)
+                    if fb and fb.get("current_price", 0) > 0:
+                        results[code] = MarketData(
+                            stock_code=fb.get("stock_code", code),
+                            stock_name=fb.get("stock_name", ""),
+                            current_price=float(fb.get("current_price", 0)),
+                            change_percent=float(fb.get("change_percent", 0)),
+                            high=float(fb.get("high", 0)),
+                            low=float(fb.get("low", 0)),
+                            open_price=float(fb.get("open_price", 0)),
+                            prev_close=float(fb.get("prev_close", 0)),
+                            volume=int(fb.get("volume", 0)),
+                            amount=float(fb.get("amount", 0)),
+                            bid=fb.get("bid", []),
+                            ask=fb.get("ask", []),
+                            bid_volume=fb.get("bid_volume", []),
+                            ask_volume=fb.get("ask_volume", []),
+                            trade_date=fb.get("trade_date", ""),
+                        )
+                    else:
+                        results[code] = None
+
+        # ③ kline.db 兜底（仅非交易时段）
         still_missing = {
             normalize_stock_code(code)
             for code in stock_codes
