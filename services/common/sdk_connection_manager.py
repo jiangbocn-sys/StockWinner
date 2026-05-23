@@ -310,6 +310,18 @@ class SDKConnectionManager:
                     self._state = ConnectionState.CONNECTED
                     self._consecutive_failures = 0
                     self._last_success_time = time.time()
+
+                # 清除 SDKManager 缓存实例，强制创建绑定到新 TCP 连接的新实例
+                try:
+                    from services.common.sdk_manager import SDKManager
+                    SDKManager._info_instance = None
+                    SDKManager._market_data_instance = None
+                    SDKManager._base_data_instance = None
+                    SDKManager._calendar = None
+                    logger.log_event("sdk_instances_reset", "SDK 缓存实例已重置")
+                except Exception:
+                    pass
+
                 self._stats["total_reconnects"] += 1
                 if is_reconnect:
                     logger.log_event("sdk_reconnect", "SDK 连接重连成功")
