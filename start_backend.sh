@@ -60,11 +60,11 @@ case "$1" in
         if [ -f "$PID_FILE" ]; then
             PID=$(cat "$PID_FILE")
             if kill -0 "$PID" 2>/dev/null; then
-                # 先发送 SIGTERM 让应用执行 shutdown 钩子（调用 SDK logout 关闭 TGW 连接）
+                # 发送 SIGTERM 触发 FastAPI lifespan shutdown 钩子（调用 SDK logout）
                 kill -15 "$PID"
                 echo "已发送 SIGTERM (PID: $PID)，等待优雅退出..."
-                # 等待最多 10 秒让 shutdown 钩子执行
-                for i in $(seq 1 10); do
+                # 等待最多 30 秒让 shutdown 钩子完成（SDK logout + 数据库关闭）
+                for i in $(seq 1 30); do
                     sleep 1
                     if ! kill -0 "$PID" 2>/dev/null; then
                         echo "服务已优雅退出"
@@ -80,24 +80,96 @@ case "$1" in
                 rm -f "$PID_FILE"
                 echo "服务已停止"
             else
-                echo "服务未运行"
+                echo "服务未运行 (PID: $PID 已失效)"
                 rm -f "$PID_FILE"
             fi
         else
-            echo "PID 文件不存在，服务可能未运行"
-            # 尝试查找并停止 uvicorn 进程
-            pkill -f "uvicorn services.main:app" && echo "已停止相关进程"
+            echo "PID 文件不存在，尝试查找 uvicorn 进程..."
+            UVICORN_PID=$(pgrep -f "uvicorn services.main:app" | head -1)
+            if [ -n "$UVICORN_PID" ]; then
+                echo "发现 uvicorn 进程 (PID: $UVICORN_PID)，发送 SIGTERM..."
+                kill -15 "$UVICORN_PID"
+                for i in $(seq 1 30); do
+                    sleep 1
+                    if ! kill -0 "$UVICORN_PID" 2>/dev/null; then
+                        echo "服务已优雅退出"
+                        break
+                    fi
+                done
+                if kill -0 "$UVICORN_PID" 2>/dev/null; then
+                    echo "超时，强制 kill (PID: $UVICORN_PID)"
+                    kill -9 "$UVICORN_PID"
+                    sleep 1
+                fi
+                echo "服务已停止"
+            else
+                echo "未发现运行中的服务"
+            fi
         fi
         # 确认 SDK TCP 连接已断开
         sleep 1
         if ss -tn | grep -q ':8600'; then
-            echo "WARNING: SDK 连接 (port 8600) 仍处于连接状态，可能是服务端超时未释放"
-            ss -tn | grep ':8600'
+            echo "WARNING: SDK 连接 (port 8600) 仍未断开，等待超时..."
+            sleep 3
+            if ss -tn | grep -q ':8600'; then
+                ss -tn | grep ':8600'
+            else
+                echo "SDK 连接已断开"
+            fi
+        else
+            echo "SDK 连接已确认断开"
         fi
         ;;
     restart)
-        $0 stop
-        sleep 2
+        echo "重启 StockWinner 后端服务..."
+        echo "步骤 1/3: 停止服务（含 SDK logout + 实例清理）"
+        # 内联 stop 逻辑，避免子 shell
+        pkill -f "process_watchdog.sh" 2>/dev/null
+        if [ -f "$PID_FILE" ]; then
+            PID=$(cat "$PID_FILE")
+            if kill -0 "$PID" 2>/dev/null; then
+                kill -15 "$PID"
+                echo "  已发送 SIGTERM (PID: $PID)，等待 shutdown 钩子执行..."
+                for i in $(seq 1 30); do
+                    sleep 1
+                    if ! kill -0 "$PID" 2>/dev/null; then
+                        echo "  服务已优雅退出"
+                        break
+                    fi
+                done
+                if kill -0 "$PID" 2>/dev/null; then
+                    echo "  超时，强制 kill (PID: $PID)"
+                    kill -9 "$PID"
+                    sleep 1
+                fi
+                rm -f "$PID_FILE"
+            else
+                rm -f "$PID_FILE"
+            fi
+        else
+            UVICORN_PID=$(pgrep -f "uvicorn services.main:app" | head -1)
+            if [ -n "$UVICORN_PID" ]; then
+                kill -15 "$UVICORN_PID"
+                for i in $(seq 1 30); do
+                    sleep 1
+                    if ! kill -0 "$UVICORN_PID" 2>/dev/null; then
+                        break
+                    fi
+                done
+                if kill -0 "$UVICORN_PID" 2>/dev/null; then
+                    kill -9 "$UVICORN_PID"
+                    sleep 1
+                fi
+            fi
+        fi
+        # 确保 SDK TCP 连接断开
+        sleep 1
+        if ss -tn | grep -q ':8600'; then
+            echo "  等待 SDK TCP 连接超时..."
+            sleep 3
+        fi
+        echo "步骤 2/3: SDK 连接已清理"
+        echo "步骤 3/3: 启动新服务..."
         $0 start
         ;;
     status)
