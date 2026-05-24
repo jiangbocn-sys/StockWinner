@@ -535,7 +535,7 @@
       </el-dialog>
 
       <!-- K 线图弹窗 -->
-      <el-dialog v-model="klineVisible" :title="`${klineStockInfo.name} (${klineStockInfo.code}) K线走势`" width="85%" top="5vh" @close="destroyKlineChart">
+      <el-dialog v-model="klineVisible" :title="`${klineStockInfo.name} (${klineStockInfo.code}) K线走势`" width="85%" top="5vh">
         <div class="kline-nav">
           <el-button size="small" @click="prevStock" :disabled="!hasPrevStock">
             <el-icon><ArrowLeft /></el-icon> 上一只
@@ -545,7 +545,7 @@
             下一只 <el-icon><ArrowRight /></el-icon>
           </el-button>
         </div>
-        <div ref="klineChartRef" style="width: 100%; height: 550px"></div>
+        <KlineChart ref="klineChartRef" :data="klineData" height="550px" />
       </el-dialog>
     </el-main>
   </div>
@@ -557,7 +557,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { Search, Refresh, Plus, MoreFilled, Upload, Loading, WarningFilled, Edit, Delete, ArrowLeft, ArrowRight, Download } from '@element-plus/icons-vue'
 import { useAccountStore } from '../stores/account'
 import NavBar from '../components/NavBar.vue'
-import * as echarts from 'echarts'
+import KlineChart from '../components/KlineChart.vue'
 
 const accountStore = useAccountStore()
 const currentAccountId = computed(() => accountStore.currentAccountId)
@@ -614,7 +614,7 @@ const klineVisible = ref(false)
 const klineChartRef = ref(null)
 const klineStockInfo = ref({ code: '', name: '' })
 const klineStockIndex = ref(-1)
-let klineChart = null
+const klineData = ref([])
 
 const hasPrevStock = computed(() => klineStockIndex.value > 0)
 const hasNextStock = computed(() => klineStockIndex.value >= 0 && klineStockIndex.value < sortedCurrentStocks.value.length - 1)
@@ -972,15 +972,15 @@ const showKline = async (row) => {
 
 const loadKlineData = async (code, name) => {
   klineStockInfo.value = { code, name }
+  klineData.value = []
 
   // 优先从本地 kline.db 读取（避免 SDK 串行锁竞争导致越切越慢）
   try {
     const res = await fetch(`/api/v1/ui/${currentAccountId.value}/stocks/${code}/kline-local?months=6`)
     if (res.ok) {
       const data = await res.json()
-      await nextTick()
       if (data.success && data.kline && data.kline.length > 0) {
-        renderKlineChart(data.kline)
+        klineData.value = data.kline
         return
       }
     }
@@ -998,8 +998,7 @@ const loadKlineData = async (code, name) => {
   try {
     const res = await fetch(`/api/v1/ui/${currentAccountId.value}/market/kline?stock_code=${code}&period=day&start_date=${start}&end_date=${end}`)
     const data = await res.json()
-    await nextTick()
-    renderKlineChart(data.data?.kline || [])
+    klineData.value = data.data?.kline || []
   } catch (e) {
     console.error('加载 K 线数据失败:', e)
   }
@@ -1021,81 +1020,6 @@ const nextStock = async () => {
   if (!row) return
   klineStockIndex.value = idx
   await loadKlineData(row.stock_code, row.stock_name)
-}
-
-const renderKlineChart = (klineData) => {
-  if (!klineChartRef.value) return
-  if (!klineChart) {
-    klineChart = echarts.init(klineChartRef.value)
-  }
-
-  const dates = klineData.map(d => String(d.trade_date))
-  const ohlcValues = klineData.map(d => [d.open, d.close, d.low, d.high])
-  const volumes = klineData.map(d => d.volume || 0)
-
-  klineChart.setOption({
-    tooltip: {
-      trigger: 'axis',
-      axisPointer: { type: 'cross' },
-      formatter: (params) => {
-        const p = params[0]
-        if (!p || !p.value) return ''
-        const idx = dates.indexOf(p.name)
-        const vol = idx >= 0 ? volumes[idx] : '-'
-        const v = p.value
-        return `${p.name}<br/>开: ${v[1]}  收: ${v[2]}  低: ${v[3]}  高: ${v[4]}<br/>量: ${typeof vol === 'number' ? vol.toLocaleString() : vol}`
-      },
-    },
-    grid: [
-      { left: '8%', right: '4%', top: '8%', height: '55%' },
-      { left: '8%', right: '4%', top: '68%', height: '22%' },
-    ],
-    xAxis: [
-      { type: 'category', data: dates, gridIndex: 0, axisLabel: { show: false } },
-      { type: 'category', data: dates, gridIndex: 1 },
-    ],
-    yAxis: [
-      { type: 'value', scale: true, gridIndex: 0 },
-      { type: 'value', scale: true, gridIndex: 1, splitNumber: 2 },
-    ],
-    series: [
-      {
-        name: 'K线',
-        type: 'candlestick',
-        data: ohlcValues,
-        xAxisIndex: 0,
-        yAxisIndex: 0,
-        itemStyle: { color: '#ef232a', color0: '#14b143', borderColor: '#ef232a', borderColor0: '#14b143' },
-      },
-      {
-        name: '成交量',
-        type: 'bar',
-        data: volumes,
-        xAxisIndex: 1,
-        yAxisIndex: 1,
-        itemStyle: {
-          color: (param) => {
-            const idx = param.dataIndex
-            if (idx < klineData.length) {
-              return klineData[idx].close >= klineData[idx].open ? '#ef232a' : '#14b143'
-            }
-            return '#999'
-          },
-        },
-      },
-    ],
-    dataZoom: [{ type: 'inside' }, { type: 'slider', xAxisIndex: [0, 1] }],
-  }, true)
-  // resize 监听器只注册一次（在初始化时）
-  if (!klineChart._resizeBound) {
-    const handler = () => klineChart && klineChart.resize()
-    window.addEventListener('resize', handler)
-    klineChart._resizeBound = true
-  }
-}
-
-const destroyKlineChart = () => {
-  if (klineChart) { klineChart.dispose(); klineChart = null }
 }
 
 // 搜索股票（智能搜索：代码/拼音/名称）
@@ -1676,10 +1600,7 @@ const loadAll = async () => {
 const getStatusType = (status) => ({ pending: 'info', watching: 'warning', bought: 'success', sold: 'success', ignored: 'info' }[status] || 'info')
 const getStatusText = (status) => ({ pending: '待交易', watching: '观察中', bought: '已买入', sold: '已卖出', ignored: '已忽略' }[status] || status)
 
-const formatTime = (t) => {
-  if (!t) return '-'
-  return t.split('.')[0].replace('T', ' ')
-}
+import { formatTime } from '../utils/format'
 
 // DSA 分析
 const dsaAnalyzing = ref(false)

@@ -1277,19 +1277,7 @@ const deleteRun = async (runId) => {
   }
 }
 
-// 格式化金额
-const formatMoney = (val) => {
-  if (!val) return '-'
-  return Number(val).toLocaleString('zh-CN', { minimumFractionDigits: 0, maximumFractionDigits: 0 })
-}
-
-// 格式化百分比
-const formatPct = (val) => {
-  if (val == null) return '-'
-  const n = Number(val)
-  if (n === 0) return '0'
-  return (n * 100).toFixed(2) + '%'
-}
+import { formatMoney, formatPct } from '../utils/format'
 
 // 获取候选组名称列表
 const getGroupNames = (groupIds, groupNamesMap) => {

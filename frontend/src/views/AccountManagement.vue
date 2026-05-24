@@ -357,11 +357,7 @@ const formatDate = (dateStr) => {
   return date.toLocaleString('zh-CN')
 }
 
-// 格式化金额
-const formatMoney = (value) => {
-  if (value === null || value === undefined) return '0.00'
-  return Number(value).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
-}
+import { formatMoney } from '../utils/format'
 
 // 重置表单
 const resetForm = () => {

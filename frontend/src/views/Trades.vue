@@ -574,19 +574,7 @@ const getEventTypeColor = (type) => {
   return 'danger'
 }
 
-const formatNumber = (num) => {
-  return Number(num || 0).toLocaleString('zh-CN', { minimumFractionDigits: 2 })
-}
-
-const formatTime = (time) => {
-  if (!time) return '-'
-  // naive string 默认中国时间，显式附加 +08:00
-  const str = time.includes('+') || time.endsWith('Z') ? time : time + '+08:00'
-  const date = new Date(str)
-  if (isNaN(date.getTime())) return time
-  const pad = (n) => n.toString().padStart(2, '0')
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
-}
+import { formatNumber, formatTime } from '../utils/format'
 
 onMounted(async () => {
   await loadTrades()

@@ -702,10 +702,7 @@ const getStatusText = (status) => {
   return texts[status] || status
 }
 
-const formatTime = (t) => {
-  if (!t) return '-'
-  return t.split('.')[0].replace('T', ' ')
-}
+import { formatTime } from '../utils/format'
 
 onMounted(async () => {
   await checkServiceStatus()

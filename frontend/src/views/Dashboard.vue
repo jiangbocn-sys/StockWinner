@@ -528,9 +528,7 @@ const refreshData = () => {
   loadDashboard()
 }
 
-const formatNumber = (num) => {
-  return Number(num || 0).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
-}
+import { formatNumber } from '../utils/format'
 
 // 自动刷新定时器
 let refreshTimer = null

@@ -241,9 +241,7 @@ const handleExportSelections = (format) => {
   doExport(selectionColumns, data, '选股明细', format)
 }
 
-const formatNumber = (num) => {
-  return Number(num || 0).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
-}
+import { formatNumber } from '../utils/format'
 
 const onStrategyChange = () => {
   loadPerformance()
