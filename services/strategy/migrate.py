@@ -4,19 +4,17 @@
 添加选股策略、持仓策略、交易策略相关的数据库表
 """
 
-import sqlite3
-from pathlib import Path
-
-DB_PATH = Path(__file__).parent.parent.parent / "stockwinner.db"
+from services.common.database import get_sync_connection
 
 
 def migrate():
     """执行数据库迁移"""
-    conn = sqlite3.connect(str(DB_PATH), timeout=30)
+    conn = get_sync_connection("stockwinner")
     cursor = conn.cursor()
 
+    db_path = conn.cursor().execute("PRAGMA database_list").fetchone()[2]
     print(f"[Migrate] 开始执行策略模块数据库迁移...")
-    print(f"[Migrate] 数据库路径：{DB_PATH}")
+    print(f"[Migrate] 数据库路径：{db_path}")
 
     # ============== 选股策略相关表 ==============
 
@@ -257,7 +255,7 @@ def migrate():
     conn.close()
 
     print("[Migrate] 数据库迁移完成!")
-    print(f"[Migrate] 数据库路径：{DB_PATH}")
+    print(f"[Migrate] 数据库路径：{db_path}")
 
 
 if __name__ == "__main__":
