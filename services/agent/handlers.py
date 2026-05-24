@@ -910,26 +910,19 @@ async def query_stock_code(
     def _lookup_local(c):
         """本地数据库查询（同步）"""
         try:
-            import sqlite3 as _sqlite3
-            from pathlib import Path as _Path
-            from services.common.database import configure_kline_connection
-            kline_path = _Path(__file__).parent.parent.parent / "data" / "kline.db"
-            if kline_path.exists():
-                kconn = _sqlite3.connect(str(kline_path), timeout=30)
-                configure_kline_connection(kconn)
-                kconn.row_factory = _sqlite3.Row
+            from services.common.database import get_sync_connection
+            kconn = get_sync_connection("kline")
+            row = kconn.execute(
+                "SELECT DISTINCT stock_code, stock_name FROM kline_data WHERE stock_code = ? LIMIT 1",
+                (c,)
+            ).fetchone()
+            if not row:
                 row = kconn.execute(
-                    "SELECT DISTINCT stock_code, stock_name FROM kline_data WHERE stock_code = ? LIMIT 1",
+                    "SELECT DISTINCT stock_code, stock_name FROM stock_base_info WHERE stock_code = ? LIMIT 1",
                     (c,)
                 ).fetchone()
-                if not row:
-                    row = kconn.execute(
-                        "SELECT DISTINCT stock_code, stock_name FROM stock_base_info WHERE stock_code = ? LIMIT 1",
-                        (c,)
-                    ).fetchone()
-                kconn.close()
-                if row:
-                    return {"stock_code": row["stock_code"], "stock_name": row["stock_name"]}
+            if row:
+                return {"stock_code": row["stock_code"], "stock_name": row["stock_name"]}
         except Exception:
             pass
         return None
@@ -975,20 +968,13 @@ async def query_stock_code(
     # 名称 → 代码（模糊匹配）
     if stock_name:
         try:
-            import sqlite3 as _sqlite3
-            from pathlib import Path as _Path
-            from services.common.database import configure_kline_connection
-            kline_path = _Path(__file__).parent.parent.parent / "data" / "kline.db"
-            if kline_path.exists():
-                kconn = _sqlite3.connect(str(kline_path), timeout=30)
-                configure_kline_connection(kconn)
-                kconn.row_factory = _sqlite3.Row
-                rows = kconn.execute(
-                    "SELECT DISTINCT stock_code, stock_name FROM kline_data WHERE stock_name LIKE ? ORDER BY stock_code LIMIT 50",
-                    (f"%{stock_name}%",)
-                ).fetchall()
-                results = [{"stock_code": r["stock_code"], "stock_name": r["stock_name"]} for r in rows]
-                kconn.close()
+            from services.common.database import get_sync_connection
+            kconn = get_sync_connection("kline")
+            rows = kconn.execute(
+                "SELECT DISTINCT stock_code, stock_name FROM kline_data WHERE stock_name LIKE ? ORDER BY stock_code LIMIT 50",
+                (f"%{stock_name}%",)
+            ).fetchall()
+            results = [{"stock_code": r["stock_code"], "stock_name": r["stock_name"]} for r in rows]
         except Exception:
             pass
 

@@ -20,8 +20,7 @@ from datetime import datetime
 from typing import Dict, List, Tuple
 
 from services.common.timezone import get_china_time
-
-DB_PATH = Path(__file__).parent.parent.parent / "data" / "kline.db"
+from services.common.database import get_sync_connection, get_db_context
 
 
 class MonthlyFactorFiller:
@@ -54,15 +53,9 @@ class MonthlyFactorFiller:
         12: '31',  # 12月31日
     }
 
-    def __init__(self, db_path: Path = DB_PATH):
-        self.db_path = db_path
-
-    def _get_connection(self) -> sqlite3.Connection:
-        from services.common.database import configure_kline_connection
-        conn = sqlite3.connect(str(self.db_path), timeout=60)
-        configure_kline_connection(conn)
-        conn.row_factory = sqlite3.Row
-        return conn
+    def __init__(self, db_path: Path = None):
+        # db_path 参数保留向后兼容，但不再使用
+        pass
 
     def get_source_report_date(self, monthly_date: str) -> str:
         """
@@ -97,7 +90,7 @@ class MonthlyFactorFiller:
         Returns:
             更新统计信息
         """
-        conn = self._get_connection()
+        conn = get_sync_connection("kline")
         cursor = conn.cursor()
 
         # 获取所有有财务数据的季度记录
@@ -161,11 +154,8 @@ class MonthlyFactorFiller:
             else:
                 no_source_count += 1
 
-        # 批量更新数据库
         if batch_updates:
             self._batch_update_monthly(conn, batch_updates)
-
-        conn.close()
 
         print(f"[MonthlyFiller] 填充完成：成功 {filled_count}，无源数据 {no_source_count}")
 

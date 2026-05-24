@@ -376,18 +376,12 @@ class GatewayDispatcher:
     @staticmethod
     def _fill_from_kline_db_local(codes: Set[str]) -> Dict[str, Any]:
         """从本地 kline.db 读取最新收盘价兜底（不依赖 SDK）"""
-        import sqlite3
-        from pathlib import Path
+        from services.common.database import get_sync_connection
         from services.trading.gateway import MarketData
-
-        kline_db = Path(__file__).parent.parent.parent / "data" / "kline.db"
-        if not kline_db.exists():
-            return {}
 
         results: Dict[str, Any] = {}
         try:
-            conn = sqlite3.connect(str(kline_db), timeout=10)
-            conn.row_factory = sqlite3.Row
+            conn = get_sync_connection("kline")
             cursor = conn.cursor()
             placeholders = ','.join(['?'] * len(codes))
             cursor.execute(f"""
@@ -426,7 +420,6 @@ class GatewayDispatcher:
                         ask_volume=[0] * 5,
                         trade_date=str(row['trade_date'] or '').replace('-', ''),
                     )
-            conn.close()
         except Exception:
             pass
         return results

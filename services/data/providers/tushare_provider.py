@@ -82,10 +82,10 @@ class TushareDataProvider(DataProvider):
                 "latency_ms": 0,
             }
         try:
-            # 尝试获取交易日历来验证连接
-            trade_cal = self._pro.trade_cal(exchange="SSE", start_date="20260101", end_date="20260105")
+            # 使用 daily 接口验证连接（trade_cal 频率限制太严格，1次/小时）
+            df = self._pro.daily(ts_code="600000.SH", start_date="20260101", end_date="20260105")
             latency_ms = (time.monotonic() - start) * 1000
-            if trade_cal is not None and len(trade_cal) > 0:
+            if df is not None and len(df) > 0:
                 return {
                     "ok": True,
                     "message": "已连接",

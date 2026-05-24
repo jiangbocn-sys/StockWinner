@@ -333,10 +333,8 @@ class StrategyEngine:
         # 注入 kline.db 同步查询函数（财务数据、行业分类等）
         def _query_kline_db(sql: str, params: tuple = None):
             """同步查询 kline.db（只读）。返回 List[Dict] 或 int。"""
-            import sqlite3
-            kline_path = "data/kline.db"
-            conn = sqlite3.connect(kline_path)
-            conn.row_factory = sqlite3.Row
+            from services.common.database import get_sync_connection
+            conn = get_sync_connection("kline")
             cursor = conn.cursor()
             try:
                 if params:
@@ -350,8 +348,6 @@ class StrategyEngine:
             except Exception:
                 conn.rollback()
                 raise
-            finally:
-                conn.close()
 
         env["query_kline_db"] = _query_kline_db
 

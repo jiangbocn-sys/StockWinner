@@ -5,17 +5,12 @@
 
 from fastapi import APIRouter, HTTPException, Path, Body, Query
 from typing import List, Optional, Dict, Any
-from services.common.database import get_db_manager, configure_kline_connection
+from services.common.database import get_db_manager, get_sync_connection
 from services.trading.gateway import get_gateway
-
-import sqlite3
-import os
 
 router = APIRouter()
 
 import asyncio
-
-KLINE_DB_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "data", "kline.db")
 
 @router.get("/api/v1/ui/{account_id}/market/test-query-kline")
 async def test_query_kline_batch(
@@ -28,23 +23,19 @@ async def test_query_kline_batch(
     通过 gateway 内部调用，在后端进程上下文中执行
     """
     import time
-    import sqlite3
     from pathlib import Path
     from datetime import datetime, timedelta
     from services.common.timezone import get_china_time
     from services.common.sdk_manager import get_sdk_manager
 
     # 获取股票代码
-    kline_db = Path(__file__).parent.parent.parent / "data" / "kline.db"
-    conn = sqlite3.connect(str(kline_db), timeout=30)
-    configure_kline_connection(conn)
+    conn = get_sync_connection("kline")
     c = conn.cursor()
     c.execute(
         "SELECT DISTINCT stock_code FROM kline_data WHERE stock_code NOT LIKE '%.BJ' LIMIT ?",
         (count,)
     )
     codes = [r[0] for r in c.fetchall()]
-    conn.close()
 
     sdk = get_sdk_manager()
     end_dt = get_china_time()
@@ -367,9 +358,7 @@ async def get_local_kline(
     end_str = end_dt.strftime("%Y-%m-%d")
 
     try:
-        conn = sqlite3.connect(KLINE_DB_PATH, timeout=10)
-        configure_kline_connection(conn)
-        conn.row_factory = sqlite3.Row
+        conn = get_sync_connection("kline")
         cursor = conn.cursor()
         cursor.execute("""
             SELECT trade_date, open, close, low, high, volume, amount
@@ -378,7 +367,6 @@ async def get_local_kline(
             ORDER BY trade_date ASC
         """, (stock_code, start_str, end_str))
         rows = cursor.fetchall()
-        conn.close()
 
         kline = []
         seen_today = False
@@ -492,17 +480,13 @@ async def get_stock_info(
     stock_code: str = Path(..., description="股票代码（带后缀）"),
 ):
     """从本地 kline.db 查询股票名称和最新价格"""
-    import sqlite3
     db = get_db_manager()
     account = await db.fetchone("SELECT 1 FROM accounts WHERE account_id = ? AND is_active = 1", (account_id,))
     if not account:
         raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
 
-    kline_path = '/home/bobo/StockWinner/data/kline.db'
     try:
-        conn = sqlite3.connect(kline_path, timeout=10)
-        configure_kline_connection(conn)
-        conn.row_factory = sqlite3.Row
+        conn = get_sync_connection("kline")
         cursor = conn.cursor()
         # 优先从 monthly_factors 查（有 stock_name 和最新数据）
         cursor.execute(
@@ -517,7 +501,6 @@ async def get_stock_info(
                 (stock_code,)
             )
             kline_row = cursor.fetchone()
-            conn.close()
             result = {
                 "success": True,
                 "stock_code": stock_code,
@@ -534,7 +517,6 @@ async def get_stock_info(
             (stock_code,)
         )
         row = cursor.fetchone()
-        conn.close()
         if row and row['stock_name']:
             return {
                 "success": True,

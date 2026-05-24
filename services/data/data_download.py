@@ -10,16 +10,13 @@
 """
 
 import asyncio
-import sqlite3
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 
 from services.common.timezone import CHINA_TZ, get_china_time
 from services.common.download_progress import get_progress_tracker, DownloadStatus
-
-# 数据库路径
-DB_PATH = Path(__file__).parent.parent.parent / "data" / "kline.db"
+from services.common.database import get_sync_connection
 
 
 # ================================================================
@@ -511,7 +508,7 @@ def download_industry_indices() -> Dict:
         return {'success': False, 'message': 'SDK下载失败'}
 
     # 3. 保存到数据库
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = get_sync_connection("kline")
     cursor = conn.cursor()
 
     total_saved = 0
@@ -576,8 +573,6 @@ def download_industry_indices() -> Dict:
         latest_date = df['trade_date'].max()
         latest_dates.append(latest_date)
         print(f"[LocalData]   {code} ({code_to_name.get(code, '')}): 保存 {saved_count} 条，最新 {latest_date}")
-
-    conn.close()
 
     print(f"[LocalData] 行业指数下载完成：{success_count}/{len(codes)} 个指数，{total_saved} 条记录")
     return {

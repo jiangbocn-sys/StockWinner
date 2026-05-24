@@ -437,6 +437,7 @@ def get_db_context(db_name: str = "stockwinner",
         raise
 
 
+@contextmanager
 def get_db_context_isolated(db_name: str = "stockwinner",
                             path: Optional[Path] = None):
     """

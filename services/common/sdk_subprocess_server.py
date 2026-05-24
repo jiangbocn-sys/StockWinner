@@ -1,0 +1,404 @@
+"""
+SDK 子进程服务端
+
+运行在独立进程中，负责：
+1. SDK 登录/登出
+2. 处理主进程通过 IPC 发送的 SDK 查询请求
+3. 如果发生 segfault，子进程死亡，主进程检测到 IPC 断开后重启
+
+用法：
+    python3 -m services.common.sdk_subprocess_server
+"""
+
+import os
+import sys
+import json
+import time
+import socket
+import signal
+import threading
+from pathlib import Path
+from typing import Optional
+
+# 加载 .env
+from dotenv import load_dotenv
+load_dotenv(Path(__file__).resolve().parents[2] / ".env")
+
+from services.common.sdk_ipc import (
+    SOCKET_PATH, encode_response, send_message, recv_message
+)
+from services.common.structured_logger import get_logger
+
+
+# ============================================================
+# SDK 登录
+# ============================================================
+
+def sdk_login() -> bool:
+    """SDK 登录（子进程启动时调用）"""
+    logger = get_logger("sdk_subprocess")
+    username = os.environ.get("SDK_USERNAME", "")
+    password = os.environ.get("SDK_PASSWORD", "")
+    host = os.environ.get("SDK_HOST", "")
+    port = int(os.environ.get("SDK_PORT", "8600"))
+
+    if not username or not host:
+        logger.error("sdk_subprocess", "SDK 凭证未配置")
+        return False
+
+    try:
+        from AmazingData import login
+        result = login(username, password, host, port)
+        if result:
+            logger.log_event("sdk_subprocess_login_ok", "SDK 登录成功")
+            return True
+        else:
+            logger.warn("sdk_subprocess_login_fail", "SDK 登录失败（返回 False）")
+            return False
+    except Exception as e:
+        logger.error("sdk_subprocess_login_error", f"SDK 登录异常: {e}")
+        return False
+
+
+# ============================================================
+# SDK 实例缓存
+# ============================================================
+
+_info_instance = None
+_market_data_instance = None
+_base_data_instance = None
+_calendar = None
+
+
+def get_info():
+    global _info_instance
+    if _info_instance is None:
+        from AmazingData import InfoData
+        _info_instance = InfoData()
+    return _info_instance
+
+
+def get_base_data():
+    global _base_data_instance
+    if _base_data_instance is None:
+        from AmazingData import BaseData
+        _base_data_instance = BaseData()
+    return _base_data_instance
+
+
+def get_calendar():
+    global _calendar
+    if _calendar is None:
+        _calendar = get_base_data().get_calendar()
+    return _calendar
+
+
+def get_market_data():
+    global _market_data_instance
+    if _market_data_instance is None:
+        from AmazingData import MarketData
+        _market_data_instance = MarketData(get_calendar())
+    return _market_data_instance
+
+
+def clear_instances():
+    global _info_instance, _market_data_instance, _base_data_instance, _calendar
+    _info_instance = None
+    _market_data_instance = None
+    _base_data_instance = None
+    _calendar = None
+
+
+# ============================================================
+# SDK 方法映射
+# ============================================================
+
+SDK_METHODS = {
+    "get_equity_structure",
+    "get_income_statement",
+    "get_balance_sheet",
+    "get_cash_flow_statement",
+    "get_industry_base_info",
+    "get_code_info",
+    "get_code_list",
+    "get_calendar",
+    "query_kline",
+    "query_snapshot",
+    "get_industry_daily",
+    "get_profit_notice",
+    "get_profit_express",
+    "get_long_hu_bang",
+    "get_margin_summary",
+    "get_margin_detail",
+    "get_block_trading",
+    "get_treasury_yield",
+    "get_industry_constituent",
+    "get_index_constituent",
+    "connect",        # 等效于确保登录
+    "disconnect",     # 清理实例
+    "is_connected",   # 返回 True（如果已登录）
+}
+
+
+def execute_sdk_method(method: str, kwargs: dict):
+    """执行 SDK 方法并返回结果"""
+    logger = get_logger("sdk_subprocess")
+    start = time.monotonic()
+
+    try:
+        if method == "connect":
+            # 子进程启动时已 login，connect 只需确认
+            return True
+
+        elif method == "disconnect":
+            clear_instances()
+            return None
+
+        elif method == "is_connected":
+            return True
+
+        elif method == "get_calendar":
+            return get_calendar()
+
+        elif method == "query_kline":
+            md = get_market_data()
+            return md.query_kline(
+                code_list=kwargs.get("code_list"),
+                begin_date=kwargs.get("begin_date"),
+                end_date=kwargs.get("end_date"),
+                period=kwargs.get("period"),
+            )
+
+        elif method == "query_snapshot":
+            md = get_market_data()
+            return md.query_snapshot(
+                code_list=kwargs.get("code_list"),
+                begin_date=kwargs.get("begin_date"),
+                end_date=kwargs.get("end_date"),
+            )
+
+        elif method == "get_equity_structure":
+            return get_info().get_equity_structure(
+                kwargs.get("stock_codes"), is_local=False
+            )
+
+        elif method == "get_income_statement":
+            return get_info().get_income(
+                kwargs.get("stock_codes"), is_local=False
+            )
+
+        elif method == "get_balance_sheet":
+            return get_info().get_balance_sheet(
+                kwargs.get("stock_codes"), is_local=False
+            )
+
+        elif method == "get_cash_flow_statement":
+            return get_info().get_cash_flow(
+                kwargs.get("stock_codes"), is_local=False
+            )
+
+        elif method == "get_industry_base_info":
+            return get_info().get_industry_base_info(is_local=False)
+
+        elif method == "get_code_info":
+            return get_base_data().get_code_info(
+                security_type=kwargs.get("security_type", "EXTRA_STOCK_A")
+            )
+
+        elif method == "get_code_list":
+            return get_base_data().get_code_list(
+                security_type=kwargs.get("security_type", "EXTRA_STOCK_A")
+            )
+
+        elif method == "get_industry_daily":
+            return get_info().get_industry_daily(
+                code_list=kwargs.get("code_list"), is_local=False
+            )
+
+        elif method == "get_profit_notice":
+            return get_info().get_profit_notice(
+                code_list=kwargs.get("stock_codes"), is_local=False
+            )
+
+        elif method == "get_profit_express":
+            return get_info().get_profit_express(
+                code_list=kwargs.get("stock_codes"), is_local=False
+            )
+
+        elif method == "get_long_hu_bang":
+            return get_info().get_long_hu_bang(
+                code_list=kwargs.get("stock_codes"),
+                begin_date=kwargs.get("begin_date"),
+                end_date=kwargs.get("end_date"),
+                is_local=False,
+            )
+
+        elif method == "get_margin_summary":
+            return get_info().get_margin_summary(
+                begin_date=kwargs.get("begin_date"),
+                end_date=kwargs.get("end_date"),
+                is_local=False,
+            )
+
+        elif method == "get_margin_detail":
+            return get_info().get_margin_detail(
+                code_list=kwargs.get("stock_codes"),
+                begin_date=kwargs.get("begin_date"),
+                end_date=kwargs.get("end_date"),
+                is_local=False,
+            )
+
+        elif method == "get_block_trading":
+            return get_info().get_block_trading(
+                code_list=kwargs.get("stock_codes"),
+                begin_date=kwargs.get("begin_date"),
+                end_date=kwargs.get("end_date"),
+                is_local=False,
+            )
+
+        elif method == "get_treasury_yield":
+            return get_info().get_treasury_yield(is_local=False)
+
+        elif method == "get_industry_constituent":
+            return get_info().get_industry_constituent(
+                code_list=kwargs.get("index_codes"), is_local=False
+            )
+
+        elif method == "get_index_constituent":
+            return get_info().get_index_constituent(
+                code_list=kwargs.get("index_codes"), is_local=False
+            )
+
+        else:
+            raise ValueError(f"未知 SDK 方法: {method}")
+
+    except Exception as e:
+        duration_ms = (time.monotonic() - start) * 1000
+        import traceback as _tb
+        tb_str = _tb.format_exc()
+        logger.log_event("sdk_method_error", f"{method} 异常: {e}\n{tb_str}")
+        raise
+
+
+# ============================================================
+# IPC 服务循环
+# ============================================================
+
+# 全局锁：串行化所有 SDK 调用（TGW 单连接限制，不能并发调用）
+_sdk_lock = threading.Lock()
+
+
+def handle_client(conn: socket.socket):
+    """处理一个客户端连接（每个客户端在独立线程中处理，SDK 调用通过 _sdk_lock 串行化）"""
+    logger = get_logger("sdk_subprocess")
+    logger.log_event("sdk_ipc_client_connected", "IPC 客户端已连接")
+
+    try:
+        while True:
+            try:
+                request = recv_message(conn)
+            except (ConnectionError, OSError):
+                break  # 客户端断开
+
+            method = request.get("method")
+            kwargs = request.get("args", {})
+            request_id = request.get("request_id")
+
+            # 串行化 SDK 调用：避免多个客户端并发访问 TGW 连接
+            with _sdk_lock:
+                try:
+                    result = execute_sdk_method(method, kwargs)
+                    response = {
+                        "request_id": request_id,
+                        "success": True,
+                        "result": encode_response(result),
+                    }
+                except Exception as e:
+                    response = {
+                        "request_id": request_id,
+                        "success": False,
+                        "error": f"{type(e).__name__}: {e}",
+                        "result": encode_response(None),
+                    }
+
+                try:
+                    send_message(conn, response)
+                except (ConnectionError, OSError):
+                    break
+
+    except Exception as e:
+        logger.error("sdk_ipc_error", f"IPC 处理异常: {e}")
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        logger.log_event("sdk_ipc_client_disconnected", "IPC 客户端已断开")
+
+
+def start_server():
+    """启动 IPC 服务端"""
+    logger = get_logger("sdk_subprocess")
+
+    # 清理旧 socket
+    if os.path.exists(SOCKET_PATH):
+        os.unlink(SOCKET_PATH)
+
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.bind(SOCKET_PATH)
+    server.listen(8)  # 最多 8 个排队客户端（内部通过 _sdk_lock 串行化 SDK 调用）
+    server.settimeout(1.0)  # 允许定期检查信号
+
+    logger.log_event("sdk_ipc_server_started", f"IPC 服务端监听: {SOCKET_PATH}")
+    logger.log_event("sdk_ipc_server_pid", f"子进程 PID: {os.getpid()}")
+
+    # 通知主进程已就绪
+    print(json.dumps({"event": "sdk_ready", "pid": os.getpid()}), flush=True)
+
+    running = True
+
+    def _shutdown(signum, frame):
+        nonlocal running
+        running = False
+        logger.log_event("sdk_subprocess_shutdown", f"收到信号 {signum}，准备退出")
+
+    signal.signal(signal.SIGTERM, _shutdown)
+    signal.signal(signal.SIGINT, _shutdown)
+
+    active_clients: list = []
+
+    while running:
+        try:
+            conn, _ = server.accept()
+            # 多客户端模式：每个客户端在独立线程中处理，SDK 调用通过 _sdk_lock 串行化
+            t = threading.Thread(target=handle_client, args=(conn,), daemon=True)
+            t.start()
+            active_clients.append(t)
+        except socket.timeout:
+            continue
+        except Exception as e:
+            if running:
+                logger.error("sdk_ipc_accept_error", f"accept 异常: {e}")
+
+    # 清理
+    try:
+        server.close()
+    except Exception:
+        pass
+    if os.path.exists(SOCKET_PATH):
+        os.unlink(SOCKET_PATH)
+    logger.log_event("sdk_subprocess_exited", "子进程已退出")
+
+
+# ============================================================
+# 入口
+# ============================================================
+
+if __name__ == "__main__":
+    # 先登录
+    if not sdk_login():
+        print(json.dumps({"event": "sdk_login_failed"}), flush=True)
+        sys.exit(1)
+
+    # 启动 IPC 服务端
+    start_server()

@@ -12,7 +12,7 @@ import asyncio
 from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional, Any
 from pathlib import Path
-from services.common.database import get_db_manager, configure_kline_connection, get_sync_connection
+from services.common.database import get_db_manager, get_sync_connection
 from services.common.account_manager import get_account_manager
 from services.common.timezone import get_china_time, format_china_time, CHINA_TZ
 from services.common.technical_indicators import calculate_indicators_for_screening, calculate_rsi
@@ -22,21 +22,14 @@ from services.common.structured_logger import get_logger
 from .factor_registry import get_factor_registry, FactorRegistry
 from .condition_parser import get_condition_parser, normalize_conditions
 
-# 数据库路径
-KLINE_DB = Path(__file__).parent.parent.parent / "data" / "kline.db"
-
-
-import sqlite3
 
 def _load_stock_names() -> Dict[str, str]:
     """从 kline.db 的 stock_base_info 表批量加载股票名称"""
     try:
-        conn = sqlite3.connect(str(KLINE_DB), timeout=30)
-        configure_kline_connection(conn)
+        conn = get_sync_connection("kline")
         cursor = conn.cursor()
         cursor.execute("SELECT stock_code, stock_name FROM stock_base_info")
         names = {row[0]: row[1].strip() for row in cursor.fetchall()}
-        conn.close()
         return names
     except Exception:
         return {}
@@ -322,13 +315,10 @@ class ScreeningService:
         # 4. 获取最新交易日期
         if not trade_date:
             # 从 stock_daily_factors 表获取最新日期
-            import sqlite3
-            conn = sqlite3.connect(str(KLINE_DB), timeout=60)
-            configure_kline_connection(conn)
+            conn = get_sync_connection("kline")
             cursor = conn.cursor()
             cursor.execute("SELECT MAX(trade_date) FROM stock_daily_factors")
             result = cursor.fetchone()
-            conn.close()
             if result and result[0]:
                 trade_date = result[0]
             else:
@@ -394,9 +384,7 @@ class ScreeningService:
         total_cap_min = cap_values.get('total_market_cap_min')
 
         if circ_cap_max or circ_cap_min or total_cap_max or total_cap_min:
-            import sqlite3
-            conn = sqlite3.connect(str(KLINE_DB), timeout=60)
-            configure_kline_connection(conn)
+            conn = get_sync_connection("kline")
             cursor = conn.cursor()
 
             # 构建市值过滤SQL
@@ -429,8 +417,6 @@ class ScreeningService:
                 stock_codes = [c for c in stock_codes if c in cap_filtered_codes]
                 factor_df = factor_df.loc[stock_codes]
                 print(f"[Screening] 市值过滤：{original_count} → {len(stock_codes)} 只股票")
-
-            conn.close()
 
         # 6. 获取 K 线数据（用于动态计算缺失因子）
         # 批量预加载，避免循环内逐只查询（N+1 优化）
@@ -843,21 +829,17 @@ class ScreeningService:
 
     async def _get_market_stock_list(self) -> list:
         """获取全市场股票列表（从 stock_daily_factors 表，有因子数据的股票）"""
-        import sqlite3
-        conn = sqlite3.connect(str(KLINE_DB), timeout=60)
-        configure_kline_connection(conn)
+        conn = get_sync_connection("kline")
         cursor = conn.cursor()
         cursor.execute("SELECT MAX(trade_date) FROM stock_daily_factors")
         latest_date = cursor.fetchone()[0]
         if not latest_date:
-            conn.close()
             return []
         cursor.execute(
             "SELECT DISTINCT stock_code FROM stock_daily_factors WHERE trade_date = ?",
             (latest_date,)
         )
         codes = [row[0] for row in cursor.fetchall()]
-        conn.close()
 
         stock_name_map = _load_stock_names()
         return [{"stock_code": c, "stock_name": stock_name_map.get(c, c)} for c in codes]
@@ -927,12 +909,8 @@ class ScreeningService:
             lds = get_local_data_service()
             return lds.get_kline_smart(codes, lookback=lookback)
 
-        import sqlite3 as _sqlite3
-
         def _query_kline_db(sql: str, params: tuple = None):
-            conn = _sqlite3.connect(str(KLINE_DB), timeout=60)
-            configure_kline_connection(conn)
-            conn.row_factory = _sqlite3.Row
+            conn = get_sync_connection("kline")
             cursor = conn.cursor()
             try:
                 if params:
@@ -942,8 +920,8 @@ class ScreeningService:
                 if sql.strip().upper().startswith("SELECT"):
                     return [dict(r) for r in cursor.fetchall()]
                 return cursor.rowcount
-            finally:
-                conn.close()
+            except Exception:
+                raise
 
         def _query_db(sql: str, params: tuple = None):
             conn = get_sync_connection()

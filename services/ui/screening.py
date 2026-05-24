@@ -6,7 +6,7 @@ from fastapi import APIRouter, HTTPException, Path, Body, Query
 from typing import List, Optional, Dict, Any
 from fastapi.background import BackgroundTasks
 import os
-from services.common.database import get_db_manager, configure_kline_connection
+from services.common.database import get_db_manager, get_sync_connection
 from services.screening.service import get_screening_service
 from services.common.timezone import get_china_time, format_china_time
 
@@ -69,15 +69,7 @@ async def get_factor_stats(account_id: str = Path(..., description="账户 ID"))
     if not account:
         raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
 
-    import sqlite3
-    from pathlib import Path
-
-    db_path = Path(__file__).parent.parent.parent / "data" / "kline.db"
-    if not db_path.exists():
-        return {"success": True, "stats": {"latest_date": None, "pending_count": 0}}
-
-    conn = sqlite3.connect(str(db_path), timeout=30)
-    configure_kline_connection(conn)
+    conn = get_sync_connection("kline")
     cursor = conn.cursor()
 
     # 获取因子数据最新日期
@@ -109,7 +101,6 @@ async def get_factor_stats(account_id: str = Path(..., description="账户 ID"))
     else:
         pending_stocks = 0
 
-    conn.close()
 
     return {
         "success": True,
@@ -172,8 +163,6 @@ async def calculate_factors(
         smart_update_factors
     )
     from datetime import datetime
-    import sqlite3
-    from pathlib import Path
 
     tracker = get_factor_calc_tracker()
 
@@ -197,8 +186,7 @@ async def calculate_factors(
         target_start = start_date
         target_end = end_date
     else:
-        db_path = Path(__file__).parent.parent.parent / "data" / "kline.db"
-        conn = sqlite3.connect(str(db_path), timeout=30)
+        conn = get_sync_connection("kline")
         cursor = conn.cursor()
 
         # 获取 kline_data 最新日期
@@ -215,8 +203,6 @@ async def calculate_factors(
             kline_earliest = cursor.fetchone()[0]
             target_start = kline_earliest if kline_earliest else '1970-01-01'
             target_end = kline_latest if kline_latest else get_china_time().strftime('%Y-%m-%d')
-
-        conn.close()
 
     # 后台执行因子计算
     def run_calculation():
@@ -1164,7 +1150,6 @@ async def preview_watchlist_import(
 ):
     """预览文件导入结果：规范化代码、查名称、检测组内重复"""
     from services.common.stock_code import normalize_stock_code
-    import sqlite3
 
     db = get_db_manager()
 
@@ -1197,12 +1182,9 @@ async def preview_watchlist_import(
     existing_in_other_groups = {row['stock_code']: row['group_names'] for row in other_group_rows}
 
     # 连接 kline.db 查 stock_base_info
-    kline_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "data", "kline.db")
     name_map = {}
     try:
-        conn = sqlite3.connect(kline_path, timeout=30)
-        configure_kline_connection(conn)
-        conn.row_factory = sqlite3.Row
+        conn = get_sync_connection("kline")
         codes_to_lookup = []
         for item in items:
             raw_code = item.get("code", "").strip()
@@ -1219,7 +1201,6 @@ async def preview_watchlist_import(
                 codes_to_lookup
             ).fetchall()
             name_map = {row['stock_code']: row['stock_name'] for row in rows}
-        conn.close()
     except Exception:
         pass
 

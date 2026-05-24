@@ -60,6 +60,17 @@ async def lifespan(app: FastAPI):
     start_audit_consumer()
     log.log_event("audit_consumer_started", "审计日志后台队列已启动")
 
+    # 启动 SDK 子进程（隔离 C 级别 SDK，segfault 不影响主进程）
+    try:
+        from services.common.sdk_proxy_client import get_subprocess_manager
+        sub_mgr = get_subprocess_manager()
+        if sub_mgr.start_subprocess():
+            log.log_event("sdk_subprocess_started", "SDK 子进程已启动")
+        else:
+            log.log_event("sdk_subprocess_start_fail", "SDK 子进程启动失败（将使用其他数据源兜底）")
+    except Exception as e:
+        log.error("sdk_subprocess", f"SDK 子进程初始化失败: {e}")
+
     # 启动调度服务
     from services.common.scheduler_service import start_scheduler, get_scheduler, _set_fastapi_loop
     start_scheduler()
@@ -820,7 +831,15 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.error("shutdown", f"关闭审计消费者失败: {e}")
 
-    # 断开 SDK 连接，清理 gateway 缓存
+    # 断开 SDK 连接，停止子进程
+    try:
+        from services.common.sdk_proxy_client import get_subprocess_manager
+        sub_mgr = get_subprocess_manager()
+        sub_mgr.stop_subprocess()
+        log.log_event("sdk_subprocess_stopped", "SDK 子进程已停止")
+    except Exception as e:
+        log.error("sdk_subprocess", f"停止 SDK 子进程失败: {e}")
+
     try:
         from services.common.sdk_manager import get_sdk_manager
         get_sdk_manager().disconnect()
@@ -868,7 +887,7 @@ app.add_middleware(RequestLoggingMiddleware)
 # Agent 请求（带 X-Agent-Key）不受此中间件影响
 # ============================================================
 
-_UI_AUTH_WHITELIST = {"/api/v1/health", "/", "/docs", "/openapi.json", "/redoc"}
+_UI_AUTH_WHITELIST = {"/api/v1/health", "/api/auth/login", "/", "/docs", "/openapi.json", "/redoc"}
 
 @app.middleware("http")
 async def ui_token_middleware(request: Request, call_next):

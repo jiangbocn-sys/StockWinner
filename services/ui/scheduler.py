@@ -145,12 +145,11 @@ async def get_data_status() -> Dict:
     """
     import sqlite3
     from pathlib import Path
-    from services.common.database import configure_kline_connection
+    from services.common.database import get_sync_connection
 
     db_path = Path(__file__).parent.parent.parent / "data" / "kline.db"
 
-    conn = sqlite3.connect(str(db_path), timeout=30)
-    configure_kline_connection(conn)
+    conn = get_sync_connection("kline")
     cursor = conn.cursor()
 
     status = {}
@@ -171,7 +170,6 @@ async def get_data_status() -> Dict:
     cursor.execute("SELECT MAX(report_date) FROM stock_monthly_factors")
     status['monthly_factors_latest'] = cursor.fetchone()[0]
 
-    conn.close()
     return status
 
 

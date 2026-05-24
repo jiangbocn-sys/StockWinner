@@ -7,7 +7,6 @@
 - 成长类：营收增长率，净利润增长率
 """
 
-import sqlite3
 import pandas as pd
 import numpy as np
 from pathlib import Path
@@ -15,40 +14,30 @@ from typing import List, Dict, Optional, Tuple
 from datetime import datetime
 
 from services.common.sdk_manager import get_sdk_manager
-
-DB_PATH = Path(__file__).parent.parent.parent / "data" / "kline.db"
+from services.common.database import get_sync_connection
 
 
 class FundamentalFactorCalculator:
     """基本面因子计算器"""
 
-    def __init__(self, db_path: Path = DB_PATH):
-        self.db_path = db_path
+    def __init__(self, db_path: Path = None):
+        # db_path 参数保留向后兼容，但不再使用
         self.sdk_manager = get_sdk_manager()
-
-    def _get_connection(self) -> sqlite3.Connection:
-        """获取数据库连接"""
-        from services.common.database import configure_kline_connection
-        conn = sqlite3.connect(str(self.db_path), timeout=60)
-        configure_kline_connection(conn)
-        conn.row_factory = sqlite3.Row
-        return conn
 
     def get_market_cap(self, stock_code: str, trade_date: str) -> Optional[float]:
         """获取指定日期的市值（亿元）"""
-        conn = self._get_connection()
+        conn = get_sync_connection("kline")
         cursor = conn.cursor()
         cursor.execute("""
             SELECT total_market_cap FROM stock_daily_factors
             WHERE stock_code = ? AND trade_date = ?
         """, (stock_code, trade_date))
         row = cursor.fetchone()
-        conn.close()
         return row['total_market_cap'] if row and row['total_market_cap'] else None
 
     def get_latest_stock_code_list(self, limit: int = 100) -> List[str]:
         """获取最新的股票列表"""
-        conn = self._get_connection()
+        conn = get_sync_connection("kline")
         cursor = conn.cursor()
         cursor.execute("""
             SELECT DISTINCT stock_code FROM kline_data
@@ -56,7 +45,6 @@ class FundamentalFactorCalculator:
             LIMIT ?
         """, (limit,))
         stocks = [row[0] for row in cursor.fetchall()]
-        conn.close()
         return stocks
 
     def calculate_pe_ttm(self, stock_code: str, trade_date: str) -> Optional[float]:

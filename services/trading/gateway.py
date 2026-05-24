@@ -404,19 +404,11 @@ class TradingGateway(TradingGatewayInterface):
         from services.trading.trading_hours import can_trade
         if can_trade():
             return {}  # 交易时段不使用 kline.db 兜底
-        import sqlite3
-        from pathlib import Path
-        from services.common.database import configure_kline_connection
-
-        kline_db = Path(__file__).parent.parent.parent / "data" / "kline.db"
-        if not kline_db.exists():
-            return {}
+        from services.common.database import get_sync_connection
 
         results: Dict[str, MarketData] = {}
         try:
-            conn = sqlite3.connect(str(kline_db), timeout=10)
-            configure_kline_connection(conn)
-            conn.row_factory = sqlite3.Row
+            conn = get_sync_connection("kline")
             cursor = conn.cursor()
             placeholders = ','.join(['?'] * len(codes))
             cursor.execute(f"""
@@ -455,7 +447,6 @@ class TradingGateway(TradingGatewayInterface):
                         ask_volume=[0] * 5,
                         trade_date=str(row['trade_date'] or '').replace('-', ''),
                     )
-            conn.close()
         except Exception as e:
             logger.debug(f"kline.db 兜底查询失败: {e}")
 
@@ -498,45 +489,33 @@ class TradingGateway(TradingGatewayInterface):
 
     def _query_stock_list_sync(self) -> List[Dict[str, str]]:
         """同步查询股票列表（在线程池中执行）"""
-        import sqlite3
-        from pathlib import Path
         from services.common.sdk_manager import get_sdk_manager
+        from services.common.database import get_sync_connection
 
         stock_list = []
 
         # 首先尝试从本地数据库获取股票列表
-        db_paths = [
-            Path('/home/bobo/StockWinner/data/kline.db'),
-            Path('/home/bobo/StockWinner/stockwinner.db'),
-        ]
+        try:
+            conn = get_sync_connection("kline")
+            cursor = conn.cursor()
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='kline_data'")
+            if cursor.fetchone():
+                cursor.execute("SELECT DISTINCT stock_code FROM kline_data")
+                stock_codes = [row[0] for row in cursor.fetchall()]
 
-        for db_path in db_paths:
-            if db_path.exists():
-                try:
-                    from services.common.database import configure_kline_connection
-                    conn = sqlite3.connect(str(db_path))
-                    configure_kline_connection(conn)
-                    cursor = conn.cursor()
-                    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='kline_data'")
-                    if cursor.fetchone():
-                        cursor.execute("SELECT DISTINCT stock_code FROM kline_data")
-                        stock_codes = [row[0] for row in cursor.fetchall()]
-                        conn.close()
-
-                        if stock_codes:
-                            for code in stock_codes:
-                                parts = code.split('.')
-                                if len(parts) == 2:
-                                    stock_list.append({
-                                        "code": parts[0],
-                                        "name": "",
-                                        "market": parts[1]
-                                    })
-                            logger.info(f"从本地数据库获取到 {len(stock_list)} 只股票")
-                            return stock_list
-                    conn.close()
-                except Exception as e:
-                    logger.warning(f"从本地数据库获取股票列表失败：{e}")
+                if stock_codes:
+                    for code in stock_codes:
+                        parts = code.split('.')
+                        if len(parts) == 2:
+                            stock_list.append({
+                                "code": parts[0],
+                                "name": "",
+                                "market": parts[1]
+                            })
+                    logger.info(f"从本地数据库获取到 {len(stock_list)} 只股票")
+                    return stock_list
+        except Exception as e:
+            logger.warning(f"从本地数据库获取股票列表失败：{e}")
 
         # 使用 AmazingData SDK 的 get_code_info 获取股票信息
         try:

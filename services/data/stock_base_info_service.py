@@ -12,13 +12,13 @@
 - get_industry_base_info: 申万行业分类
 """
 
-import sqlite3
 import pandas as pd
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import List, Dict, Optional
 import asyncio
 
+from services.common.database import get_sync_connection
 from services.common.sdk_manager import get_sdk_manager
 from services.common.sdk_column_mapping import (
     map_code_info_columns,
@@ -33,25 +33,17 @@ try:
 except ImportError:
     _HAS_PYPINYIN = False
 
-DB_PATH = Path(__file__).parent.parent.parent / "data" / "kline.db"
 
 
 class StockBaseInfoService:
     """股票基本信息服务"""
 
-    def __init__(self, db_path: Path = DB_PATH):
-        self.db_path = db_path
+    def __init__(self):
         self.sdk_manager = get_sdk_manager()
-
-    def _get_connection(self) -> sqlite3.Connection:
-        """获取数据库连接"""
-        conn = sqlite3.connect(str(self.db_path), timeout=30)
-        conn.row_factory = sqlite3.Row
-        return conn
 
     def _init_table(self):
         """初始化表（确保表存在）"""
-        conn = self._get_connection()
+        conn = get_sync_connection("kline")
         cursor = conn.cursor()
 
         cursor.execute('''
@@ -79,7 +71,6 @@ class StockBaseInfoService:
         ''')
 
         conn.commit()
-        conn.close()
         print("[StockBaseInfo] 表初始化完成")
 
     def get_stock_list(self) -> List[str]:
@@ -90,11 +81,10 @@ class StockBaseInfoService:
         except Exception as e:
             print(f"[StockBaseInfo] 获取股票列表失败: {e}")
             # 从数据库获取已有股票代码作为备选
-            conn = self._get_connection()
+            conn = get_sync_connection("kline")
             cursor = conn.cursor()
             cursor.execute("SELECT DISTINCT stock_code FROM kline_data")
             codes = [row[0] for row in cursor.fetchall()]
-            conn.close()
             return codes
 
     def fetch_code_info(self) -> pd.DataFrame:
@@ -193,7 +183,7 @@ class StockBaseInfoService:
             )
 
         # 保存到数据库
-        conn = self._get_connection()
+        conn = get_sync_connection("kline")
         cursor = conn.cursor()
 
         saved = 0
@@ -239,7 +229,6 @@ class StockBaseInfoService:
                 print(f"  保存 {row.get('stock_code')} 失败: {e}")
 
         conn.commit()
-        conn.close()
         print(f"[StockBaseInfo] 保存完成，共 {saved} 条记录")
 
         return saved

@@ -5,7 +5,6 @@ LLM 策略生成服务
 
 import json
 import os
-import sqlite3
 from typing import Dict, Any, Optional
 from datetime import datetime
 from pathlib import Path
@@ -70,8 +69,6 @@ LLM_PROVIDERS = {
         "format": "openai"
     },
 }
-
-DB_PATH = Path(__file__).parent.parent.parent / "data" / "stockwinner.db"
 
 
 class StrategyGenerator:

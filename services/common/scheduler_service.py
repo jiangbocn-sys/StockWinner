@@ -22,7 +22,7 @@ from apscheduler.triggers.cron import CronTrigger
 from services.common.timezone import get_china_time, CHINA_TZ
 from services.factors.kline_manager import get_kline_manager
 from services.common.async_helper import run_async_safe
-from services.common.database import get_sync_connection
+from services.common.database import get_sync_connection, DB_PATH as WINNER_DB_PATH, KLINE_DB_PATH as DB_PATH
 import sqlite3
 
 # 配置日志 — 只写文件，控制台由 structured_logger 统一管理
@@ -49,9 +49,6 @@ def _set_fastapi_loop(loop: Optional[asyncio.AbstractEventLoop]):
     """设置 FastAPI 事件循环引用"""
     global _fastapi_loop
     _fastapi_loop = loop
-DB_PATH = Path(__file__).parent.parent.parent / "data" / "kline.db"
-POSITIONS_DB_PATH = Path(__file__).parent.parent.parent / "data" / "stockwinner.db"
-
 
 class SchedulerService:
     """系统调度服务"""

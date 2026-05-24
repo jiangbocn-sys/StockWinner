@@ -69,8 +69,8 @@ class AkshareDataProvider(DataProvider):
         try:
             import akshare as ak
 
-            # 快速测试：获取一只股票的基本信息
-            df = ak.stock_info_a_code_name()
+            # 获取上证指数日线（轻量接口，不缓存）
+            df = ak.stock_zh_index_daily(symbol="sh000001")
             ok = df is not None and hasattr(df, "empty") and not df.empty
             latency_ms = (time.monotonic() - start) * 1000
             return {

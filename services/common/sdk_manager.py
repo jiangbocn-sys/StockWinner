@@ -1,18 +1,11 @@
 """
-SDK 登录管理器
+SDK 管理器（v7.5.0 — 子进程隔离架构）
 
-统一管理 AmazingData SDK 的登录状态和实例
-避免多处重复登录和实例创建
-
-重要：
-1. 所有 SDK 实例（BaseData、MarketData、InfoData）都通过此管理器缓存
-2. 所有 SDK 数据调用自动通过 SDKConnectionManager 排队，避免 TGW 连接数超限
-3. 其他模块应该通过 get_sdk_manager() 获取实例，禁止自行创建 SDK 连接
-
-架构分层：
-- SDKConnectionManager（底层）：TGW 连接生命周期管理（状态检测、自动重连、并发排队、超时控制、错误报告）
-- SDKManager（中间层）：SDK 实例缓存 + 数据方法封装，连接需求透明委托给底层
-- 调用方：通过 get_sdk_manager() 获取实例，所有数据方法自动 acquire/release token
+所有 SDK 数据调用通过 IPC 代理 → SDK 子进程
+- SDK segfault 只杀死子进程，不影响主进程和其他数据源
+- SDK 子进程负责 login + 所有 SDK 调用
+- SDKConnectionManager 管理子进程生命周期
+- 接口与旧版本一致，调用方无需修改
 """
 
 import time
@@ -25,25 +18,19 @@ from services.common.structured_logger import get_logger
 
 
 class SDKManager:
-    """SDK 登录管理器（单例模式）
+    """SDK 管理器（单例模式）
 
-    连接生命周期委托给 SDKConnectionManager，本类只负责：
-    - SDK 实例缓存（避免重复创建）
-    - 数据方法封装（自动 acquire/release token）
+    所有 SDK 数据调用通过 IPC 代理 → SDK 子进程
+    连接生命周期委托给 SDKConnectionManager（管理子进程）
     """
 
     _instance: Optional['SDKManager'] = None
-    _info_instance = None
-    _base_data_instance = None
-    _market_data_instance = None
-    _calendar = None
-
-    # SDK 调用统计（线程安全）
     _sdk_metrics_lock: Optional[Lock] = None
     _sdk_total_calls = 0
     _sdk_success_calls = 0
     _sdk_total_rows = 0
-    _sdk_call_log: Optional[deque] = None  # (timestamp, method, row_count, success)
+    _sdk_call_log: Optional[deque] = None
+    _proxy = None
 
     def __new__(cls):
         if cls._instance is None:
@@ -51,7 +38,6 @@ class SDKManager:
         return cls._instance
 
     def __init__(self):
-        # 延迟初始化统计字段，避免跨实例重复初始化
         if SDKManager._sdk_metrics_lock is None:
             SDKManager._sdk_metrics_lock = Lock()
             SDKManager._sdk_total_calls = 0
@@ -61,722 +47,350 @@ class SDKManager:
 
     @classmethod
     def get_instance(cls) -> 'SDKManager':
-        """获取 SDKManager 单例"""
         if cls._instance is None:
             cls._instance = SDKManager()
         return cls._instance
 
-    # ================================================================
-    # 连接管理 — 委托给 SDKConnectionManager
-    # ================================================================
+    def _get_proxy(self):
+        """获取 IPC 代理客户端（延迟初始化）"""
+        if SDKManager._proxy is None:
+            from services.common.sdk_proxy_client import get_sdk_proxy
+            SDKManager._proxy = get_sdk_proxy()
+        return SDKManager._proxy
 
     def _get_conn_mgr(self):
-        """获取底层连接管理器"""
         from services.common.sdk_connection_manager import get_connection_manager
         return get_connection_manager()
 
     def _record_sdk_call(self, method: str, row_count: int = 0, success: bool = True):
-        """记录一次 SDK 调用（线程安全）"""
         with SDKManager._sdk_metrics_lock:
             SDKManager._sdk_total_calls += 1
             if success:
                 SDKManager._sdk_success_calls += 1
-                # 通知连接管理器更新健康检查时间戳
-                try:
-                    from services.common.sdk_connection_manager import get_connection_manager
-                    get_connection_manager().record_query_success()
-                except Exception:
-                    pass
             SDKManager._sdk_total_rows += row_count
             if SDKManager._sdk_call_log is not None:
                 SDKManager._sdk_call_log.append((time.time(), method, row_count, success))
 
     @staticmethod
     def _count_result_rows(result) -> int:
-        """估算 SDK 返回结果的行数"""
         if isinstance(result, pd.DataFrame):
             return len(result)
         if isinstance(result, dict):
-            total = 0
-            for v in result.values():
-                if isinstance(v, pd.DataFrame):
-                    total += len(v)
-            return total
+            return sum(len(v) for v in result.values() if isinstance(v, pd.DataFrame))
         if isinstance(result, list):
             return len(result)
         return 0
 
     def get_sdk_metrics(self) -> Dict:
-        """
-        获取 SDK 调用统计。
-        返回 session 累计 + 最近 60 秒滑动窗口的调用次数/行数/成功率/方法分解。
-        """
         now = time.time()
         with SDKManager._sdk_metrics_lock:
-            recent_calls = [
-                entry for entry in (SDKManager._sdk_call_log or [])
-                if now - entry[0] <= 60
-            ]
+            recent_calls = [e for e in (SDKManager._sdk_call_log or []) if now - e[0] <= 60]
             recent_count = len(recent_calls)
             recent_rows = sum(e[2] for e in recent_calls)
             recent_success = sum(1 for e in recent_calls if e[3])
             recent_rate = round(recent_success / recent_count * 100, 1) if recent_count > 0 else 0
-
             method_counts: Dict[str, int] = {}
             for _, method, _, _ in recent_calls:
                 method_counts[method] = method_counts.get(method, 0) + 1
-            active_methods = sorted(method_counts.keys())
+            return {
+                "recent_60s": {
+                    "calls": recent_count, "rows": recent_rows,
+                    "success_rate": recent_rate,
+                    "active_methods": sorted(method_counts.keys()),
+                },
+                "session": {
+                    "total_calls": SDKManager._sdk_total_calls,
+                    "success_calls": SDKManager._sdk_success_calls,
+                    "total_rows": SDKManager._sdk_total_rows,
+                },
+            }
 
-            session_total = SDKManager._sdk_total_calls
-            session_success = SDKManager._sdk_success_calls
-            session_rows = SDKManager._sdk_total_rows
-
-        return {
-            "recent_60s": {
-                "calls": recent_count,
-                "rows": recent_rows,
-                "success_rate": recent_rate,
-                "active_methods": active_methods,
-            },
-            "session": {
-                "total_calls": session_total,
-                "success_calls": session_success,
-                "total_rows": session_rows,
-            },
-        }
+    # ================================================================
+    # 连接管理
+    # ================================================================
 
     def connect(self) -> bool:
-        """确保 SDK 连接可用（委托给连接管理器）"""
-        return self._get_conn_mgr().ensure_connected()
+        """确保 SDK 连接可用（通过 IPC 代理检查子进程是否就绪）"""
+        try:
+            return self._get_proxy().is_connected()
+        except Exception:
+            return False
 
     def disconnect(self):
-        """主动断开连接，重置实例缓存"""
-        self._get_conn_mgr().disconnect()
-        SDKManager._base_data_instance = None
-        SDKManager._market_data_instance = None
-        SDKManager._info_instance = None
+        """主动断开连接（通过 IPC 代理 + 停止子进程）"""
+        try:
+            self._get_proxy().disconnect()
+        except Exception:
+            pass
+        try:
+            from services.common.sdk_proxy_client import get_subprocess_manager
+            get_subprocess_manager().stop_subprocess()
+        except Exception:
+            pass
 
     def is_connected(self) -> bool:
-        """检查 SDK 连接状态"""
-        from services.common.sdk_connection_manager import ConnectionState
-        return self._get_conn_mgr().get_state() == ConnectionState.CONNECTED
-
-    def _ensure_connected(self) -> bool:
-        """确保连接可用（内部方法，外部请调用 connect()）"""
-        return self._get_conn_mgr().ensure_connected()
+        """检查 SDK 连接状态（通过 IPC 代理）"""
+        try:
+            return self._get_proxy().is_connected()
+        except Exception:
+            return False
 
     # ================================================================
-    # 连接令牌管理 — 所有 SDK 数据调用自动排队
-    # ================================================================
-
-    def _acquire_sync(self, task_type="download"):
-        """同步获取连接令牌
-
-        先确保连接可用，再通过连接管理器 acquire 排队。
-        acquire 现在是同步方法（threading.Lock），无需事件循环。
-        """
-        # 先确保连接可用
-        self._ensure_connected()
-
-        from services.common.sdk_connection_manager import TaskType, ConnectionState
-        conn_mgr = self._get_conn_mgr()
-
-        # 如果连接不可用，返回 None
-        if conn_mgr.get_state() != ConnectionState.CONNECTED:
-            return None
-
-        ttype = TaskType.DOWNLOAD if task_type == "download" else (
-            TaskType.SCREENING if task_type == "screening" else TaskType.QUERY
-        )
-        return conn_mgr.acquire(task_type=ttype)
-
-    def _release_sync(self, token):
-        """同步释放连接令牌"""
-        if token:
-            token.release()
-
-    # ================================================================
-    # 实例获取方法 — 确保连接后返回缓存实例
+    # 实例获取（IPC 代理包装）
     # ================================================================
 
     def get_info(self):
-        """获取 InfoData 实例（缓存）"""
-        self._ensure_connected()
-        if SDKManager._info_instance is None:
-            from AmazingData import InfoData
-            SDKManager._info_instance = InfoData()
-        return SDKManager._info_instance
+        """获取 InfoData 代理（实例缓存在子进程）"""
+        return self._get_proxy().get_info()
 
     def get_base_data(self):
-        """获取 BaseData 实例（缓存）"""
-        self._ensure_connected()
-        if SDKManager._base_data_instance is None:
-            from AmazingData import BaseData
-            SDKManager._base_data_instance = BaseData()
-        return SDKManager._base_data_instance
+        """获取 BaseData 代理（实例缓存在子进程）"""
+        return self._get_proxy().get_base_data()
 
     def get_calendar(self):
-        """获取交易日历（缓存）"""
-        if SDKManager._calendar is None:
-            bd = self.get_base_data()
-            SDKManager._calendar = bd.get_calendar()
-        return SDKManager._calendar
+        """获取交易日历"""
+        return self._get_proxy().get_calendar()
 
     def get_market_data(self):
-        """获取 MarketData 实例（缓存）"""
-        self._ensure_connected()
-        if SDKManager._market_data_instance is None:
-            from AmazingData import MarketData
-            calendar = self.get_calendar()
-            SDKManager._market_data_instance = MarketData(calendar)
-        return SDKManager._market_data_instance
+        """获取 MarketData 代理（实例缓存在子进程）"""
+        return self._get_proxy().get_market_data()
 
     # ================================================================
-    # 数据获取方法 — 所有 SDK 数据调用自动 acquire/release token
+    # 数据获取方法 — 所有调用通过 IPC 代理
     # ================================================================
+
+    def _call_ipc(self, method_name: str, kwargs: dict, task_type: str = "query",
+                  timeout: float = 30.0, logger=None, **log_context):
+        """通过 IPC 代理调用 SDK 子进程，记录日志和统计"""
+        if logger is None:
+            logger = get_logger("sdk_manager")
+
+        start = time.monotonic()
+        try:
+            proxy = self._get_proxy()
+            proxy_method = getattr(proxy, method_name)
+            result = proxy_method(**kwargs)
+            duration_ms = (time.monotonic() - start) * 1000
+            logger.log_sdk_call(method_name, duration_ms, task_type, "success", **log_context)
+            self._record_sdk_call(method_name, self._count_result_rows(result), True)
+            return result
+        except ConnectionError as e:
+            duration_ms = (time.monotonic() - start) * 1000
+            reason = f"{method_name} IPC 断开: {e}"
+            logger.log_sdk_call(method_name, duration_ms, task_type, "ipc_disconnect", error=reason, **log_context)
+            # IPC 断开 → 子进程可能已死亡 → 触发重启
+            try:
+                proxy = SDKManager._proxy
+                if proxy:
+                    proxy.reset_instance()
+                from services.common.sdk_proxy_client import get_subprocess_manager
+                sub_mgr = get_subprocess_manager()
+                if not sub_mgr.is_subprocess_alive():
+                    sub_mgr.start_subprocess()
+            except Exception:
+                pass
+            raise
+        except Exception as e:
+            duration_ms = (time.monotonic() - start) * 1000
+            logger.log_sdk_call(method_name, duration_ms, task_type, "error", error=str(e), **log_context)
+            raise
 
     def get_equity_structure(self, stock_codes: list) -> pd.DataFrame:
-        """获取股本结构数据（自动排队）"""
-        logger = get_logger("sdk_manager")
-        info = self.get_info()
-        token = self._acquire_sync("download")
-        if token is None:
-            return pd.DataFrame()
-        start = time.monotonic()
         try:
-            result = info.get_equity_structure(stock_codes, is_local=False)
-            duration_ms = (time.monotonic() - start) * 1000
-            logger.log_sdk_call("get_equity_structure", duration_ms, "download", "success", stock_count=len(stock_codes) if stock_codes else 0)
-            self._record_sdk_call("get_equity_structure", self._count_result_rows(result), True)
+            result = self._call_ipc("get_equity_structure", {"stock_codes": stock_codes},
+                                    "download", 60.0, stock_count=len(stock_codes) if stock_codes else 0)
             if isinstance(result, dict):
                 dfs = [df for df in result.values() if isinstance(df, pd.DataFrame)]
-                if dfs:
-                    return pd.concat(dfs, ignore_index=True)
-            elif isinstance(result, pd.DataFrame):
-                return result
+                return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
+            return result if isinstance(result, pd.DataFrame) else pd.DataFrame()
+        except Exception:
             return pd.DataFrame()
-        except Exception as e:
-            duration_ms = (time.monotonic() - start) * 1000
-            logger.log_sdk_call("get_equity_structure", duration_ms, "download", "error", error=str(e), stock_count=len(stock_codes) if stock_codes else 0)
-            return pd.DataFrame()
-        finally:
-            self._release_sync(token)
 
     def get_income_statement(self, stock_codes: list) -> pd.DataFrame:
-        """获取利润表数据（自动排队）"""
-        logger = get_logger("sdk_manager")
-        info = self.get_info()
-        token = self._acquire_sync("download")
-        if token is None:
-            return pd.DataFrame()
-        start = time.monotonic()
         try:
-            result = info.get_income(stock_codes, is_local=False)
-            duration_ms = (time.monotonic() - start) * 1000
-            logger.log_sdk_call("get_income_statement", duration_ms, "download", "success", stock_count=len(stock_codes) if stock_codes else 0)
-            self._record_sdk_call("get_income_statement", self._count_result_rows(result), True)
+            result = self._call_ipc("get_income_statement", {"stock_codes": stock_codes},
+                                    "download", 60.0, stock_count=len(stock_codes) if stock_codes else 0)
             if isinstance(result, dict):
                 dfs = [df for df in result.values() if isinstance(df, pd.DataFrame)]
-                if dfs:
-                    return pd.concat(dfs, ignore_index=True)
-            elif isinstance(result, pd.DataFrame):
-                return result
+                return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
+            return result if isinstance(result, pd.DataFrame) else pd.DataFrame()
+        except Exception:
             return pd.DataFrame()
-        except Exception as e:
-            duration_ms = (time.monotonic() - start) * 1000
-            logger.log_sdk_call("get_income_statement", duration_ms, "download", "error", error=str(e), stock_count=len(stock_codes) if stock_codes else 0)
-            return pd.DataFrame()
-        finally:
-            self._release_sync(token)
 
     def get_balance_sheet(self, stock_codes: list) -> pd.DataFrame:
-        """获取资产负债表数据（自动排队）"""
-        logger = get_logger("sdk_manager")
-        info = self.get_info()
-        token = self._acquire_sync("download")
-        if token is None:
-            return pd.DataFrame()
-        start = time.monotonic()
         try:
-            result = info.get_balance_sheet(stock_codes, is_local=False)
-            duration_ms = (time.monotonic() - start) * 1000
-            logger.log_sdk_call("get_balance_sheet", duration_ms, "download", "success", stock_count=len(stock_codes) if stock_codes else 0)
-            self._record_sdk_call("get_balance_sheet", self._count_result_rows(result), True)
+            result = self._call_ipc("get_balance_sheet", {"stock_codes": stock_codes},
+                                    "download", 60.0, stock_count=len(stock_codes) if stock_codes else 0)
             if isinstance(result, dict):
                 dfs = [df for df in result.values() if isinstance(df, pd.DataFrame)]
-                if dfs:
-                    return pd.concat(dfs, ignore_index=True)
-            elif isinstance(result, pd.DataFrame):
-                return result
+                return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
+            return result if isinstance(result, pd.DataFrame) else pd.DataFrame()
+        except Exception:
             return pd.DataFrame()
-        except Exception as e:
-            duration_ms = (time.monotonic() - start) * 1000
-            logger.log_sdk_call("get_balance_sheet", duration_ms, "download", "error", error=str(e), stock_count=len(stock_codes) if stock_codes else 0)
-            return pd.DataFrame()
-        finally:
-            self._release_sync(token)
 
     def get_cash_flow_statement(self, stock_codes: list) -> pd.DataFrame:
-        """获取现金流量表数据（自动排队）"""
-        logger = get_logger("sdk_manager")
-        info = self.get_info()
-        token = self._acquire_sync("download")
-        if token is None:
-            return pd.DataFrame()
-        start = time.monotonic()
         try:
-            result = info.get_cash_flow(stock_codes, is_local=False)
-            duration_ms = (time.monotonic() - start) * 1000
-            logger.log_sdk_call("get_cash_flow_statement", duration_ms, "download", "success", stock_count=len(stock_codes) if stock_codes else 0)
-            self._record_sdk_call("get_cash_flow_statement", self._count_result_rows(result), True)
+            result = self._call_ipc("get_cash_flow_statement", {"stock_codes": stock_codes},
+                                    "download", 60.0, stock_count=len(stock_codes) if stock_codes else 0)
             if isinstance(result, dict):
                 dfs = [df for df in result.values() if isinstance(df, pd.DataFrame)]
-                if dfs:
-                    return pd.concat(dfs, ignore_index=True)
-            elif isinstance(result, pd.DataFrame):
-                return result
+                return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
+            return result if isinstance(result, pd.DataFrame) else pd.DataFrame()
+        except Exception:
             return pd.DataFrame()
-        except Exception as e:
-            duration_ms = (time.monotonic() - start) * 1000
-            logger.log_sdk_call("get_cash_flow_statement", duration_ms, "download", "error", error=str(e), stock_count=len(stock_codes) if stock_codes else 0)
-            return pd.DataFrame()
-        finally:
-            self._release_sync(token)
 
     def get_industry_base_info(self) -> pd.DataFrame:
-        """获取行业分类/行业指数基本信息（申万行业分类）（自动排队）"""
-        logger = get_logger("sdk_manager")
-        info = self.get_info()
-        token = self._acquire_sync("download")
-        if token is None:
-            return pd.DataFrame()
-        start = time.monotonic()
         try:
-            result = info.get_industry_base_info(is_local=False)
-            duration_ms = (time.monotonic() - start) * 1000
-            logger.log_sdk_call("get_industry_base_info", duration_ms, "download", "success")
-            self._record_sdk_call("get_industry_base_info", self._count_result_rows(result), True)
+            result = self._call_ipc("get_industry_base_info", {}, "download", 60.0)
             if isinstance(result, dict):
                 dfs = [df for df in result.values() if isinstance(df, pd.DataFrame)]
-                if dfs:
-                    return pd.concat(dfs, ignore_index=True)
-            elif isinstance(result, pd.DataFrame):
-                return result
+                return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
+            return result if isinstance(result, pd.DataFrame) else pd.DataFrame()
+        except Exception:
             return pd.DataFrame()
-        except Exception as e:
-            duration_ms = (time.monotonic() - start) * 1000
-            logger.log_sdk_call("get_industry_base_info", duration_ms, "download", "error", error=str(e))
-            return pd.DataFrame()
-        finally:
-            self._release_sync(token)
 
     def get_code_info(self, security_type: str = 'EXTRA_STOCK_A') -> pd.DataFrame:
-        """获取每日最新证券信息（自动排队）"""
-        logger = get_logger("sdk_manager")
-        token = self._acquire_sync("query")
-        if token is None:
-            return pd.DataFrame()
-        start = time.monotonic()
         try:
-            base_data = self.get_base_data()
-            result = base_data.get_code_info(security_type=security_type)
-            duration_ms = (time.monotonic() - start) * 1000
-            logger.log_sdk_call("get_code_info", duration_ms, "query", "success")
-            self._record_sdk_call("get_code_info", self._count_result_rows(result), True)
-            if isinstance(result, pd.DataFrame):
-                return result
+            result = self._call_ipc("get_code_info", {"security_type": security_type}, "query", 30.0)
+            return result if isinstance(result, pd.DataFrame) else pd.DataFrame()
+        except Exception:
             return pd.DataFrame()
-        except Exception as e:
-            duration_ms = (time.monotonic() - start) * 1000
-            logger.log_sdk_call("get_code_info", duration_ms, "query", "error", error=str(e))
-            return pd.DataFrame()
-        finally:
-            self._release_sync(token)
 
     def get_code_list(self, security_type: str = 'EXTRA_STOCK_A') -> list:
-        """获取每日最新代码表（自动排队）"""
-        logger = get_logger("sdk_manager")
-        token = self._acquire_sync("query")
-        if token is None:
-            return []
-        start = time.monotonic()
         try:
-            base_data = self.get_base_data()
-            result = base_data.get_code_list(security_type=security_type)
-            duration_ms = (time.monotonic() - start) * 1000
-            logger.log_sdk_call("get_code_list", duration_ms, "query", "success")
-            self._record_sdk_call("get_code_list", self._count_result_rows(result), True)
-            if isinstance(result, list):
-                return result
+            return self._call_ipc("get_code_list", {"security_type": security_type}, "query", 30.0) or []
+        except Exception:
             return []
-        except Exception as e:
-            duration_ms = (time.monotonic() - start) * 1000
-            logger.log_sdk_call("get_code_list", duration_ms, "query", "error", error=str(e))
-            return []
-        finally:
-            self._release_sync(token)
-
-    def _call_with_timeout(self, func, timeout: float, desc: str = "SDK call", **kwargs):
-        """带超时的 SDK 调用包装器，防止单次调用卡死导致锁不释放"""
-        import concurrent.futures
-
-        def _run():
-            return func(**kwargs)
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(_run)
-            try:
-                return future.result(timeout=timeout)
-            except concurrent.futures.TimeoutError:
-                get_logger("sdk_manager").error("sdk_timeout", f"{desc} 超时", context={"timeout": timeout})
-                raise
 
     def query_kline(self, code_list: list, begin_date: int, end_date: int,
                     period: int, task_type: str = "query") -> dict:
-        """查询K线数据（自动排队）
-
-        超时保护策略：所有类型都有超时，超后释放锁并重试
-        - query 单股行情（1-5 只）：10s
-        - query 批量行情（6-20 只）：20s
-        - query 大批量（21-100 只）：60s
-        - download 下载批次：每只股票 30s，最少 5 分钟
-        """
-        logger = get_logger("sdk_manager")
-        md = self.get_market_data()
-        token = self._acquire_sync(task_type)
-        if token is None:
-            return {}
         stock_count = len(code_list) if isinstance(code_list, list) else 1
         if task_type == "query":
-            if stock_count <= 5:
-                timeout = 10.0
-            elif stock_count <= 20:
-                timeout = 20.0
-            elif stock_count <= 100:
-                timeout = 60.0
-            else:
-                timeout = 120.0
-        else:  # download
-            # 500只≈44秒，3000只单天≈264秒
-            timeout = min(stock_count * 0.2 + 30, 180.0)  # 上限3分钟
-            timeout = max(timeout, 30.0)  # 最小30s
-        start = time.monotonic()
+            timeout = 10.0 if stock_count <= 5 else (20.0 if stock_count <= 20 else (60.0 if stock_count <= 100 else 120.0))
+        else:
+            timeout = max(min(stock_count * 0.2 + 30, 180.0), 30.0)
         try:
-            result = self._call_with_timeout(
-                md.query_kline,
-                timeout=timeout,
-                desc=f"query_kline {task_type} {stock_count} stocks",
-                code_list=code_list,
-                begin_date=begin_date,
-                end_date=end_date,
-                period=period
-            )
-            duration_ms = (time.monotonic() - start) * 1000
-            logger.log_sdk_call("query_kline", duration_ms, task_type, "success", stock_count=stock_count, timeout=timeout)
-            self._record_sdk_call("query_kline", self._count_result_rows(result), True)
+            result = self._call_ipc("query_kline", {
+                "code_list": code_list, "begin_date": begin_date,
+                "end_date": end_date, "period": period,
+            }, task_type, timeout, stock_count=stock_count, timeout=timeout)
             return result if isinstance(result, dict) else {}
-        except Exception as e:
-            duration_ms = (time.monotonic() - start) * 1000
-            is_timeout = isinstance(e, (TimeoutError,))
-            if is_timeout:
-                logger.log_sdk_call("query_kline", duration_ms, task_type, "timeout", error=str(e), stock_count=stock_count, timeout=timeout)
-                # 不清空实例，避免超时后需要重新 login 触发 TGW 连接数超限
-            else:
-                logger.log_sdk_call("query_kline", duration_ms, task_type, "error", error=str(e), stock_count=stock_count, timeout=timeout)
+        except Exception:
             return {}
-        finally:
-            self._release_sync(token)
 
     def query_snapshot(self, code_list: list, begin_date: int, end_date: int) -> dict:
-        """查询快照数据（自动排队）"""
-        logger = get_logger("sdk_manager")
-        md = self.get_market_data()
-        token = self._acquire_sync("query")
-        if token is None:
-            return {}
         stock_count = len(code_list) if isinstance(code_list, list) else 1
-        start = time.monotonic()
         try:
-            result = self._call_with_timeout(
-                md.query_snapshot,
-                timeout=30.0,
-                desc=f"query_snapshot {code_list}",
-                code_list=code_list,
-                begin_date=begin_date,
-                end_date=end_date
-            )
-            duration_ms = (time.monotonic() - start) * 1000
-            logger.log_sdk_call("query_snapshot", duration_ms, "query", "success", stock_count=stock_count, timeout=30.0)
-            self._record_sdk_call("query_snapshot", self._count_result_rows(result), True)
+            result = self._call_ipc("query_snapshot", {
+                "code_list": code_list, "begin_date": begin_date, "end_date": end_date,
+            }, "query", 30.0, stock_count=stock_count, timeout=30.0)
             return result if isinstance(result, dict) else {}
-        except Exception as e:
-            duration_ms = (time.monotonic() - start) * 1000
-            is_timeout = isinstance(e, (TimeoutError,))
-            if is_timeout:
-                logger.log_sdk_call("query_snapshot", duration_ms, "query", "timeout", error=str(e), stock_count=stock_count, timeout=30.0)
-                # 不清空实例，避免超时后需要重新 login 触发 TGW 连接数超限
-            else:
-                logger.log_sdk_call("query_snapshot", duration_ms, "query", "error", error=str(e), stock_count=stock_count, timeout=30.0)
+        except Exception:
             return {}
-        finally:
-            self._release_sync(token)
 
     def get_industry_daily(self, code_list: list) -> Dict[str, pd.DataFrame]:
-        """获取行业指数日行情数据（自动排队）"""
-        logger = get_logger("sdk_manager")
-        token = self._acquire_sync("download")
-        if token is None:
-            return {}
-        start = time.monotonic()
         try:
-            info = self.get_info()
-            result = info.get_industry_daily(code_list=code_list, is_local=False)
-            duration_ms = (time.monotonic() - start) * 1000
-            logger.log_sdk_call("get_industry_daily", duration_ms, "download", "success", stock_count=len(code_list) if code_list else 0)
-            self._record_sdk_call("get_industry_daily", self._count_result_rows(result), True)
-            if isinstance(result, dict):
-                return result
+            result = self._call_ipc("get_industry_daily", {"code_list": code_list},
+                                    "download", 60.0, stock_count=len(code_list) if code_list else 0)
+            return result if isinstance(result, dict) else {}
+        except Exception:
             return {}
-        except Exception as e:
-            duration_ms = (time.monotonic() - start) * 1000
-            logger.log_sdk_call("get_industry_daily", duration_ms, "download", "error", error=str(e), stock_count=len(code_list) if code_list else 0)
-            return {}
-        finally:
-            self._release_sync(token)
 
     def get_profit_notice(self, stock_codes: list) -> pd.DataFrame:
-        """获取业绩预告（自动排队）"""
-        logger = get_logger("sdk_manager")
-        info = self.get_info()
-        token = self._acquire_sync("download")
-        if token is None:
-            return pd.DataFrame()
-        start = time.monotonic()
         try:
-            result = info.get_profit_notice(code_list=stock_codes, is_local=False)
-            duration_ms = (time.monotonic() - start) * 1000
-            logger.log_sdk_call("get_profit_notice", duration_ms, "download", "success", stock_count=len(stock_codes) if stock_codes else 0)
-            self._record_sdk_call("get_profit_notice", self._count_result_rows(result), True)
+            result = self._call_ipc("get_profit_notice", {"stock_codes": stock_codes},
+                                    "download", 60.0, stock_count=len(stock_codes) if stock_codes else 0)
             if isinstance(result, dict):
                 dfs = [df for df in result.values() if isinstance(df, pd.DataFrame)]
-                if dfs:
-                    return pd.concat(dfs, ignore_index=True)
-            elif isinstance(result, pd.DataFrame):
-                return result
+                return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
+            return result if isinstance(result, pd.DataFrame) else pd.DataFrame()
+        except Exception:
             return pd.DataFrame()
-        except Exception as e:
-            duration_ms = (time.monotonic() - start) * 1000
-            logger.log_sdk_call("get_profit_notice", duration_ms, "download", "error", error=str(e), stock_count=len(stock_codes) if stock_codes else 0)
-            return pd.DataFrame()
-        finally:
-            self._release_sync(token)
 
     def get_profit_express(self, stock_codes: list) -> pd.DataFrame:
-        """获取业绩快报（自动排队）"""
-        logger = get_logger("sdk_manager")
-        info = self.get_info()
-        token = self._acquire_sync("download")
-        if token is None:
-            return pd.DataFrame()
-        start = time.monotonic()
         try:
-            result = info.get_profit_express(code_list=stock_codes, is_local=False)
-            duration_ms = (time.monotonic() - start) * 1000
-            logger.log_sdk_call("get_profit_express", duration_ms, "download", "success", stock_count=len(stock_codes) if stock_codes else 0)
-            self._record_sdk_call("get_profit_express", self._count_result_rows(result), True)
+            result = self._call_ipc("get_profit_express", {"stock_codes": stock_codes},
+                                    "download", 60.0, stock_count=len(stock_codes) if stock_codes else 0)
             if isinstance(result, dict):
                 dfs = [df for df in result.values() if isinstance(df, pd.DataFrame)]
-                if dfs:
-                    return pd.concat(dfs, ignore_index=True)
-            elif isinstance(result, pd.DataFrame):
-                return result
+                return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
+            return result if isinstance(result, pd.DataFrame) else pd.DataFrame()
+        except Exception:
             return pd.DataFrame()
-        except Exception as e:
-            duration_ms = (time.monotonic() - start) * 1000
-            logger.log_sdk_call("get_profit_express", duration_ms, "download", "error", error=str(e), stock_count=len(stock_codes) if stock_codes else 0)
-            return pd.DataFrame()
-        finally:
-            self._release_sync(token)
 
     def get_long_hu_bang(self, stock_codes: list, begin_date: int, end_date: int) -> pd.DataFrame:
-        """获取龙虎榜数据（自动排队）"""
-        logger = get_logger("sdk_manager")
-        info = self.get_info()
-        token = self._acquire_sync("download")
-        if token is None:
-            return pd.DataFrame()
-        start = time.monotonic()
         try:
-            result = info.get_long_hu_bang(code_list=stock_codes, begin_date=begin_date, end_date=end_date, is_local=False)
-            duration_ms = (time.monotonic() - start) * 1000
-            logger.log_sdk_call("get_long_hu_bang", duration_ms, "download", "success", stock_count=len(stock_codes) if stock_codes else 0)
-            self._record_sdk_call("get_long_hu_bang", self._count_result_rows(result), True)
-            if isinstance(result, pd.DataFrame):
-                return result
+            result = self._call_ipc("get_long_hu_bang", {
+                "stock_codes": stock_codes, "begin_date": begin_date, "end_date": end_date,
+            }, "download", 60.0, stock_count=len(stock_codes) if stock_codes else 0)
+            return result if isinstance(result, pd.DataFrame) else pd.DataFrame()
+        except Exception:
             return pd.DataFrame()
-        except Exception as e:
-            duration_ms = (time.monotonic() - start) * 1000
-            logger.log_sdk_call("get_long_hu_bang", duration_ms, "download", "error", error=str(e), stock_count=len(stock_codes) if stock_codes else 0)
-            return pd.DataFrame()
-        finally:
-            self._release_sync(token)
 
     def get_margin_summary(self, begin_date: int, end_date: int) -> pd.DataFrame:
-        """获取融资融券汇总（自动排队，无需 stock_codes）"""
-        logger = get_logger("sdk_manager")
-        info = self.get_info()
-        token = self._acquire_sync("download")
-        if token is None:
-            return pd.DataFrame()
-        start = time.monotonic()
         try:
-            result = info.get_margin_summary(begin_date=begin_date, end_date=end_date, is_local=False)
-            duration_ms = (time.monotonic() - start) * 1000
-            logger.log_sdk_call("get_margin_summary", duration_ms, "download", "success")
-            self._record_sdk_call("get_margin_summary", self._count_result_rows(result), True)
-            if isinstance(result, pd.DataFrame):
-                return result
+            result = self._call_ipc("get_margin_summary", {
+                "begin_date": begin_date, "end_date": end_date,
+            }, "download", 60.0)
+            return result if isinstance(result, pd.DataFrame) else pd.DataFrame()
+        except Exception:
             return pd.DataFrame()
-        except Exception as e:
-            duration_ms = (time.monotonic() - start) * 1000
-            logger.log_sdk_call("get_margin_summary", duration_ms, "download", "error", error=str(e))
-            return pd.DataFrame()
-        finally:
-            self._release_sync(token)
 
     def get_margin_detail(self, stock_codes: list, begin_date: int, end_date: int) -> pd.DataFrame:
-        """获取融资融券明细（自动排队）"""
-        logger = get_logger("sdk_manager")
-        info = self.get_info()
-        token = self._acquire_sync("download")
-        if token is None:
-            return pd.DataFrame()
-        start = time.monotonic()
         try:
-            result = info.get_margin_detail(code_list=stock_codes, begin_date=begin_date, end_date=end_date, is_local=False)
-            duration_ms = (time.monotonic() - start) * 1000
-            logger.log_sdk_call("get_margin_detail", duration_ms, "download", "success", stock_count=len(stock_codes) if stock_codes else 0)
-            self._record_sdk_call("get_margin_detail", self._count_result_rows(result), True)
+            result = self._call_ipc("get_margin_detail", {
+                "stock_codes": stock_codes, "begin_date": begin_date, "end_date": end_date,
+            }, "download", 60.0, stock_count=len(stock_codes) if stock_codes else 0)
             if isinstance(result, dict):
                 dfs = [df for df in result.values() if isinstance(df, pd.DataFrame)]
-                if dfs:
-                    return pd.concat(dfs, ignore_index=True)
-            elif isinstance(result, pd.DataFrame):
-                return result
+                return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
+            return result if isinstance(result, pd.DataFrame) else pd.DataFrame()
+        except Exception:
             return pd.DataFrame()
-        except Exception as e:
-            duration_ms = (time.monotonic() - start) * 1000
-            logger.log_sdk_call("get_margin_detail", duration_ms, "download", "error", error=str(e), stock_count=len(stock_codes) if stock_codes else 0)
-            return pd.DataFrame()
-        finally:
-            self._release_sync(token)
 
     def get_block_trading(self, stock_codes: list, begin_date: int, end_date: int) -> pd.DataFrame:
-        """获取大宗交易数据（自动排队）"""
-        logger = get_logger("sdk_manager")
-        info = self.get_info()
-        token = self._acquire_sync("download")
-        if token is None:
-            return pd.DataFrame()
-        start = time.monotonic()
         try:
-            result = info.get_block_trading(code_list=stock_codes, begin_date=begin_date, end_date=end_date, is_local=False)
-            duration_ms = (time.monotonic() - start) * 1000
-            logger.log_sdk_call("get_block_trading", duration_ms, "download", "success", stock_count=len(stock_codes) if stock_codes else 0)
-            self._record_sdk_call("get_block_trading", self._count_result_rows(result), True)
-            if isinstance(result, pd.DataFrame):
-                return result
+            result = self._call_ipc("get_block_trading", {
+                "stock_codes": stock_codes, "begin_date": begin_date, "end_date": end_date,
+            }, "download", 60.0, stock_count=len(stock_codes) if stock_codes else 0)
+            return result if isinstance(result, pd.DataFrame) else pd.DataFrame()
+        except Exception:
             return pd.DataFrame()
-        except Exception as e:
-            duration_ms = (time.monotonic() - start) * 1000
-            logger.log_sdk_call("get_block_trading", duration_ms, "download", "error", error=str(e), stock_count=len(stock_codes) if stock_codes else 0)
-            return pd.DataFrame()
-        finally:
-            self._release_sync(token)
 
     def get_treasury_yield(self) -> pd.DataFrame:
-        """获取国债收益率（自动排队）"""
-        logger = get_logger("sdk_manager")
-        info = self.get_info()
-        token = self._acquire_sync("download")
-        if token is None:
-            return pd.DataFrame()
-        start = time.monotonic()
         try:
-            result = info.get_treasury_yield(is_local=False)
-            duration_ms = (time.monotonic() - start) * 1000
-            logger.log_sdk_call("get_treasury_yield", duration_ms, "download", "success")
-            self._record_sdk_call("get_treasury_yield", self._count_result_rows(result), True)
+            result = self._call_ipc("get_treasury_yield", {}, "download", 60.0)
             if isinstance(result, dict):
                 dfs = [df for df in result.values() if isinstance(df, pd.DataFrame)]
-                if dfs:
-                    return pd.concat(dfs, ignore_index=True)
-            elif isinstance(result, pd.DataFrame):
-                return result
+                return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
+            return result if isinstance(result, pd.DataFrame) else pd.DataFrame()
+        except Exception:
             return pd.DataFrame()
-        except Exception as e:
-            duration_ms = (time.monotonic() - start) * 1000
-            logger.log_sdk_call("get_treasury_yield", duration_ms, "download", "error", error=str(e))
-            return pd.DataFrame()
-        finally:
-            self._release_sync(token)
 
     def get_industry_constituent(self, index_codes: list) -> pd.DataFrame:
-        """获取行业成分股（自动排队）"""
-        logger = get_logger("sdk_manager")
-        info = self.get_info()
-        token = self._acquire_sync("download")
-        if token is None:
-            return pd.DataFrame()
-        start = time.monotonic()
         try:
-            result = info.get_industry_constituent(code_list=index_codes, is_local=False)
-            duration_ms = (time.monotonic() - start) * 1000
-            logger.log_sdk_call("get_industry_constituent", duration_ms, "download", "success", stock_count=len(index_codes) if index_codes else 0)
-            self._record_sdk_call("get_industry_constituent", self._count_result_rows(result), True)
+            result = self._call_ipc("get_industry_constituent", {"index_codes": index_codes},
+                                    "download", 60.0, stock_count=len(index_codes) if index_codes else 0)
             if isinstance(result, dict):
                 dfs = [df for df in result.values() if isinstance(df, pd.DataFrame)]
-                if dfs:
-                    return pd.concat(dfs, ignore_index=True)
-            elif isinstance(result, pd.DataFrame):
-                return result
+                return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
+            return result if isinstance(result, pd.DataFrame) else pd.DataFrame()
+        except Exception:
             return pd.DataFrame()
-        except Exception as e:
-            duration_ms = (time.monotonic() - start) * 1000
-            logger.log_sdk_call("get_industry_constituent", duration_ms, "download", "error", error=str(e), stock_count=len(index_codes) if index_codes else 0)
-            return pd.DataFrame()
-        finally:
-            self._release_sync(token)
 
     def get_index_constituent(self, index_codes: list) -> pd.DataFrame:
-        """获取指数成分股（自动排队）"""
-        logger = get_logger("sdk_manager")
-        info = self.get_info()
-        token = self._acquire_sync("download")
-        if token is None:
-            return pd.DataFrame()
-        start = time.monotonic()
         try:
-            result = info.get_index_constituent(code_list=index_codes, is_local=False)
-            duration_ms = (time.monotonic() - start) * 1000
-            logger.log_sdk_call("get_index_constituent", duration_ms, "download", "success", stock_count=len(index_codes) if index_codes else 0)
-            self._record_sdk_call("get_index_constituent", self._count_result_rows(result), True)
+            result = self._call_ipc("get_index_constituent", {"index_codes": index_codes},
+                                    "download", 60.0, stock_count=len(index_codes) if index_codes else 0)
             if isinstance(result, dict):
                 dfs = [df for df in result.values() if isinstance(df, pd.DataFrame)]
-                if dfs:
-                    return pd.concat(dfs, ignore_index=True)
-            elif isinstance(result, pd.DataFrame):
-                return result
+                return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
+            return result if isinstance(result, pd.DataFrame) else pd.DataFrame()
+        except Exception:
             return pd.DataFrame()
-        except Exception as e:
-            duration_ms = (time.monotonic() - start) * 1000
-            logger.log_sdk_call("get_index_constituent", duration_ms, "download", "error", error=str(e), stock_count=len(index_codes) if index_codes else 0)
-            return pd.DataFrame()
-        finally:
-            self._release_sync(token)
 
 
-# SDK 登录信息 - 从环境变量读取，不再硬编码
+# SDK 登录信息 - 从环境变量读取
 import os
 SDK_USERNAME = os.environ.get("SDK_USERNAME", "")
 SDK_PASSWORD = os.environ.get("SDK_PASSWORD", "")
@@ -789,7 +403,6 @@ _sdk_manager: Optional[SDKManager] = None
 
 
 def get_sdk_manager() -> SDKManager:
-    """获取 SDKManager 单例"""
     global _sdk_manager
     if _sdk_manager is None:
         _sdk_manager = SDKManager()
@@ -797,6 +410,5 @@ def get_sdk_manager() -> SDKManager:
 
 
 def reset_sdk_manager():
-    """重置 SDKManager（用于测试）"""
     global _sdk_manager
     _sdk_manager = None

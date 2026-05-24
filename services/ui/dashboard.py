@@ -2,9 +2,10 @@
 仪表盘 API
 """
 
+from pathlib import Path as FilePath
 from fastapi import APIRouter, HTTPException, Path
 from services.common.account_manager import get_account_manager
-from services.common.database import get_db_manager, configure_kline_connection
+from services.common.database import get_db_manager, get_sync_connection
 from services.common.timezone import get_china_time
 from services._version import VERSION, get_start_time
 
@@ -95,17 +96,22 @@ async def _get_data_sources_status() -> list:
 
 
 def check_sdk_connection() -> str:
-    """检测 Galaxy SDK 连接状态（只读状态，不触发登录）"""
+    """检测 Galaxy SDK 连接状态（通过 IPC 代理检查子进程状态）"""
     try:
         from services.common.sdk_manager import get_sdk_manager
-        from services.common.sdk_connection_manager import ConnectionState
         sdk_mgr = get_sdk_manager()
-        state = sdk_mgr._get_conn_mgr().get_state()
-        if state == ConnectionState.CONNECTED:
+        # 通过 IPC 代理检查子进程是否响应
+        if sdk_mgr.is_connected():
             return "connected"
-        elif state == ConnectionState.CONNECTING:
-            return "connecting"
-        else:
+        # 检查子进程是否存活
+        try:
+            from services.common.sdk_proxy_client import get_subprocess_manager
+            sub_mgr = get_subprocess_manager()
+            if sub_mgr.is_subprocess_alive():
+                return "connecting"  # 子进程存活但 IPC 未就绪
+            else:
+                return "disconnected"  # 子进程未运行
+        except Exception:
             return "disconnected"
     except ImportError:
         return "disconnected"
@@ -173,17 +179,15 @@ async def get_dashboard(account_id: str = Path(..., description="账户 ID")):
     resources = get_resource_usage()
 
     # 数据库状态
-    import sqlite3
-    from pathlib import Path
-    kline_db_path = Path(__file__).parent.parent.parent / "data" / "kline.db"
+    kline_db_path = FilePath(__file__).parent.parent.parent / "data" / "kline.db"
     db_stats = {"kline_latest_date": None, "kline_latest_count": 0, "kline_total_count": 0,
                 "factor_latest_date": None, "factor_latest_count": 0, "factor_total_count": 0,
                 "weekly_latest_date": None, "weekly_total_count": 0,
                 "base_info_count": 0}
     try:
+        kline_db_path = FilePath(__file__).parent.parent.parent / "data" / "kline.db"
         if kline_db_path.exists():
-            kconn = sqlite3.connect(str(kline_db_path), timeout=30)
-            configure_kline_connection(kconn)
+            kconn = get_sync_connection("kline")
             kcursor = kconn.cursor()
 
             # 日K线
@@ -227,8 +231,6 @@ async def get_dashboard(account_id: str = Path(..., description="账户 ID")):
             db_stats["base_info_bj"] = kcursor.fetchone()[0]
             kcursor.execute("SELECT COUNT(*) FROM stock_base_info WHERE stock_code LIKE '8%' OR stock_code LIKE '4%'")
             db_stats["base_info_neeq"] = kcursor.fetchone()[0]
-
-            kconn.close()
     except Exception:
         pass
 

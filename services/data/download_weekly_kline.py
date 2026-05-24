@@ -9,15 +9,10 @@
 import sys
 sys.path.insert(0, '/home/bobo/StockWinner')
 
-import sqlite3
 from datetime import datetime, timedelta
-from pathlib import Path
 from typing import List, Optional, Dict, Any, Tuple
 
 from services.factors.kline_manager import get_kline_manager, KlineManager
-
-# 数据库路径
-DB_PATH = Path("/home/bobo/StockWinner/data/kline.db")
 
 
 def _delete_incomplete_week(km: KlineManager, cutoff_date: str):
@@ -45,7 +40,7 @@ async def download_weekly_kline_data(
     - 动态计算批次大小：初始下载按数据量自动调整（100~500只/批），增量下载按 200 只/批
     """
     from services.trading.gateway import get_gateway_for_account
-    from services.common.database import get_sync_connection
+    from services.common.database import get_sync_connection, KLINE_DB_PATH
 
     # 连接网关
     broker_creds = {
@@ -82,7 +77,7 @@ async def download_weekly_kline_data(
         return False
 
     # 获取股票名称映射（优先 stock_base_info，名称最准确）
-    conn = get_sync_connection("kline", path=DB_PATH)
+    conn = get_sync_connection("kline", path=KLINE_DB_PATH)
     cursor = conn.cursor()
     # 优先查 stock_base_info（每日 SDK 同步，名称最新）
     cursor.execute("SELECT stock_code, stock_name FROM stock_base_info")

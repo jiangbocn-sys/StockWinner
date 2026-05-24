@@ -9,15 +9,11 @@
 """
 
 import re
-import sqlite3
 import pandas as pd
 from pathlib import Path
 from typing import Dict, List, Set, Tuple, Optional, Any, Callable
-from services.common.database import configure_kline_connection
+from services.common.database import get_sync_connection
 from datetime import datetime
-
-# 数据库路径
-KLINE_DB = Path(__file__).parent.parent.parent / "data" / "kline.db"
 
 # 条件解析正则表达式
 INDICATOR_PATTERN = re.compile(r'\b([A-Z_]+(?:\d+)?)\b')
@@ -28,8 +24,8 @@ MA_PATTERN = re.compile(r'\b(MA(\d+))\b')
 class FactorRegistry:
     """因子注册表 - 从数据库动态加载因子元数据"""
 
-    def __init__(self, db_path: Path = KLINE_DB):
-        self.db_path = db_path
+    def __init__(self, db_path: Path = None):
+        # db_path 参数保留向后兼容，但不再使用
         self._mapping: Dict[str, Dict] = {}  # 因子ID → 配置
         self._calculators: Dict[str, Callable] = {}
         self._load_from_db()
@@ -38,8 +34,7 @@ class FactorRegistry:
     def _load_from_db(self):
         """从 factor_metadata 表加载因子配置"""
         try:
-            conn = sqlite3.connect(str(self.db_path), timeout=60)
-            configure_kline_connection(conn)
+            conn = get_sync_connection("kline")
             cursor = conn.cursor()
 
             cursor.execute("""
@@ -62,7 +57,6 @@ class FactorRegistry:
                     'source': 'db'
                 }
 
-            conn.close()
             print(f"[FactorRegistry] 从数据库加载 {len(self._mapping)} 个因子")
 
         except Exception as e:
@@ -280,10 +274,8 @@ class FactorRegistry:
             """
 
             try:
-                conn = sqlite3.connect(str(self.db_path), timeout=60)
-                configure_kline_connection(conn)
+                conn = get_sync_connection("kline")
                 df = pd.read_sql_query(query, conn)
-                conn.close()
 
                 if not df.empty:
                     df = df.set_index('stock_code')

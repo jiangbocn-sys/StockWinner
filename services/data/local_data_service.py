@@ -19,6 +19,9 @@ from services.common.download_progress import get_progress_tracker, DownloadStat
 
 # 统一因子计算管道（替代本地重复实现）
 from services.factors.factor_pipeline import calculate_technical_factors, add_signal_indicators
+from services.common.database import get_sync_connection, KLINE_DB_PATH
+
+DB_PATH = KLINE_DB_PATH
 
 
 def get_trading_day_end_date(current_time: Optional[datetime] = None,
@@ -115,9 +118,6 @@ def get_trading_day_end_date(current_time: Optional[datetime] = None,
         day_name = "周六" if weekday == 5 else "周日"
         return end_date, f"周末（{day_name}），使用周五 {end_date}"
 
-# 数据库路径
-DB_PATH = Path(__file__).parent.parent.parent / "data" / "kline.db"
-
 
 class LocalKlineDataService:
     """本地 K 线数据服务"""
@@ -132,9 +132,7 @@ class LocalKlineDataService:
         conn = self._get_conn(timeout=30)
         cursor = conn.cursor()
 
-        # 启用 WAL 模式以提高并发性能
-        cursor.execute('PRAGMA journal_mode=WAL')
-        cursor.execute('PRAGMA synchronous=NORMAL')
+        # 启用 WAL 模式以提高并发性能（WAL + busy_timeout 已由 get_sync_connection 配置）
         cursor.execute('PRAGMA cache_size=-64000')  # 64MB 缓存
         cursor.execute('PRAGMA temp_store=MEMORY')
 
@@ -172,15 +170,11 @@ class LocalKlineDataService:
         ''')
 
         conn.commit()
-        conn.close()
         print(f"[LocalData] 数据库初始化完成：{self.db_path}")
 
     def _get_conn(self, timeout: int = 30) -> sqlite3.Connection:
-        """获取已配置 WAL 的 kline.db 连接"""
-        from services.common.database import configure_kline_connection
-        conn = sqlite3.connect(str(self.db_path), timeout=timeout)
-        configure_kline_connection(conn)
-        return conn
+        """获取已配置 WAL 的 kline.db 连接（timeout 参数保留以兼容调用方，实际由 get_sync_connection 管理）"""
+        return get_sync_connection("kline")
 
     def get_latest_date(self, stock_code: str) -> Optional[str]:
         """获取某只股票最新的 K 线日期"""
@@ -191,7 +185,6 @@ class LocalKlineDataService:
             (stock_code,)
         )
         result = cursor.fetchone()[0]
-        conn.close()
         return result
 
     def get_kline_count(self, stock_code: str) -> int:
@@ -203,7 +196,6 @@ class LocalKlineDataService:
             (stock_code,)
         )
         result = cursor.fetchone()[0]
-        conn.close()
         return result
 
     def save_kline_data(self, stock_code: str, stock_name: str, df: pd.DataFrame):
@@ -282,7 +274,6 @@ class LocalKlineDataService:
         ))
 
         conn.commit()
-        conn.close()
         return saved_count
 
     def save_kline_data_batch(self, kline_batch: List[Tuple[str, str, pd.DataFrame]]) -> int:
@@ -400,8 +391,6 @@ class LocalKlineDataService:
             print(f"[LocalData] 批量保存失败：{e}")
             conn.rollback()
             raise
-        finally:
-            conn.close()
 
         return total_saved
 
@@ -448,7 +437,6 @@ class LocalKlineDataService:
         rows = cursor.fetchall()
 
         result = [dict(row) for row in rows]
-        conn.close()
         return result
 
     def get_all_stocks(self) -> List[str]:
@@ -457,7 +445,6 @@ class LocalKlineDataService:
         cursor = conn.cursor()
         cursor.execute('SELECT DISTINCT stock_code FROM kline_data')
         stocks = [row[0] for row in cursor.fetchall()]
-        conn.close()
         return stocks
 
     def get_stocks_date_ranges_batch(self, stock_codes: List[str], start_date: str, end_date: str) -> Dict[str, Dict]:
@@ -493,7 +480,6 @@ class LocalKlineDataService:
                 'earliest_date': row[2],
                 'count': row[3]
             }
-        conn.close()
         return results
 
     def get_stocks_existing_dates_batch(self, stock_codes: List[str], start_date: str, end_date: str) -> Dict[str, List[str]]:
@@ -531,7 +517,6 @@ class LocalKlineDataService:
             if stock_code not in results:
                 results[stock_code] = []
             results[stock_code].append(trade_date)
-        conn.close()
         return results
 
     def get_stock_date_range(self, stock_code: str) -> tuple:
@@ -544,7 +529,6 @@ class LocalKlineDataService:
             WHERE stock_code = ?
         ''', (stock_code,))
         result = cursor.fetchone()
-        conn.close()
         if result and result[0]:
             return (result[0], result[1])
         return (None, None)
@@ -586,7 +570,6 @@ class LocalKlineDataService:
             WHERE stock_code = ? AND trade_date >= ? AND trade_date <= ?
         ''', (stock_code, expected_start, expected_end))
         result = cursor.fetchone()
-        conn.close()
 
         if not result or not result[0]:
             # 目标日期范围内完全没有数据
@@ -683,7 +666,6 @@ class LocalKlineDataService:
         deleted = cursor.rowcount
 
         conn.commit()
-        conn.close()
 
         print(f"[LocalData] 清理了 {deleted} 条旧数据")
         return deleted
@@ -709,7 +691,6 @@ class LocalKlineDataService:
         cursor.execute('SELECT MIN(trade_date) FROM kline_data')
         earliest_date = cursor.fetchone()[0]
 
-        conn.close()
 
         return {
             "total_stocks": total_stocks,
@@ -774,7 +755,6 @@ class LocalKlineDataService:
 
         cursor.execute(query, params)
         rows = cursor.fetchall()
-        conn.close()
 
         # 按 stock_code 分组
         result: Dict[str, List[Dict]] = {}
@@ -810,7 +790,6 @@ class LocalKlineDataService:
             (stock_code, date)
         )
         row = cursor.fetchone()
-        conn.close()
 
         return dict(row) if row else None
 
@@ -844,7 +823,6 @@ class LocalKlineDataService:
         for row in cursor.fetchall():
             result[row['stock_code']] = dict(row)
 
-        conn.close()
         return result
 
     def get_kline_spliced(
@@ -1004,9 +982,7 @@ def get_ipo_date_for_stock(stock_code: str) -> Optional[str]:
     返回：
     - IPO 日期字符串 YYYY-MM-DD，如无法确定返回 None
     """
-    conn = sqlite3.connect(str(DB_PATH), timeout=30)
-    from services.common.database import configure_kline_connection
-    configure_kline_connection(conn)
+    conn = get_sync_connection("kline")
     cursor = conn.cursor()
 
     # 从 kline_data 表获取最早的交易日期
@@ -1016,7 +992,6 @@ def get_ipo_date_for_stock(stock_code: str) -> Optional[str]:
         WHERE stock_code = ?
     """, (stock_code,))
     row = cursor.fetchone()
-    conn.close()
 
     if row and row[0]:
         return row[0]

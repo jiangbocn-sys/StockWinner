@@ -60,15 +60,12 @@ class ReturnAccumulationEngine:
 
     def _load_stock_names(self):
         """从 kline.db 的 stock_base_info 表加载股票名称"""
-        import sqlite3
-        from services.common.database import KLINE_DB_PATH, configure_kline_connection
+        from services.common.database import get_sync_connection
         try:
-            conn = sqlite3.connect(str(KLINE_DB_PATH), timeout=30)
-            configure_kline_connection(conn)
+            conn = get_sync_connection("kline")
             cursor = conn.cursor()
             cursor.execute("SELECT stock_code, stock_name FROM stock_base_info")
             self._stock_name_map = {row[0]: row[1].strip() for row in cursor.fetchall()}
-            conn.close()
         except Exception:
             pass
 

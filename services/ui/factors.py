@@ -113,14 +113,9 @@ async def get_monthly_factors_stats():
     Returns:
         空值比例、数据量等统计信息
     """
-    import sqlite3
-    from pathlib import Path
-    from services.common.database import configure_kline_connection
+    from services.common.database import get_sync_connection
 
-    db_path = Path(__file__).parent.parent.parent / "data" / "kline.db"
-
-    conn = sqlite3.connect(str(db_path), timeout=30)
-    configure_kline_connection(conn)
+    conn = get_sync_connection("kline")
     cursor = conn.cursor()
 
     # 总记录数
@@ -157,8 +152,6 @@ async def get_monthly_factors_stats():
     # 待更新股票数
     cursor.execute("SELECT COUNT(DISTINCT stock_code) FROM stock_monthly_factors WHERE pe_ttm IS NULL OR pe_ttm = 0")
     stats['stocks_pending'] = cursor.fetchone()[0]
-
-    conn.close()
 
     return stats
 
@@ -304,16 +297,11 @@ async def fill_daily_factors_empty(
                 start_date = (get_china_time() - timedelta(days=lookback_days)).strftime('%Y-%m-%d')
             else:
                 # 自动检测最早K线日期
-                import sqlite3
-                from pathlib import Path
-                from services.common.database import configure_kline_connection
-                db_path = Path(__file__).parent.parent.parent / "data" / "kline.db"
-                conn = sqlite3.connect(str(db_path), timeout=30)
-                configure_kline_connection(conn)
+                from services.common.database import get_sync_connection
+                conn = get_sync_connection("kline")
                 cursor = conn.cursor()
                 cursor.execute("SELECT MIN(trade_date) FROM kline_data")
                 row = cursor.fetchone()
-                conn.close()
                 start_date = row[0] if row and row[0] else (get_china_time() - timedelta(days=365)).strftime('%Y-%m-%d')
 
             task_manager.update_progress(TaskType.DAILY_FACTOR_FILL, 10, f"正在补算空值 {start_date} ~ {end_date}...")

@@ -11,7 +11,6 @@
 5. 批量更新数据库减少IO
 """
 
-import sqlite3
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
@@ -22,10 +21,9 @@ import json
 # 使用统一的SDK管理器
 from services.common.sdk_manager import get_sdk_manager
 from services.common.timezone import get_china_time
+from services.common.database import get_sync_connection, get_db_context
 
-# 数据库路径
-DB_PATH = Path(__file__).parent.parent.parent / "data" / "kline.db"
-WINNER_DB_PATH = Path(__file__).parent.parent.parent / "data" / "stockwinner.db"
+# 数据库路径（仅用于日志路径计算）
 LOG_PATH = Path(__file__).parent.parent.parent / "logs" / "missing_financial_data.log"
 
 
@@ -67,9 +65,8 @@ class MonthlyFactorUpdater:
         'sw_level1', 'sw_level2', 'sw_level3',
     ]
 
-    def __init__(self, db_path: Path = DB_PATH):
-        self.db_path = db_path
-        self.winner_db_path = WINNER_DB_PATH
+    def __init__(self, db_path: Path = None):
+        # db_path 参数保留向后兼容，但不再使用
         self.sdk = get_sdk_manager()
         self._load_missing_stocks_cache()
 
@@ -100,36 +97,9 @@ class MonthlyFactorUpdater:
         """从 report_date 提取年份"""
         return int(report_date[:4])
 
-    def _get_connection(self) -> sqlite3.Connection:
-        """获取数据库连接"""
-        from services.common.database import configure_kline_connection
-        conn = sqlite3.connect(str(self.db_path), timeout=60)
-        configure_kline_connection(conn)
-        conn.row_factory = sqlite3.Row
-        return conn
-
-    def _load_missing_stocks_cache(self):
-        """加载无数据股票缓存"""
-        if LOG_PATH.exists():
-            try:
-                with open(LOG_PATH, 'r') as f:
-                    for line in f:
-                        if line.strip() and ':' in line:
-                            stock_code = line.split(':')[0].strip()
-                            self._missing_data_stocks.add(stock_code)
-                print(f"[MonthlyFactor] 已加载 {len(self._missing_data_stocks)} 只无数据股票缓存")
-            except:
-                pass
-
-    def _log_missing_data(self, stock_code: str, stock_name: str, report_period: str, reason: str):
-        """记录无财务数据的股票到日志"""
-        self._missing_data_stocks.add(stock_code)
-        with open(LOG_PATH, 'a') as f:
-            f.write(f"{stock_code}: {stock_name}, {report_period}, {reason}\n")
-
     def get_stocks_need_update(self, skip_bj: bool = True) -> List[str]:
         """获取需要更新月频因子的股票列表（任意关键字段为空即需要更新）"""
-        conn = self._get_connection()
+        conn = get_sync_connection("kline")
         cursor = conn.cursor()
 
         # 检查所有关键字段是否有 NULL
@@ -145,12 +115,11 @@ class MonthlyFactorUpdater:
         # 排除已知无数据的股票
         stocks = [s for s in stocks if s not in self._missing_data_stocks]
 
-        conn.close()
         return stocks
 
     def get_all_stocks(self, skip_bj: bool = True) -> List[str]:
         """获取所有股票列表（仅季度记录，用于补充缺失的季度记录）"""
-        conn = self._get_connection()
+        conn = get_sync_connection("kline")
         cursor = conn.cursor()
 
         sql = "SELECT DISTINCT stock_code FROM stock_monthly_factors WHERE strftime('%m-%d', report_date) IN ('03-31', '06-30', '09-30', '12-31')"
@@ -162,25 +131,22 @@ class MonthlyFactorUpdater:
         # 排除已知无数据的股票
         stocks = [s for s in stocks if s not in self._missing_data_stocks]
 
-        conn.close()
         return stocks
 
     def get_stock_names(self) -> Dict[str, str]:
         """获取股票名称映射"""
-        conn = self._get_connection()
+        conn = get_sync_connection("kline")
         cursor = conn.cursor()
         cursor.execute("SELECT DISTINCT stock_code, stock_name FROM stock_monthly_factors")
         names = {row[0]: row[1] for row in cursor.fetchall()}
-        conn.close()
         return names
 
     def get_latest_report_period(self) -> str:
         """获取最新报告期"""
-        conn = self._get_connection()
+        conn = get_sync_connection("kline")
         cursor = conn.cursor()
         cursor.execute("SELECT MAX(report_date) FROM stock_monthly_factors")
         latest = cursor.fetchone()[0]
-        conn.close()
         # 转换为SDK格式（如 2026-03-31 -> 20260331）
         return latest.replace('-', '')
 
@@ -202,7 +168,7 @@ class MonthlyFactorUpdater:
 
     def get_market_cap_batch(self, stock_codes: List[str], trade_date: str, lookback_days: int = 20) -> Dict[str, Dict]:
         """批量获取市值数据（如果报告日期非交易日，回溯查找最近交易日）"""
-        conn = self._get_connection()
+        conn = get_sync_connection("kline")
         cursor = conn.cursor()
 
         # 先尝试直接匹配报告日期
@@ -254,7 +220,7 @@ class MonthlyFactorUpdater:
                 if not missing_stocks:
                     break
 
-        conn.close()
+
         return result
 
     def fetch_financial_data_from_sdk(self, stock_codes: List[str]) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -728,7 +694,7 @@ class MonthlyFactorUpdater:
             stock_names: 股票名称映射
             fill_nulls_only: True=只更新当前为NULL的字段；False=覆盖写入（默认）
         """
-        conn = self._get_connection()
+        conn = get_sync_connection("kline")
         cursor = conn.cursor()
 
         factor_to_db_mapping = {
@@ -872,7 +838,6 @@ class MonthlyFactorUpdater:
                 inserted_count += 1
 
         conn.commit()
-        conn.close()
         return {'updated': updated_count, 'inserted': inserted_count}
 
 

@@ -23,26 +23,19 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from common.technical_indicators import add_price_performance_to_df, add_kdj_to_df, add_macd_to_df
 
-DB_PATH = Path(__file__).parent.parent.parent / "data" / "kline.db"
+from services.common.database import get_sync_connection, get_db_context
 
 
 class DailyFactorCalculator:
     """日频因子计算器"""
 
-    def __init__(self, db_path: Path = DB_PATH):
-        self.db_path = db_path
-
-    def _get_connection(self) -> sqlite3.Connection:
-        """获取数据库连接"""
-        from services.common.database import configure_kline_connection
-        conn = sqlite3.connect(str(self.db_path), timeout=60)
-        configure_kline_connection(conn)
-        conn.row_factory = sqlite3.Row
-        return conn
+    def __init__(self, db_path: Path = None):
+        # db_path 参数保留向后兼容，但不再使用
+        pass
 
     def get_trading_dates(self, start_date: str, end_date: str) -> List[str]:
         """获取指定范围内的所有交易日"""
-        conn = self._get_connection()
+        conn = get_sync_connection("kline")
         cursor = conn.cursor()
         cursor.execute("""
             SELECT DISTINCT trade_date
@@ -50,22 +43,18 @@ class DailyFactorCalculator:
             WHERE trade_date >= ? AND trade_date <= ?
             ORDER BY trade_date
         """, (start_date, end_date))
-        dates = [row[0] for row in cursor.fetchall()]
-        conn.close()
-        return dates
+        return [row[0] for row in cursor.fetchall()]
 
     def get_all_stocks_on_date(self, trade_date: str) -> List[str]:
         """获取指定交易日有数据的所有股票代码"""
-        conn = self._get_connection()
+        conn = get_sync_connection("kline")
         cursor = conn.cursor()
         cursor.execute("""
             SELECT DISTINCT stock_code
             FROM kline_data
             WHERE trade_date = ?
         """, (trade_date,))
-        stocks = [row[0] for row in cursor.fetchall()]
-        conn.close()
-        return stocks
+        return [row[0] for row in cursor.fetchall()]
 
     def get_stock_kline_data(
         self,
@@ -75,7 +64,7 @@ class DailyFactorCalculator:
         with_name: bool = False
     ) -> pd.DataFrame:
         """获取单只股票的 K 线数据"""
-        conn = self._get_connection()
+        conn = get_sync_connection("kline")
 
         if with_name:
             query = """
@@ -93,7 +82,6 @@ class DailyFactorCalculator:
             """
 
         df = pd.read_sql_query(query, conn, params=(stock_code, start_date, end_date))
-        conn.close()
 
         if not df.empty:
             df['stock_code'] = stock_code
@@ -125,7 +113,7 @@ class DailyFactorCalculator:
         - total_market_cap: 总市值（亿元）= 总股本 * 收盘价 / 10000
         - days_since_ipo: 上市天数
         """
-        conn = self._get_connection()
+        conn = get_sync_connection("kline")
         cursor = conn.cursor()
 
         # 获取当日收盘价和股票名称
@@ -134,7 +122,6 @@ class DailyFactorCalculator:
             WHERE stock_code = ? AND trade_date = ?
         """, (stock_code, trade_date))
         row = cursor.fetchone()
-        conn.close()
 
         if not row:
             return None
@@ -280,7 +267,7 @@ class DailyFactorCalculator:
         - pe_inverse: PE 倒数 = 净利润 TTM / 市值 = 1/PE
         - pb_inverse: PB 倒数 = 净资产 / 市值 = 1/PB
         """
-        conn = self._get_connection()
+        conn = get_sync_connection("kline")
         cursor = conn.cursor()
 
         # 获取当日收盘价
@@ -289,7 +276,6 @@ class DailyFactorCalculator:
             WHERE stock_code = ? AND trade_date = ?
         """, (stock_code, trade_date))
         row = cursor.fetchone()
-        conn.close()
 
         if not row:
             return None
@@ -381,7 +367,7 @@ class DailyFactorCalculator:
         公式：
         - next_period_change = (次日收盘价 - 当日收盘价) / 当日收盘价
         """
-        conn = self._get_connection()
+        conn = get_sync_connection("kline")
         cursor = conn.cursor()
 
         # 获取当日和次日的收盘价
@@ -631,10 +617,9 @@ async def async_calculate_daily_factors(
     stock_code: str,
     start_date: str,
     end_date: str,
-    db_path: Path = DB_PATH
 ) -> pd.DataFrame:
     """异步计算日频因子"""
-    calculator = DailyFactorCalculator(db_path)
+    calculator = DailyFactorCalculator()
     loop = asyncio.get_event_loop()
 
     # 在线程池中执行同步计算

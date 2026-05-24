@@ -6,7 +6,6 @@
 2. 行业分类因子（申万一级、二级、三级行业，集成 SDK 获取数据）
 """
 
-import sqlite3
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
@@ -20,22 +19,13 @@ from services.common.sdk_manager import get_sdk_manager
 # 中国时区
 CHINA_TZ = timedelta(hours=8)
 
-DB_PATH = Path(__file__).parent.parent.parent / "data" / "kline.db"
-
 
 class MonthlyFactorCalculator:
     """月频因子计算器"""
 
-    def __init__(self, db_path: Path = DB_PATH):
-        self.db_path = db_path
-
-    def _get_connection(self) -> sqlite3.Connection:
-        """获取数据库连接"""
-        from services.common.database import configure_kline_connection
-        conn = sqlite3.connect(str(self.db_path), timeout=60)
-        configure_kline_connection(conn)
-        conn.row_factory = sqlite3.Row
-        return conn
+    def __init__(self, db_path: Path = None):
+        # db_path 参数保留向后兼容，但不再使用
+        pass
 
     # ==================== 财报类因子 ====================
 

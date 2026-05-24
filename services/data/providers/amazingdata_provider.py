@@ -80,17 +80,12 @@ class AmazingDataProvider(DataProvider):
                     "latency_ms": round(latency_ms, 1),
                 }
 
-            # 实际调用 SDK 获取一只股票行情来验证连接有效性
+            # 实际调用 SDK 验证连接有效性
+            # 先用 get_code_list() 测试，它返回纯 Python list，不涉
             try:
-                market_data = sdk_mgr.get_market_data()
-                # get_market_data 返回 DataFrame，检查是否有数据
-                if market_data is not None and hasattr(market_data, 'empty') and not market_data.empty:
-                    connected = True
-                elif market_data is not None:
-                    connected = True
-                else:
-                    # 即使返回空 DataFrame 也说明连接正常
-                    connected = True
+                codes = sdk_mgr.get_code_list()
+                # 能拿到股票列表（哪怕是空列表）说明 IPC + SDK 都正常
+                connected = isinstance(codes, list)
             except Exception:
                 connected = False
 

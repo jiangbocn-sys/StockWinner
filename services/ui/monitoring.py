@@ -5,7 +5,8 @@
 from fastapi import APIRouter, HTTPException, Path, Query, Body
 from typing import List, Optional
 from datetime import datetime
-from services.common.database import get_db_manager, configure_kline_connection
+import sqlite3
+from services.common.database import get_db_manager, get_sync_connection
 from services.monitoring.service import get_trading_monitor
 from services.common.timezone import get_china_time, format_china_time
 
@@ -69,11 +70,8 @@ async def get_signals(
     stock_codes = list(set(s['stock_code'] for s in signals))
     price_map = {}
     if stock_codes:
-        import sqlite3
-        kline_path = '/home/bobo/StockWinner/data/kline.db'
         try:
-            conn = sqlite3.connect(kline_path, timeout=5)
-            configure_kline_connection(conn)
+            conn = get_sync_connection("kline")
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             placeholders = ','.join(['?' for _ in stock_codes])
@@ -84,7 +82,6 @@ async def get_signals(
             for row in cursor.fetchall():
                 if row['stock_code'] not in price_map:
                     price_map[row['stock_code']] = row['close']
-            conn.close()
         except Exception:
             pass
 
@@ -332,9 +329,8 @@ async def get_manual_order_quote(
     from services.common.stock_code import normalize_stock_code
     normalized_code = normalize_stock_code(stock_code)
 
-    from services.common.sdk_connection_manager import get_connection_manager, ConnectionState
-    conn_mgr = get_connection_manager()
-    if conn_mgr.get_state() != ConnectionState.CONNECTED:
+    from services.common.sdk_manager import get_sdk_manager
+    if not get_sdk_manager().is_connected():
         return {"success": False, "message": "券商服务器连接失败，请检查网络后重试"}
 
     try:
@@ -434,9 +430,8 @@ async def calculate_manual_order(
     normalized_code = normalize_stock_code(stock_code)
 
     # SDK 连接检查
-    from services.common.sdk_connection_manager import get_connection_manager, ConnectionState
-    conn_mgr = get_connection_manager()
-    if conn_mgr.get_state() != ConnectionState.CONNECTED:
+    from services.common.sdk_manager import get_sdk_manager
+    if not get_sdk_manager().is_connected():
         return {"success": False, "message": "券商服务器连接失败，请检查网络后重试"}
 
     from services.trading.execution_service import get_trade_execution_service
@@ -655,9 +650,8 @@ async def immediate_sell_position(
         return {"success": False, "message": "可卖数量为 0（T+1 冻结），无法清仓"}
 
     # SDK 连接检查
-    from services.common.sdk_connection_manager import get_connection_manager, ConnectionState
-    conn_mgr = get_connection_manager()
-    if conn_mgr.get_state() != ConnectionState.CONNECTED:
+    from services.common.sdk_manager import get_sdk_manager
+    if not get_sdk_manager().is_connected():
         return {"success": False, "message": "券商服务器连接失败，请检查网络后重试"}
 
     # 获取实时行情

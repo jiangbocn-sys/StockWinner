@@ -5,12 +5,11 @@
 
 设计原则：
 - 所有函数是独立可顺序调用的单元，适配 NightTaskQueue 链式执行
-- 数据库写入使用 sqlite3.connect() with WAL + busy_timeout
+- 数据库写入使用 get_sync_connection("kline") (WAL + busy_timeout)
 - 因子计算通过 factor_pipeline 统一管道
 """
 
 import asyncio
-import sqlite3
 import time
 import pandas as pd
 from datetime import datetime, timedelta
@@ -20,10 +19,8 @@ from typing import List, Dict, Optional
 from services.common.timezone import CHINA_TZ, get_china_time
 from services.common.download_progress import get_progress_tracker, DownloadStatus
 from services.common.structured_logger import get_logger
+from services.common.database import get_sync_connection
 from services.factors.factor_pipeline import calculate_technical_factors, add_signal_indicators
-
-# 数据库路径
-DB_PATH = Path(__file__).parent.parent.parent / "data" / "kline.db"
 
 
 # ================================================================
@@ -62,10 +59,8 @@ def calculate_and_save_factors_for_dates(
     """
     log = get_logger("factor")
 
-    conn = sqlite3.connect(str(DB_PATH), timeout=60)
+    conn = get_sync_connection("kline")
     cursor = conn.cursor()
-    cursor.execute("PRAGMA journal_mode=WAL")
-    cursor.execute("PRAGMA busy_timeout = 60000")
     cursor.execute("PRAGMA synchronous=NORMAL")
 
     start_time = time.monotonic()
@@ -81,7 +76,6 @@ def calculate_and_save_factors_for_dates(
     if not stock_codes:
         log.log_event("factor_calc_no_data", f"日期范围 [{start_date}, {end_date}] 内无数据",
                       start_date=start_date, end_date=end_date)
-        conn.close()
         return 0
 
     total_stocks = len(stock_codes)
@@ -367,8 +361,6 @@ def calculate_and_save_factors_for_dates(
     if total_inserted > 0:
         conn.commit()
 
-    conn.close()
-
     duration_ms = (time.monotonic() - start_time) * 1000
     log.log_event("factor_calc_complete", f"因子计算完成，总计插入 {total_inserted} 条记录",
                   total_inserted=total_inserted)
@@ -429,10 +421,8 @@ def fill_empty_factor_values(
     # Step 1: 处理缺失记录
     log.log_event("fill_empty_step1", "Step 1: 检查缺失因子记录...")
 
-    conn_check = sqlite3.connect(str(DB_PATH), timeout=60)
+    conn_check = get_sync_connection("kline")
     cursor_check = conn_check.cursor()
-    cursor_check.execute("PRAGMA journal_mode=WAL")
-    cursor_check.execute("PRAGMA busy_timeout = 60000")
 
     if stock_codes is None:
         cursor_check.execute("""
@@ -452,8 +442,6 @@ def fill_empty_factor_values(
             AND k.stock_code IN ({placeholders})
         """, [start_date, end_date] + stock_codes)
         missing_stock_codes = [row[0] for row in cursor_check.fetchall()]
-
-    conn_check.close()
 
     missing_count = 0
     if missing_stock_codes:
@@ -476,10 +464,8 @@ def fill_empty_factor_values(
     # Step 2: 更新空值记录
     log.log_event("fill_empty_step2", "Step 2: 更新空值记录...")
 
-    conn = sqlite3.connect(str(DB_PATH), timeout=60)
+    conn = get_sync_connection("kline")
     cursor = conn.cursor()
-    cursor.execute("PRAGMA journal_mode=WAL")
-    cursor.execute("PRAGMA busy_timeout = 60000")
     cursor.execute("PRAGMA synchronous=NORMAL")
 
     # 检测所有因子字段的空值（与 INSERT 语句中的字段保持一致）
@@ -517,7 +503,6 @@ def fill_empty_factor_values(
                   total_stocks=total_stocks)
 
     if total_stocks == 0:
-        conn.close()
         log.log_event("fill_empty_nothing", "无需处理的空值因子")
         duration_ms = (time.monotonic() - start_time) * 1000
         log.log_duration("fill_empty_total", duration_ms,
@@ -627,7 +612,6 @@ def fill_empty_factor_values(
                 continue
 
     conn.commit()
-    conn.close()
 
     if tracker:
         tracker.complete_sync()
@@ -681,10 +665,8 @@ def smart_update_factors(
     log.log_event("smart_update_start", f"开始智能因子更新，日期范围：{start_date} ~ {end_date}",
                   start_date=start_date, end_date=end_date)
 
-    conn = sqlite3.connect(str(DB_PATH), timeout=60)
+    conn = get_sync_connection("kline")
     cursor = conn.cursor()
-    cursor.execute("PRAGMA journal_mode=WAL")
-    cursor.execute("PRAGMA busy_timeout = 60000")
     cursor.execute("PRAGMA synchronous=NORMAL")
 
     # ========== Step 1: 批量检测缺失/空值日期 ==========
@@ -769,7 +751,6 @@ def smart_update_factors(
                   missing_records=len(missing_records), null_records=len(null_records), total_stocks=total_stocks)
 
     if total_stocks == 0:
-        conn.close()
         log.log_event("smart_update_nothing", "无需处理，直接返回")
         duration_ms = (time.monotonic() - start_time) * 1000
         log.log_duration("smart_update_total", duration_ms, inserted=0, updated=0, skipped=0)
@@ -1033,7 +1014,6 @@ def smart_update_factors(
                 continue
 
     conn.commit()
-    conn.close()
 
     if tracker:
         tracker.complete_sync(inserted=total_inserted, updated=total_updated)

@@ -330,7 +330,6 @@ class BacktestEngine:
                     last_saved[0] = pct
 
                 conn.commit()
-                conn.close()
             except Exception as e:
                 logger.warn("backtest", f"保存回测进度失败: {e}")
 
