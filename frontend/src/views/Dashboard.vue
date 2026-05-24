@@ -60,13 +60,13 @@
           </el-card>
 
           <!-- 数据通道状态 -->
-          <el-card class="data-sources-card" v-if="dataSources.length > 0">
+          <el-card class="data-sources-card">
             <template #header>
               <div class="card-header">
                 <span>数据通道状态</span>
                 <div>
                   <el-tag size="small" :type="allSourcesConnected ? 'success' : 'warning'">
-                    {{ connectedCount }}/{{ dataSources.length }} 已连接
+                    {{ connectedCount }}/{{ dataSources.length || 1 }} 已连接
                   </el-tag>
                   <el-button size="small" @click="refreshDataSources" :loading="checkingHealth" style="margin-left: 8px">
                     <el-icon><Refresh /></el-icon> 检测
@@ -74,7 +74,7 @@
                 </div>
               </div>
             </template>
-            <el-descriptions :column="3" border>
+            <el-descriptions v-if="dataSources.length > 0" :column="3" border>
               <el-descriptions-item
                 v-for="ds in dataSources"
                 :key="ds.provider_id"
@@ -95,6 +95,7 @@
                 </div>
               </el-descriptions-item>
             </el-descriptions>
+            <el-empty v-else description="暂无数据源" :image-size="60" />
           </el-card>
 
           <!-- 系统实时指标 -->
@@ -307,11 +308,11 @@ const sdkMetrics = ref({
 // 数据通道状态
 const dataSources = ref([])
 const statusTagType = (status) => {
-  const map = { connected: 'success', disconnected: 'warning', error: 'danger', not_configured: 'info' }
+  const map = { connected: 'success', disconnected: 'warning', error: 'danger', not_configured: 'info', checking: 'warning' }
   return map[status] || 'info'
 }
 const statusText = (status) => {
-  const map = { connected: '已连接', disconnected: '未连接', error: '连接失败', not_configured: '未配置' }
+  const map = { connected: '已连接', disconnected: '未连接', error: '连接失败', not_configured: '未配置', checking: '检测中' }
   return map[status] || '未知'
 }
 const connectedCount = computed(() => dataSources.value.filter(ds => ds.status === 'connected').length)
@@ -517,7 +518,7 @@ const loadDashboard = async (silent = false) => {
 
     // 数据通道状态
     if (data.data_sources_status) {
-      dataSources.value = data.data_sources_status.map(ds => ({ ...ds, _checking: false }))
+      dataSources.value = data.data_sources_status.map(ds => ({ ...ds, _checking: ds.status === 'checking' }))
     }
   } catch (error) {
     if (!silent) console.error('加载仪表盘数据失败:', error)
@@ -528,16 +529,18 @@ const refreshData = () => {
   loadDashboard()
 }
 
-import { formatNumber } from '../utils/format'
+const formatNumber = (num) => {
+  return Number(num || 0).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+}
 
 // 自动刷新定时器
 let refreshTimer = null
-const REFRESH_INTERVAL = 60000 // 1 分钟
+const REFRESH_INTERVAL = 300000 // 5 分钟（仅刷新业务数据，不触发 SDK 健康检查）
 
 onMounted(async () => {
   await accountStore.loadAccounts()
   await loadDashboard()
-  // 每分钟自动刷新
+  // 每 5 分钟自动刷新（业务数据，不阻塞）
   refreshTimer = setInterval(() => loadDashboard(true), REFRESH_INTERVAL)
 })
 

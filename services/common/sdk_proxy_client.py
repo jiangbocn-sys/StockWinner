@@ -128,8 +128,14 @@ class SDKProxyClient:
         self._close_socket()
 
     def is_connected(self) -> bool:
-        """检查连接状态"""
-        return self._connected
+        """检查连接状态（验证 socket 文件是否存活）"""
+        if not self._connected:
+            return False
+        # 检查 IPC socket 文件是否存在（防止僵尸连接）
+        if not os.path.exists(SOCKET_PATH):
+            self._connected = False
+            return False
+        return True
 
     def get_info(self):
         """获取 InfoData 实例（缓存由子进程管理）"""
