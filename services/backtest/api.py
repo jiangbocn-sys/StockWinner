@@ -449,7 +449,30 @@ async def get_backtest_nav(
         (run_id,)
     )
 
-    return {"success": True, "nav": [dict(n) for n in nav_data]}
+    # 关联查询每日持仓
+    positions_data = await db.fetchall(
+        "SELECT trade_date, stock_code, stock_name, quantity, avg_cost, close_price, market_value, unrealized_pnl "
+        "FROM backtest_daily_positions WHERE backtest_run_id = ? ORDER BY trade_date ASC, stock_code ASC",
+        (run_id,)
+    )
+
+    # 按日期聚合持仓
+    positions_by_date: dict = {}
+    for p in positions_data:
+        d = dict(p)
+        td = d.pop("trade_date")
+        if td not in positions_by_date:
+            positions_by_date[td] = []
+        positions_by_date[td].append(d)
+
+    # 合并到 nav 数据
+    result = []
+    for n in nav_data:
+        row = dict(n)
+        row["positions"] = positions_by_date.get(row["trade_date"], [])
+        result.append(row)
+
+    return {"success": True, "nav": result}
 
 
 @router.get("/api/v1/ui/{account_id}/backtest/runs/{run_id}/positions")

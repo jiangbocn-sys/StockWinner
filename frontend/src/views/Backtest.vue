@@ -1008,7 +1008,30 @@ const renderNavChart = () => {
   const drawdowns = navData.value.map(d => d.drawdown * 100)
 
   navChart.setOption({
-    tooltip: { trigger: 'axis' },
+    tooltip: {
+      trigger: 'axis',
+      formatter: (params) => {
+        if (!params || params.length === 0) return ''
+        const idx = params[0].dataIndex
+        const date = params[0].axisValue
+        const row = navData.value[idx]
+        let html = `<b>${date}</b><br/>`
+        for (const p of params) {
+          const val = typeof p.value === 'number' ? p.value.toFixed(4) : p.value
+          html += `${p.marker} ${p.seriesName}: ${val}<br/>`
+        }
+        const positions = row?.positions
+        if (positions && positions.length > 0) {
+          html += '<b>持仓:</b><br/>'
+          for (const pos of positions) {
+            html += `${pos.stock_name}(${pos.stock_code}): ${pos.quantity}<br/>`
+          }
+        } else {
+          html += '<b>持仓: 空仓</b>'
+        }
+        return html
+      },
+    },
     grid: { left: '3%', right: '4%', bottom: '3%', containLabel: true },
     xAxis: { type: 'category', data: dates, axisLabel: { rotate: 45 } },
     yAxis: [
