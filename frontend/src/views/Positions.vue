@@ -339,25 +339,27 @@
 </template>
 
 <script setup>
-defineOptions({ name: 'Positions' })
 import { ref, onMounted, onUnmounted, computed, nextTick } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { ArrowLeft, ArrowRight, Refresh, Download } from '@element-plus/icons-vue'
 import { exportTable as doExport } from '@/utils/exportHelper'
 import { useAccountStore } from '../stores/account'
+import { usePositionsStore } from '../stores/positions'
 import NavBar from '../components/NavBar.vue'
 import KlineChart from '../components/KlineChart.vue'
 
 const accountStore = useAccountStore()
+const posStore = usePositionsStore()
 const currentAccount = computed(() => accountStore.currentAccount)
 const currentAccountId = computed(() => accountStore.currentAccountId)
 
-const positions = ref([])
-const totalAssets = ref(0)
-const availableCash = ref(0)
-const marketValue = ref(0)
-const totalPnl = ref(0)
-const pnlPercent = ref(0)
+// 数据从 store 读取
+const positions = computed(() => posStore.positions)
+const totalAssets = computed(() => posStore.totalAssets)
+const availableCash = computed(() => posStore.availableCash)
+const marketValue = computed(() => posStore.marketValue)
+const totalPnl = computed(() => posStore.totalPnl)
+const pnlPercent = computed(() => posStore.pnlPercent)
 
 // 分页
 const posCurrentPage = ref(1)
@@ -378,13 +380,11 @@ const dsaError = ref('')
 const refreshing = ref(false)
 
 // 策略持仓统计
-const strategyStats = ref([])
+const strategyStats = computed(() => posStore.strategyStats)
 
 const loadStrategyStats = async () => {
   try {
-    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/positions/strategy-stats`)
-    const data = await res.json()
-    strategyStats.value = data.strategy_stats || []
+    await posStore.loadStrategyStats(currentAccountId.value)
   } catch (e) {
     console.error('加载策略统计失败:', e)
   }
@@ -392,8 +392,8 @@ const loadStrategyStats = async () => {
 
 // 已清仓明细
 const activeTab = ref('holding')
-const closedPositions = ref([])
-const closedCount = ref(0)
+const closedPositions = computed(() => posStore.closedPositions)
+const closedCount = computed(() => posStore.closedCount)
 const closedCurrentPage = ref(1)
 const closedPageSize = ref(20)
 const paginatedClosed = computed(() => {
@@ -404,10 +404,7 @@ const closedIndexMethod = (index) => (closedCurrentPage.value - 1) * closedPageS
 
 const loadClosedPositions = async () => {
   try {
-    const response = await fetch(`/api/v1/ui/${currentAccountId.value}/closed-positions?limit=500`)
-    const data = await response.json()
-    closedPositions.value = data.closed_positions || []
-    closedCount.value = data.total || 0
+    await posStore.loadClosedPositions(currentAccountId.value)
     closedCurrentPage.value = 1
   } catch (error) {
     console.error('加载已清仓明细失败:', error)
@@ -463,17 +460,9 @@ const handleExportPositions = (format) => {
 }
 
 const loadPositions = async () => {
-  // 先从 DB 加载数据（不等待行情刷新）
   try {
-    const response = await fetch(`/api/v1/ui/${currentAccountId.value}/positions`)
-    const data = await response.json()
-    positions.value = data.positions || []
+    await posStore.loadPositions(currentAccountId.value)
     posCurrentPage.value = 1
-    availableCash.value = data.available_cash || 0
-    marketValue.value = positions.value.reduce((sum, p) => sum + (p.market_value || 0), 0)
-    totalPnl.value = positions.value.reduce((sum, p) => sum + (p.profit_loss || 0), 0)
-    totalAssets.value = marketValue.value + availableCash.value
-    pnlPercent.value = (totalPnl.value / (totalAssets.value - availableCash.value)) * 100 || 0
   } catch (error) {
     console.error('加载持仓失败:', error)
   }
@@ -482,34 +471,8 @@ const loadPositions = async () => {
 const refreshPrices = async () => {
   refreshing.value = true
   try {
-    const response = await fetch(`/api/v1/ui/${currentAccountId.value}/positions/refresh-prices`, { method: 'POST' })
-    const data = await response.json()
-
-    positions.value = data.positions || []
+    await posStore.refreshPrices(currentAccountId.value)
     posCurrentPage.value = 1
-    availableCash.value = data.available_cash || 0
-
-    marketValue.value = positions.value.reduce((sum, p) => sum + (p.market_value || 0), 0)
-    totalPnl.value = positions.value.reduce((sum, p) => sum + (p.profit_loss || 0), 0)
-    totalAssets.value = marketValue.value + availableCash.value
-    pnlPercent.value = (totalPnl.value / (totalAssets.value - availableCash.value)) * 100 || 0
-
-    // 如果后台仍在刷新 SDK，等完成后重新拉取
-    const cacheStatus = data.price_cache_status
-    if (cacheStatus && cacheStatus.refreshing) {
-      // 等待后台 SDK 刷新完成（最多 20 秒）
-      await new Promise(resolve => setTimeout(resolve, 3000))
-      // 重新从 GET 接口读取（此时 DB 已被后台任务更新）
-      const followUp = await fetch(`/api/v1/ui/${currentAccountId.value}/positions`)
-      const data2 = await followUp.json()
-      positions.value = data2.positions || []
-      availableCash.value = data2.available_cash || 0
-      marketValue.value = positions.value.reduce((sum, p) => sum + (p.market_value || 0), 0)
-      totalPnl.value = positions.value.reduce((sum, p) => sum + (p.profit_loss || 0), 0)
-      totalAssets.value = marketValue.value + availableCash.value
-      pnlPercent.value = (totalPnl.value / (totalAssets.value - availableCash.value)) * 100 || 0
-    }
-
     ElMessage.success('行情已刷新')
   } catch (error) {
     console.error('刷新行情失败:', error)
@@ -831,13 +794,8 @@ let priceRefreshTimer = null
 const startPriceRefresh = () => {
   priceRefreshTimer = setInterval(async () => {
     try {
-      const res = await fetch(`/api/v1/ui/${currentAccountId.value}/positions`)
-      const data = await res.json()
-      if (data.positions) {
-        positions.value = data.positions
-        // 刷新策略统计
-        await loadStrategyStats()
-      }
+      await posStore.loadPositions(currentAccountId.value)
+      await posStore.loadStrategyStats(currentAccountId.value)
     } catch (e) {
       // 静默失败，不弹提示
     }
@@ -850,16 +808,13 @@ onUnmounted(() => {
 })
 
 onMounted(async () => {
-  // 并行加载所有数据，哪个先到就先展示
-  await Promise.all([
-    loadPositions(),
-    loadClosedPositions(),
-    loadStrategyStats()
-  ])
-  // 先渲染页面，再异步刷新实时行情（不阻塞 UI）
+  if (!posStore.loaded) {
+    await loadPositions()
+    await loadClosedPositions()
+    await loadStrategyStats()
+  }
   await nextTick()
   setTimeout(() => refreshPrices(), 0)
-  // 启动定时静默刷新（从内存缓存取价）
   startPriceRefresh()
 })
 </script>
