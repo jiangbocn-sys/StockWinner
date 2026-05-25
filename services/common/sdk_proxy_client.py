@@ -135,18 +135,12 @@ class SDKProxyClient:
         self._close_socket()
 
     def is_connected(self) -> bool:
-        """检查连接状态（自动重连）"""
+        """检查连接状态（仅检查，不重连——避免在主线程阻塞拿锁）"""
         if self._connected:
-            # 检查 IPC socket 文件是否存在（防止僵尸连接）
             if not os.path.exists(SOCKET_PATH):
                 self._connected = False
                 return False
             return True
-        # 断连但 socket 存在 → 自动重连
-        if os.path.exists(SOCKET_PATH):
-            if self.connect_to_subprocess(timeout=3.0):
-                get_logger("sdk_proxy").log_event("sdk_ipc_auto_reconnect", "IPC 自动重连成功")
-                return True
         return False
 
     def get_info(self):

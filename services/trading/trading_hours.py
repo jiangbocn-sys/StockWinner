@@ -143,20 +143,36 @@ def get_phase_description(phase: TradingPhase) -> str:
     return descriptions.get(phase, "未知时段")
 
 
+# 交易日历缓存（每日凌晨自动刷新一次）
+_trading_calendar_cache = None
+_trading_calendar_date = None
+
+
 def is_today_trading_day(dt: datetime = None) -> bool:
-    """判断今天是否为交易日（使用 SDK 交易日历）"""
+    """判断今天是否为交易日（SDK 日历 + 24h 缓存）"""
+    global _trading_calendar_cache, _trading_calendar_date
+
     if dt is None:
         dt = get_china_time()
     today = int(dt.strftime('%Y%m%d'))
+    today_date = dt.strftime('%Y%m%d')
 
     try:
         from services.common.sdk_manager import get_sdk_manager
+        # 缓存 24 小时有效（同一天内复用）
+        if _trading_calendar_cache is not None and _trading_calendar_date == today_date:
+            return today in _trading_calendar_cache
+
         sdk_mgr = get_sdk_manager()
-        calendar = sdk_mgr.get_calendar()  # int 列表
-        return today in calendar
+        if sdk_mgr.is_connected():
+            _trading_calendar_cache = sdk_mgr.get_calendar()
+            _trading_calendar_date = today_date
+            return today in _trading_calendar_cache
+        # SDK 未连接 → 降级
     except Exception as e:
         print(f"[TradingHours] 获取交易日历失败，降级为工作日判断: {e}")
-        return dt.weekday() < 5  # 降级：周一到周五
+
+    return dt.weekday() < 5  # 降级：周一到周五
 
 
 def can_trade(dt: datetime = None) -> bool:
