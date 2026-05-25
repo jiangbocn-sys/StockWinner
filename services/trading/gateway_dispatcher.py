@@ -193,7 +193,11 @@ class GatewayDispatcher:
     # ── SDK 查询 ──
 
     async def _query_sdk(self, codes: List[str]) -> Dict[str, Any]:
-        """分批调 SDK snapshot，失败后回退 K 线数据，返回 {stock_code: MarketData}"""
+        """分批调 SDK snapshot，失败后回退 K 线数据，返回 {stock_code: MarketData}
+
+        所有 SDK 调用通过 asyncio.to_thread 运行在线程池中，不阻塞事件循环。
+        """
+        import asyncio
         from services.common.sdk_manager import get_sdk_manager
         from services.common.timezone import get_china_time
         from services.trading.gateway import MarketData
@@ -206,11 +210,14 @@ class GatewayDispatcher:
         all_snapshots: Dict[str, Any] = {}
 
         # ① 优先尝试 snapshot（首批失败则跳过剩余批次，走 kline fallback）
-        if sdk_mgr.connect():
+        if await asyncio.to_thread(sdk_mgr.connect):
             snapshot_working = True
             for i in range(0, len(codes), self._sdk_batch_size):
                 batch = codes[i:i + self._sdk_batch_size]
-                result = sdk_mgr.query_snapshot(code_list=batch, begin_date=today_int, end_date=today_int)
+                result = await asyncio.to_thread(
+                    sdk_mgr.query_snapshot,
+                    code_list=batch, begin_date=today_int, end_date=today_int
+                )
 
                 batch_valid = 0
                 if result and isinstance(result, dict):
@@ -300,7 +307,11 @@ class GatewayDispatcher:
         return results
 
     async def _fallback_kline(self, codes: List[str]) -> Dict[str, Any]:
-        """snapshot 失败时回退到 K 线数据获取价格（不限股票数，分批 15 只）"""
+        """snapshot 失败时回退到 K 线数据获取价格（不限股票数，分批 15 只）
+
+        所有 SDK 调用通过 asyncio.to_thread 运行在线程池中，不阻塞事件循环。
+        """
+        import asyncio
         import datetime
         from datetime import timedelta
         from services.common.sdk_manager import get_sdk_manager
@@ -329,9 +340,10 @@ class GatewayDispatcher:
         batch_size = 15
         for i in range(0, len(codes), batch_size):
             batch = codes[i:i + batch_size]
-            if not sdk_mgr.is_connected():
+            if not await asyncio.to_thread(sdk_mgr.is_connected):
                 break
-            result = sdk_mgr.query_kline(
+            result = await asyncio.to_thread(
+                sdk_mgr.query_kline,
                 code_list=batch,
                 begin_date=begin_date_int,
                 end_date=end_date_int,
