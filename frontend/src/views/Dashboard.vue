@@ -236,7 +236,6 @@
 </template>
 
 <script setup>
-defineOptions({ name: 'Dashboard' })
 import { ref, onMounted, onUnmounted, computed } from 'vue'
 import { useAccountStore } from '../stores/account'
 import { WarningFilled, Refresh, Loading } from '@element-plus/icons-vue'
@@ -437,9 +436,9 @@ const startUptimeTimer = () => {
 }
 
 // 加载仪表盘数据（silent=true 时静默失败，不输出日志）
-const loadDashboard = async (silent = false) => {
+const loadDashboard = async (silent = false, signal = null) => {
   try {
-    const response = await fetch(`/api/v1/ui/${currentAccountId.value}/dashboard`)
+    const response = await fetch(`/api/v1/ui/${currentAccountId.value}/dashboard`, { signal })
     if (!response.ok) {
       if (!silent) console.warn('仪表盘数据加载失败:', response.status)
       return
@@ -522,6 +521,7 @@ const loadDashboard = async (silent = false) => {
       dataSources.value = data.data_sources_status.map(ds => ({ ...ds, _checking: ds.status === 'checking' }))
     }
   } catch (error) {
+    if (error.name === 'AbortError') return  // 组件卸载、请求取消，正常
     if (!silent) console.error('加载仪表盘数据失败:', error)
   }
 }
@@ -536,16 +536,19 @@ const formatNumber = (num) => {
 
 // 自动刷新定时器
 let refreshTimer = null
+let abortController = null
 const REFRESH_INTERVAL = 300000 // 5 分钟（仅刷新业务数据，不触发 SDK 健康检查）
 
 onMounted(async () => {
+  abortController = new AbortController()
   await accountStore.loadAccounts()
-  await loadDashboard()
+  await loadDashboard(false, abortController.signal)
   // 每 5 分钟自动刷新（业务数据，不阻塞）
   refreshTimer = setInterval(() => loadDashboard(true), REFRESH_INTERVAL)
 })
 
 onUnmounted(() => {
+  abortController?.abort()
   if (uptimeTimer) clearInterval(uptimeTimer)
   if (refreshTimer) clearInterval(refreshTimer)
 })

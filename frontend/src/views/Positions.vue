@@ -802,11 +802,15 @@ const startPriceRefresh = () => {
   }, 10000)  // 每 10 秒刷新一次
 }
 
+let posAbortController = null
+
 onUnmounted(() => {
+  posAbortController?.abort()
   if (priceRefreshTimer) { clearInterval(priceRefreshTimer); priceRefreshTimer = null }
 })
 
 onMounted(async () => {
+  posAbortController = new AbortController()
   if (!posStore.loaded) {
     await loadPositions()
     await loadClosedPositions()

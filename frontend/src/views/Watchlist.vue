@@ -1626,13 +1626,15 @@ const handleDsaAnalysisSelected = async () => {
   }
 }
 
+let wlAbortController = null
+
 onUnmounted(() => {
+  wlAbortController?.abort()
   if (progressPollingTimer) { clearInterval(progressPollingTimer); progressPollingTimer = null }
   if (watchlistPriceTimer) { clearInterval(watchlistPriceTimer); watchlistPriceTimer = null }
   if (resizeMouseMoveRef.value) document.removeEventListener('mousemove', resizeMouseMoveRef.value)
   if (resizeMouseUpRef.value) document.removeEventListener('mouseup', resizeMouseUpRef.value)
   isResizing.value = false
-  destroyKlineChart()
 })
 
 // 静默刷新候选列表现价（从内存 PriceCache 取，不调用 SDK）
@@ -1653,6 +1655,7 @@ const startWatchlistPriceRefresh = () => {
 }
 
 onMounted(async () => {
+  wlAbortController = new AbortController()
   if (!wlStore.loaded) {
     await loadStrategies()
     await loadGroups()
