@@ -90,7 +90,7 @@ const router = createRouter({
   routes
 })
 
-router.beforeEach((to, from, next) => {
+router.beforeEach((to, from) => {
   if (to.meta.title) {
     document.title = `${to.meta.title} - StockWinner`
   }
@@ -100,13 +100,10 @@ router.beforeEach((to, from, next) => {
   const requiresAuth = to.meta.requiresAuth !== false
 
   if (requiresAuth && !token) {
-    // 需要认证但没有 token，重定向到登录页
-    next('/login')
-  } else if (to.path === '/login' && token) {
-    // 已登录但尝试访问登录页，重定向到首页
-    next('/dashboard')
-  } else {
-    next()
+    return '/login'
+  }
+  if (to.path === '/login' && token) {
+    return '/dashboard'
   }
 })
 
