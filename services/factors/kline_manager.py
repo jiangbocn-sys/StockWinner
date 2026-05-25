@@ -51,29 +51,29 @@ class KlineManager:
     # ================================================================
 
     def get_global_latest_date(self) -> Optional[str]:
-        """获取 kline_data 表中全局最新的交易日期"""
+        """获取 kline_data 表中全局最新的交易日期（排除行业指数 801xxx.SI）"""
         conn = self._conn()
         cursor = conn.cursor()
-        cursor.execute('SELECT MAX(trade_date) FROM kline_data')
+        cursor.execute("SELECT MAX(trade_date) FROM kline_data WHERE stock_code NOT LIKE '801%.SI'")
         result = cursor.fetchone()
         return result[0] if result and result[0] else None
 
     def get_stock_count_on_date(self, trade_date: str) -> int:
-        """获取指定交易日期有数据的股票数量"""
+        """获取指定交易日期有数据的股票数量（排除行业指数 801xxx.SI）"""
         conn = self._conn()
         cursor = conn.cursor()
         cursor.execute(
-            'SELECT COUNT(DISTINCT stock_code) FROM kline_data WHERE trade_date = ?',
+            "SELECT COUNT(DISTINCT stock_code) FROM kline_data WHERE trade_date = ? AND stock_code NOT LIKE '801%.SI'",
             (trade_date,)
         )
         result = cursor.fetchone()
         return result[0] if result else 0
 
     def get_total_stock_count(self) -> int:
-        """获取 kline_data 表中总的股票数量"""
+        """获取 kline_data 表中总的股票数量（排除行业指数 801xxx.SI）"""
         conn = self._conn()
         cursor = conn.cursor()
-        cursor.execute('SELECT COUNT(DISTINCT stock_code) FROM kline_data')
+        cursor.execute("SELECT COUNT(DISTINCT stock_code) FROM kline_data WHERE stock_code NOT LIKE '801%.SI'")
         result = cursor.fetchone()
         return result[0] if result else 0
 
