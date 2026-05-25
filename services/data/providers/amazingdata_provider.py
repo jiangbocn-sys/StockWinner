@@ -59,9 +59,12 @@ class AmazingDataProvider(DataProvider):
         return self._ready
 
     async def health_check(self) -> Dict[str, Any]:
+        import os
         start = time.monotonic()
         try:
             from services.common.sdk_manager import get_sdk_manager
+            from services.common.sdk_proxy_client import get_subprocess_manager
+            from services.common.sdk_ipc import SOCKET_PATH
             sdk_mgr = get_sdk_manager()
 
             # 如果未连接，先尝试重连
@@ -71,8 +74,14 @@ class AmazingDataProvider(DataProvider):
                 except Exception:
                     pass
 
-            # 检查当前连接状态（可能是刚重连成功的 CONNECTED，也可能是仍然未连接）
-            if not sdk_mgr.is_connected():
+            # 连接判断：IPC flag 或者 socket 存在+子进程存活
+            connected = sdk_mgr.is_connected()
+            if not connected:
+                sub_mgr = get_subprocess_manager()
+                if sub_mgr.is_subprocess_alive() and os.path.exists(SOCKET_PATH):
+                    connected = True  # 实际可用，下次 IPC 自动重连
+
+            if not connected:
                 latency_ms = (time.monotonic() - start) * 1000
                 return {
                     "ok": False,

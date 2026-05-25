@@ -147,23 +147,25 @@ async def _ensure_data_sources_init():
 
 
 def check_sdk_connection() -> str:
-    """检测 Galaxy SDK 连接状态（通过 IPC 代理检查子进程状态）"""
+    """检测 Galaxy SDK 连接状态（检查子进程 + socket + IPC flag）"""
+    import os
     try:
         from services.common.sdk_manager import get_sdk_manager
+        from services.common.sdk_proxy_client import get_subprocess_manager
+        from services.common.sdk_ipc import SOCKET_PATH
+
         sdk_mgr = get_sdk_manager()
-        # 通过 IPC 代理检查子进程是否响应
         if sdk_mgr.is_connected():
             return "connected"
-        # 检查子进程是否存活
-        try:
-            from services.common.sdk_proxy_client import get_subprocess_manager
-            sub_mgr = get_subprocess_manager()
-            if sub_mgr.is_subprocess_alive():
-                return "connecting"  # 子进程存活但 IPC 未就绪
-            else:
-                return "disconnected"  # 子进程未运行
-        except Exception:
-            return "disconnected"
+
+        # flag 为 False 但 socket 存在 + 子进程存活 → 下次 IPC 自动重连，视为已连接
+        sub_mgr = get_subprocess_manager()
+        if sub_mgr.is_subprocess_alive() and os.path.exists(SOCKET_PATH):
+            return "connected"
+
+        if sub_mgr.is_subprocess_alive():
+            return "connecting"
+        return "disconnected"
     except ImportError:
         return "disconnected"
     except Exception:
