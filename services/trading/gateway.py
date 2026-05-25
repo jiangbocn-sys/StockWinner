@@ -89,10 +89,12 @@ class TradingGateway(TradingGatewayInterface):
 
     async def get_batch_kline_data(
         self, stock_codes: List[str], period: str = "day",
-        start_date: Optional[str] = None, end_date: Optional[str] = None, limit: int = 100
+        start_date: Optional[str] = None, end_date: Optional[str] = None,
+        limit: int = 100, task_type: str = "query"
     ) -> Dict[str, Any]:
         return await self._kline_data.get_batch_kline_data(
-            stock_codes, period, start_date, end_date, limit, connected=self.connected
+            stock_codes, period, start_date, end_date, limit,
+            task_type=task_type, connected=self.connected
         )
 
     # ── 外部数据 ──
