@@ -289,23 +289,23 @@ class LocalKlineDataService:
         if not kline_batch:
             return 0
 
+        # 先获取股票名称缓存（SDK 调用，不持有数据库连接）
+        stock_names_cache = {}
+        try:
+            from services.common.sdk_manager import get_sdk_manager
+            sdk_mgr = get_sdk_manager()
+            code_info = sdk_mgr.get_code_info(security_type='EXTRA_STOCK_A')
+            if code_info is not None:
+                for idx, row in code_info.iterrows():
+                    stock_names_cache[idx] = row.get('symbol', idx)
+        except Exception as e:
+            print(f"[LocalData] 获取股票名称失败：{e}，使用传入的股票名称")
+
         conn = self._get_conn(timeout=60)
         cursor = conn.cursor()
         total_saved = 0
 
         try:
-            # 提前通过 AmazingData SDK 的 get_code_info 获取所有股票名称缓存
-            from services.common.sdk_manager import get_sdk_manager
-            sdk_mgr = get_sdk_manager()
-            stock_names_cache = {}
-
-            try:
-                code_info = sdk_mgr.get_code_info(security_type='EXTRA_STOCK_A')
-                if code_info is not None:
-                    for idx, row in code_info.iterrows():
-                        stock_names_cache[idx] = row.get('symbol', idx)
-            except Exception as e:
-                print(f"[LocalData] 获取股票名称失败：{e}，使用传入的股票名称")
 
             for stock_code, stock_name, df in kline_batch:
                 if df is None or len(df) == 0:
