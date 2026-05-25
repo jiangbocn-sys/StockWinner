@@ -340,6 +340,7 @@
 
 <script setup>
 import { ref, onMounted, onUnmounted, computed, nextTick } from 'vue'
+import { storeToRefs } from 'pinia'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { ArrowLeft, ArrowRight, Refresh, Download } from '@element-plus/icons-vue'
 import { exportTable as doExport } from '@/utils/exportHelper'
@@ -353,12 +354,11 @@ const posStore = usePositionsStore()
 const currentAccount = computed(() => accountStore.currentAccount)
 const currentAccountId = computed(() => accountStore.currentAccountId)
 
-// 数据从 store 读取
-const positions = computed(() => posStore.positions)
-const totalAssets = computed(() => posStore.totalAssets)
-const availableCash = computed(() => posStore.availableCash)
+// 数据从 store 读取（storeToRefs 保持响应性）
+const { positions, availableCash, closedPositions, closedCount, strategyStats } = storeToRefs(posStore)
 const marketValue = computed(() => posStore.marketValue)
 const totalPnl = computed(() => posStore.totalPnl)
+const totalAssets = computed(() => posStore.totalAssets)
 const pnlPercent = computed(() => posStore.pnlPercent)
 
 // 分页
@@ -380,8 +380,6 @@ const dsaError = ref('')
 const refreshing = ref(false)
 
 // 策略持仓统计
-const strategyStats = computed(() => posStore.strategyStats)
-
 const loadStrategyStats = async () => {
   try {
     await posStore.loadStrategyStats(currentAccountId.value)
@@ -392,8 +390,6 @@ const loadStrategyStats = async () => {
 
 // 已清仓明细
 const activeTab = ref('holding')
-const closedPositions = computed(() => posStore.closedPositions)
-const closedCount = computed(() => posStore.closedCount)
 const closedCurrentPage = ref(1)
 const closedPageSize = ref(20)
 const paginatedClosed = computed(() => {

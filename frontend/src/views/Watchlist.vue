@@ -553,6 +553,7 @@
 
 <script setup>
 import { ref, reactive, onMounted, onUnmounted, computed, watch, nextTick } from 'vue'
+import { storeToRefs } from 'pinia'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Search, Refresh, Plus, MoreFilled, Upload, Loading, WarningFilled, Edit, Delete, ArrowLeft, ArrowRight, Download } from '@element-plus/icons-vue'
 import { useAccountStore } from '../stores/account'
@@ -562,11 +563,11 @@ import KlineChart from '../components/KlineChart.vue'
 
 const accountStore = useAccountStore()
 const wlStore = useWatchlistStore()
+const { candidateGroups, strategies } = storeToRefs(wlStore)
 const currentAccountId = computed(() => accountStore.currentAccountId)
 const currentAccount = computed(() => accountStore.currentAccount)
 
-// 候选组
-const candidateGroups = computed(() => wlStore.candidateGroups.value || [])
+// 候选组（从 storeToRefs 解构）
 const selectedGroupId = ref(null)
 const groupsLoading = ref(false)
 const currentGroup = computed(() => candidateGroups.value.find(g => g.id === selectedGroupId.value))
@@ -648,8 +649,7 @@ const handleExportWatchlist = (format) => {
   doExport(watchlistColumns, currentStocks.value, '候选股票', format)
 }
 
-// 策略
-const strategies = computed(() => wlStore.strategies.value || [])
+// 策略（从 storeToRefs 解构）
 // 关联策略：配置型选股策略 + 代码型选股策略（code_scope=screening）
 const screeningStrategies = computed(() => strategies.value.filter(s =>
   (s.strategy_type === 'screening' && s.code_type !== 'python') ||
