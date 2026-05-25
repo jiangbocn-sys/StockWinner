@@ -1,8 +1,10 @@
 <template>
   <el-config-provider :locale="locale">
-    <keep-alive>
-      <router-view />
-    </keep-alive>
+    <router-view v-slot="{ Component }">
+      <keep-alive :include="['Dashboard', 'Positions', 'Watchlist', 'Trades', 'Strategies', 'DataExplorer', 'Backtest']">
+        <component :is="Component" />
+      </keep-alive>
+    </router-view>
   </el-config-provider>
 </template>
 

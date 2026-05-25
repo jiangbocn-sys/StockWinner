@@ -236,6 +236,7 @@
 </template>
 
 <script setup>
+defineOptions({ name: 'Dashboard' })
 import { ref, onMounted, onUnmounted, computed } from 'vue'
 import { useAccountStore } from '../stores/account'
 import { WarningFilled, Refresh, Loading } from '@element-plus/icons-vue'

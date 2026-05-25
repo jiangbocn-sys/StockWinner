@@ -552,6 +552,7 @@
 </template>
 
 <script setup>
+defineOptions({ name: 'Watchlist' })
 import { ref, reactive, onMounted, onUnmounted, computed, watch, nextTick } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Search, Refresh, Plus, MoreFilled, Upload, Loading, WarningFilled, Edit, Delete, ArrowLeft, ArrowRight, Download } from '@element-plus/icons-vue'

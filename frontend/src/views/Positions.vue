@@ -339,6 +339,7 @@
 </template>
 
 <script setup>
+defineOptions({ name: 'Positions' })
 import { ref, onMounted, onUnmounted, computed, nextTick } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { ArrowLeft, ArrowRight, Refresh, Download } from '@element-plus/icons-vue'
