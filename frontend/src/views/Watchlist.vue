@@ -552,20 +552,21 @@
 </template>
 
 <script setup>
-defineOptions({ name: 'Watchlist' })
 import { ref, reactive, onMounted, onUnmounted, computed, watch, nextTick } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Search, Refresh, Plus, MoreFilled, Upload, Loading, WarningFilled, Edit, Delete, ArrowLeft, ArrowRight, Download } from '@element-plus/icons-vue'
 import { useAccountStore } from '../stores/account'
+import { useWatchlistStore } from '../stores/watchlist'
 import NavBar from '../components/NavBar.vue'
 import KlineChart from '../components/KlineChart.vue'
 
 const accountStore = useAccountStore()
+const wlStore = useWatchlistStore()
 const currentAccountId = computed(() => accountStore.currentAccountId)
 const currentAccount = computed(() => accountStore.currentAccount)
 
 // 候选组
-const candidateGroups = ref([])
+const candidateGroups = computed(() => wlStore.candidateGroups.value || [])
 const selectedGroupId = ref(null)
 const groupsLoading = ref(false)
 const currentGroup = computed(() => candidateGroups.value.find(g => g.id === selectedGroupId.value))
@@ -648,7 +649,7 @@ const handleExportWatchlist = (format) => {
 }
 
 // 策略
-const strategies = ref([])
+const strategies = computed(() => wlStore.strategies.value || [])
 // 关联策略：配置型选股策略 + 代码型选股策略（code_scope=screening）
 const screeningStrategies = computed(() => strategies.value.filter(s =>
   (s.strategy_type === 'screening' && s.code_type !== 'python') ||
@@ -766,15 +767,12 @@ const formatProgress = (percent) => `${percent}%`
 const loadGroups = async () => {
   groupsLoading.value = true
   try {
-    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/candidate-groups`)
-    const data = await res.json()
-    candidateGroups.value = data.groups || []
+    await wlStore.loadGroups(currentAccountId.value)
   } catch (e) {
     console.error('加载候选组失败:', e)
   } finally {
     groupsLoading.value = false
   }
-  // 如果当前选中的组不在新列表中，重置选择
   if (selectedGroupId.value && !candidateGroups.value.find(g => g.id === selectedGroupId.value)) {
     selectedGroupId.value = candidateGroups.value.length > 0 ? candidateGroups.value[0].id : null
   }
@@ -1455,9 +1453,7 @@ const executeBatchStatus = async () => {
 
 const loadStrategies = async () => {
   try {
-    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/strategies`)
-    const data = await res.json()
-    strategies.value = data.strategies || []
+    await wlStore.loadStrategies(currentAccountId.value)
   } catch (e) {
     console.error('加载策略失败:', e)
   }
@@ -1657,7 +1653,10 @@ const startWatchlistPriceRefresh = () => {
 }
 
 onMounted(async () => {
-  await Promise.all([loadStrategies(), loadGroups()])
+  if (!wlStore.loaded) {
+    await loadStrategies()
+    await loadGroups()
+  }
   if (candidateGroups.value.length > 0) {
     selectedGroupId.value = candidateGroups.value[0].id
     await loadCurrentGroupStocks()

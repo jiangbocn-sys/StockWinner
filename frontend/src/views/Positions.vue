@@ -803,7 +803,6 @@ const startPriceRefresh = () => {
 }
 
 onUnmounted(() => {
-  destroyKlineChart()
   if (priceRefreshTimer) { clearInterval(priceRefreshTimer); priceRefreshTimer = null }
 })
 
