@@ -104,7 +104,7 @@ async def get_stock_quote(
     account_id: str = Path(..., description="账户 ID"),
     stock_code: str = Path(..., description="股票代码，支持格式：600519 或 600519.SH")
 ):
-    """获取单只股票实时行情"""
+    """获取单只股票实时行情（缓存优先 + 后台刷新）"""
     db = get_db_manager()
 
     # 验证账户
@@ -116,28 +116,81 @@ async def get_stock_quote(
         raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
 
     try:
-        gateway = await get_gateway()
-        market_data = await gateway.get_market_data(stock_code)
+        from services.common.price_cache import get_price_cache
+        from services.common.stock_code import normalize_stock_code
+        cache = get_price_cache()
+        norm_code = normalize_stock_code(stock_code)
 
-        if not market_data:
-            raise HTTPException(status_code=404, detail=f"无法获取 {stock_code} 的行情数据")
+        # 读缓存
+        ohlcv = cache.get_ohlcv_with_ttl(norm_code)
+
+        if ohlcv:
+            data = ohlcv['data']
+            is_fresh = ohlcv['is_fresh']
+            result_data = {
+                "stock_code": norm_code,
+                "stock_name": "",  # 缓存中无名称
+                "current_price": data.get('close'),
+                "change_percent": data.get('change_pct'),
+                "high": data.get('high'),
+                "low": data.get('low'),
+                "open_price": data.get('open'),
+                "prev_close": None,
+                "volume": data.get('volume'),
+                "amount": data.get('amount'),
+                "bid": [],
+                "ask": [],
+            }
+        else:
+            result_data = {
+                "stock_code": norm_code,
+                "stock_name": "",
+                "current_price": None,
+                "change_percent": None,
+                "high": None,
+                "low": None,
+                "open_price": None,
+                "prev_close": None,
+                "volume": None,
+                "amount": None,
+                "bid": [],
+                "ask": [],
+            }
+            is_fresh = False
+
+        # 缓存不新鲜时触发后台刷新
+        if not is_fresh:
+            async def _bg_refresh_single():
+                try:
+                    gw = await get_gateway()
+                    gw.subscribe(f"quote:{norm_code}", {norm_code}, refresh_interval=0, priority=2)
+                    await gw.refresh_now(f"quote:{norm_code}")
+                    gw.unsubscribe(f"quote:{norm_code}")
+                except Exception:
+                    pass
+            asyncio.create_task(_bg_refresh_single())
+
+            # 后台刷新后再次从缓存读取补全
+            async def _bg_update():
+                try:
+                    await asyncio.sleep(2)
+                    updated = cache.get_ohlcv(norm_code)
+                    if updated:
+                        result_data['current_price'] = updated.get('close')
+                        result_data['change_percent'] = updated.get('change_pct')
+                        result_data['high'] = updated.get('high')
+                        result_data['low'] = updated.get('low')
+                        result_data['open_price'] = updated.get('open')
+                        result_data['volume'] = updated.get('volume')
+                        result_data['amount'] = updated.get('amount')
+                except Exception:
+                    pass
+            asyncio.create_task(_bg_update())
 
         return {
             "success": True,
-            "data": {
-                "stock_code": stock_code,
-                "stock_name": market_data.stock_name,
-                "current_price": market_data.current_price,
-                "change_percent": market_data.change_percent,
-                "high": market_data.high,
-                "low": market_data.low,
-                "open_price": market_data.open_price,
-                "prev_close": market_data.prev_close,
-                "volume": market_data.volume,
-                "amount": market_data.amount,
-                "bid": market_data.bid,
-                "ask": market_data.ask
-            }
+            "data": result_data,
+            "price_fresh": is_fresh
         }
     except HTTPException:
         raise
@@ -150,7 +203,7 @@ async def get_batch_quotes(
     account_id: str = Path(..., description="账户 ID"),
     stock_codes: List[str] = Body(..., description="股票代码列表", embed=True)
 ):
-    """批量获取股票实时行情"""
+    """批量获取股票实时行情（缓存优先 + 后台刷新）"""
     db = get_db_manager()
 
     # 验证账户
@@ -168,39 +221,69 @@ async def get_batch_quotes(
         raise HTTPException(status_code=400, detail="单次最多查询 50 只股票")
 
     try:
-        from services.trading.gateway import get_gateway
-        gw = await get_gateway()
-        sub_id = f"api:{account_id}"
-        gw.subscribe(sub_id, set(stock_codes), refresh_interval=0, priority=2)
-        results = await gw.refresh_now(sub_id)
-        gw.unsubscribe(sub_id)
+        from services.common.price_cache import get_price_cache
+        from services.common.stock_code import normalize_stock_code
+        cache = get_price_cache()
+
+        norm_codes = [normalize_stock_code(c) for c in stock_codes]
+        freshness = cache.get_batch_freshness(set(norm_codes))
+        stale_codes = {c for c, fresh in freshness.items() if not fresh}
 
         quotes = []
-        errors = []
-        for code, data in results.items():
-            if data:
+        for code in norm_codes:
+            ohlcv = cache.get_ohlcv(code)
+            if ohlcv:
                 quotes.append({
                     "stock_code": code,
-                    "stock_name": data.stock_name,
-                    "current_price": data.current_price,
-                    "change_percent": data.change_percent,
-                    "high": data.high,
-                    "low": data.low,
-                    "open_price": data.open_price,
-                    "prev_close": data.prev_close,
-                    "volume": data.volume,
-                    "amount": data.amount
+                    "stock_name": "",
+                    "current_price": ohlcv.get('close'),
+                    "change_percent": ohlcv.get('change_pct'),
+                    "high": ohlcv.get('high'),
+                    "low": ohlcv.get('low'),
+                    "open_price": ohlcv.get('open'),
+                    "prev_close": None,
+                    "volume": ohlcv.get('volume'),
+                    "amount": ohlcv.get('amount'),
                 })
             else:
-                errors.append(code)
+                quotes.append({
+                    "stock_code": code,
+                    "stock_name": "",
+                    "current_price": None,
+                    "change_percent": None,
+                    "high": None,
+                    "low": None,
+                    "open_price": None,
+                    "prev_close": None,
+                    "volume": None,
+                    "amount": None,
+                })
+
+        # 后台刷新 stale codes
+        if stale_codes:
+            async def _bg_refresh_batch():
+                try:
+                    gw = await get_gateway()
+                    sub_id = f"api:{account_id}"
+                    gw.subscribe(sub_id, stale_codes, refresh_interval=0, priority=2)
+                    await gw.refresh_now(sub_id)
+                    gw.unsubscribe(sub_id)
+                except Exception:
+                    pass
+            asyncio.create_task(_bg_refresh_batch())
 
         return {
             "success": True,
             "data": {
                 "quotes": quotes,
                 "count": len(quotes),
-                "failed": errors,
-                "failed_count": len(errors)
+                "failed": list(stale_codes) if stale_codes else [],
+                "failed_count": len(stale_codes),
+                "price_freshness": {
+                    "total": len(norm_codes),
+                    "fresh": len(norm_codes) - len(stale_codes),
+                    "stale_count": len(stale_codes)
+                }
             }
         }
     except Exception as e:

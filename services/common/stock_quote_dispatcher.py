@@ -263,6 +263,13 @@ class StockQuoteDispatcher:
         if not codes:
             return {}
 
+        # 正确的日K线周期值
+        try:
+            from AmazingData import constant
+            DAY_PERIOD = constant.Period.day.value
+        except Exception:
+            DAY_PERIOD = 10008
+
         # snapshot 超时后连接可能已坏，只尝试少量股票
         max_fallback = 10
         codes_to_try = codes[:max_fallback]
@@ -285,7 +292,7 @@ class StockQuoteDispatcher:
                 code_list=batch,
                 begin_date=begin_date_int,
                 end_date=end_date_int,
-                period=1,  # day
+                period=DAY_PERIOD,  # day
             )
 
             if result and isinstance(result, dict):
@@ -339,6 +346,7 @@ class StockQuoteDispatcher:
             bid_volume=[0] * 5,
             ask_volume=[0] * 5,
             trade_date=str(row.get('trade_date', row.get('kline_time', ''))),
+            source="kline",
         )
 
     # ── 工具方法 ──
@@ -394,6 +402,7 @@ class StockQuoteDispatcher:
             bid_volume=bid_volume,
             ask_volume=ask_volume,
             trade_date=get_str('trade_date', ''),
+            source="snapshot",
         )
 
     @staticmethod

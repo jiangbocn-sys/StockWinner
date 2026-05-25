@@ -118,72 +118,62 @@ async def refresh_position_prices(
     from services.trading.trading_hours import can_trade
     stock_codes = [pos["stock_code"] for pos in positions]
     cache = get_price_cache()
-    gw = await get_gateway()
     sub_id = f"pos:{account_id}"
 
     # fresh_count = 60 秒内刷新的股票数
     fresh_count = cache.get_fresh_count(set(stock_codes), max_age=60)
 
-    if fresh_count == 0:
-        # 缓存无数据，同步刷新后返回
-        gw.subscribe(sub_id, set(stock_codes), refresh_interval=0, priority=2)
-        await gw.refresh_now(sub_id)
-        gw.unsubscribe(sub_id)
-        # 刷新后重新注入
+    if fresh_count < len(stock_codes):
+        # 缓存不全 → 先订阅，后台异步刷新，不阻塞返回
         try:
-            cached_prices = cache.get_all_prices()
-            for pos in positions:
-                code = pos["stock_code"]
-                if code in cached_prices and cached_prices[code] > 0:
-                    price = cached_prices[code]
-                    pos["current_price"] = price
-                    pos["market_value"] = round(price * pos.get("quantity", 0), 2)
-                    pos["profit_loss"] = round((price - pos.get("avg_cost", 0)) * pos.get("quantity", 0), 2)
-        except Exception:
-            pass
-        # 更新 DB
-        try:
-            update_list = []
-            for pos in positions:
-                if pos.get("current_price", 0) > 0:
-                    price = pos["current_price"]
-                    new_market_value = round(price * pos.get("quantity", 0), 2)
-                    new_profit_loss = round((price - pos.get("avg_cost", 0)) * pos.get("quantity", 0), 2)
-                    update_list.append((price, new_market_value, new_profit_loss, get_china_time().isoformat(), pos["id"]))
-            if update_list:
-                await db.executemany(
-                    "UPDATE stock_positions SET current_price = ?, market_value = ?, profit_loss = ?, updated_at = ? WHERE id = ?",
-                    update_list
-                )
-        except Exception:
-            pass
-    elif fresh_count < len(stock_codes):
-        # 部分过期，同步刷新补全
-        gw.subscribe(sub_id, set(stock_codes), refresh_interval=0, priority=2)
-        await gw.refresh_now(sub_id)
-        gw.unsubscribe(sub_id)
-        # 刷新后重新注入
-        try:
-            cached_prices = cache.get_all_prices()
-            for pos in positions:
-                code = pos["stock_code"]
-                if code in cached_prices and cached_prices[code] > 0:
-                    price = cached_prices[code]
-                    pos["current_price"] = price
-                    pos["market_value"] = round(price * pos.get("quantity", 0), 2)
-                    pos["profit_loss"] = round((price - pos.get("avg_cost", 0)) * pos.get("quantity", 0), 2)
-        except Exception:
-            pass
-        if can_trade():
-            dispatcher.update_subscription(sub_id, set(stock_codes), interval=60, priority=2)
-            import asyncio
-            asyncio.create_task(dispatcher.refresh_now(sub_id))
+            gw = await get_gateway()
+            gw.subscribe(sub_id, set(stock_codes), refresh_interval=0, priority=2)
+
+            async def _bg_refresh():
+                try:
+                    await gw.refresh_now(sub_id)
+                    gw.unsubscribe(sub_id)
+                    # 刷新后更新 DB
+                    updated_prices = cache.get_all_prices()
+                    update_list = []
+                    for p in positions:
+                        code = p["stock_code"]
+                        if code in updated_prices and updated_prices[code] > 0:
+                            price = updated_prices[code]
+                            new_mv = round(price * p.get("quantity", 0), 2)
+                            new_pnl = round((price - p.get("avg_cost", 0)) * p.get("quantity", 0), 2)
+                            update_list.append((price, new_mv, new_pnl, get_china_time().isoformat(), p["id"]))
+                    if update_list:
+                        await db.executemany(
+                            "UPDATE stock_positions SET current_price = ?, market_value = ?, profit_loss = ?, updated_at = ? WHERE id = ?",
+                            update_list
+                        )
+                except Exception as e:
+                    logger.log_event("position_price_refresh_error", f"后台刷新失败: {e}")
+                    try:
+                        gw.unsubscribe(sub_id)
+                    except Exception:
+                        pass
+
+                # 交易时间内：刷新后继续后台定时刷新
+                if can_trade():
+                    from services.common.stock_quote_dispatcher import dispatcher
+                    dispatcher.update_subscription(sub_id, set(stock_codes), interval=60, priority=2)
+
+            asyncio.create_task(_bg_refresh())
+        except Exception as e:
+            logger.log_event("position_price_refresh_setup_error", f"订阅失败: {e}")
 
     return {
         "success": True,
         "account_id": account_id,
         "positions": positions,
-        "available_cash": available_cash
+        "available_cash": available_cash,
+        "price_cache_status": {
+            "total": len(stock_codes),
+            "fresh_60s": fresh_count,
+            "refreshing": fresh_count < len(stock_codes)
+        }
     }
 
 

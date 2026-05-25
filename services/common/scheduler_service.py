@@ -981,7 +981,7 @@ class SchedulerService:
             logger.error(f"注册行情缓存心跳任务失败: {e}")
 
     def _price_cache_fallback_job(self):
-        """心跳检查：管理 PriceCache TTL + 如果 monitor 订阅长时间未刷新或数据过期，通过 gateway dispatcher 强制刷新"""
+        """心跳检查：管理 PriceCache TTL + 持仓/watchlist 股缓存过期时强制刷新"""
         from services.data.local_data_service import is_trading_hours
         from services.common.price_cache import get_price_cache
 
@@ -1030,8 +1030,76 @@ class SchedulerService:
                         loop.run_until_complete(dispatcher.refresh_now("monitor"))
                     finally:
                         loop.close()
+
+            # --- 持仓 + watchlist 股缓存新鲜度检查（交易/非交易时段均执行） ---
+            self._check_and_refresh_user_cache(cache, dispatcher)
+
         except Exception as e:
             logger.warning(f"price_cache 心跳兜底失败: {e}")
+
+    def _check_and_refresh_user_cache(self, cache, dispatcher):
+        """检查持仓股和 watchlist 股的 PriceCache 新鲜度，stale 超过 300 秒时触发 dispatcher 刷新"""
+        import asyncio
+        import time
+        from services.common.database import get_sync_connection
+        from services.common.stock_code import normalize_stock_code
+
+        try:
+            # 收集持仓股 + watchlist 股
+            stock_codes: set = set()
+            db_path = Path(__file__).parent.parent.parent / "data" / "stockwinner.db"
+            conn = get_sync_connection(path=db_path)
+
+            rows = conn.execute(
+                "SELECT DISTINCT stock_code FROM stock_positions WHERE quantity > 0"
+            ).fetchall()
+            for r in rows:
+                stock_codes.add(normalize_stock_code(r[0]))
+
+            rows = conn.execute(
+                "SELECT DISTINCT stock_code FROM watchlist WHERE status IN ('pending', 'watching', 'bought') AND is_active = 1"
+            ).fetchall()
+            for r in rows:
+                stock_codes.add(normalize_stock_code(r[0]))
+
+            conn.close()
+
+            if not stock_codes:
+                return
+
+            # 检查哪些股票 stale 超过 300 秒
+            stale_codes = set()
+            for code in stock_codes:
+                entry = cache.get_ohlcv_with_ttl(code)
+                if not entry or not entry.get('is_fresh') or entry.get('data', {}).get('close', 0) <= 0:
+                    last_update = entry.get('updated_at', 0) if entry else 0
+                    if last_update == 0 or (time.time() - last_update) > 300:
+                        stale_codes.add(code)
+
+            if not stale_codes:
+                return
+
+            logger.info(f"price_cache 心跳: {len(stale_codes)}/{len(stock_codes)} 只用户股票缓存过期，触发刷新")
+
+            # 通过 dispatcher 后台异步刷新
+            sub_id = "_user_cache_fallback"
+            dispatcher.subscribe(sub_id, stale_codes, interval=0, priority=3)
+
+            loop = asyncio.new_event_loop()
+            try:
+                loop.run_until_complete(dispatcher.refresh_now(sub_id))
+            finally:
+                loop.close()
+            dispatcher.unsubscribe(sub_id)
+
+            refreshed = sum(
+                1 for code in stale_codes
+                if (e := cache.get_ohlcv_with_ttl(code)) and e.get('data', {}).get('close', 0) > 0
+            )
+            logger.info(f"price_cache 心跳: 刷新完成 {refreshed}/{len(stale_codes)} 只有效行情")
+
+        except Exception as e:
+            logger.debug(f"用户缓存新鲜度检查失败: {e}")
 
     def _heartbeat_job(self):
         """Scheduler 心跳检查，每 30 分钟执行一次

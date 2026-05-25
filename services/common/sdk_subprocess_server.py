@@ -20,6 +20,22 @@ import threading
 from pathlib import Path
 from typing import Optional
 
+# pandas 2.x 兼容：'S' (大写) 频率别名被移除导致 snapshot DataFrame 构造失败
+# monkeypatch to_offset() 将大写 'S' 转为小写 's'
+try:
+    import pandas as pd
+    from pandas.tseries import frequencies as _freq
+    _orig_to_offset = _freq.to_offset
+
+    def _patched_to_offset(freq, *args, **kwargs):
+        if isinstance(freq, str) and freq.upper() == 'S' and len(freq) == 1:
+            freq = freq.lower()
+        return _orig_to_offset(freq, *args, **kwargs)
+
+    _freq.to_offset = _patched_to_offset
+except Exception:
+    pass
+
 # 加载 .env
 from dotenv import load_dotenv
 load_dotenv(Path(__file__).resolve().parents[2] / ".env")
@@ -140,6 +156,27 @@ SDK_METHODS = {
 }
 
 
+def _sanitize_result(result):
+    """修复 DataFrame 中的 pandas 2.x 不兼容频率（'S' → 's'）"""
+    try:
+        import pandas as pd
+        if isinstance(result, pd.DataFrame):
+            for col in result.columns:
+                col_data = result[col]
+                if hasattr(col_data, 'dtype') and hasattr(col_data.dtype, 'freq'):
+                    freq = col_data.dtype.freq
+                    if freq is not None and hasattr(freq, 'freqstr'):
+                        if freq.freqstr == 'S':
+                            result[col] = col_data.asfreq(None)
+        elif isinstance(result, dict):
+            for key, val in result.items():
+                if isinstance(val, pd.DataFrame):
+                    result[key] = _sanitize_result(val)
+    except Exception:
+        pass
+    return result
+
+
 def execute_sdk_method(method: str, kwargs: dict):
     """执行 SDK 方法并返回结果"""
     logger = get_logger("sdk_subprocess")
@@ -171,11 +208,18 @@ def execute_sdk_method(method: str, kwargs: dict):
 
         elif method == "query_snapshot":
             md = get_market_data()
-            return md.query_snapshot(
-                code_list=kwargs.get("code_list"),
-                begin_date=kwargs.get("begin_date"),
-                end_date=kwargs.get("end_date"),
-            )
+            try:
+                return md.query_snapshot(
+                    code_list=kwargs.get("code_list"),
+                    begin_date=kwargs.get("begin_date"),
+                    end_date=kwargs.get("end_date"),
+                )
+            except ValueError as e:
+                if "Invalid frequency" in str(e):
+                    # pandas 2.x 不再支持 'S' 频率，snapshot 无法使用，快速返回空让 fallback 处理
+                    logger.log_event("sdk_snapshot_skip", f"snapshot 频率不兼容，跳过")
+                    return {}
+                raise
 
         elif method == "get_equity_structure":
             return get_info().get_equity_structure(

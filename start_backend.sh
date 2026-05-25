@@ -106,6 +106,9 @@ case "$1" in
                 echo "未发现运行中的服务"
             fi
         fi
+        # 强制清理 SDK 子进程 + socket（SIGKILL → TCP RST → TGW 立即释放）
+        pkill -9 -f "sdk_subprocess_server" 2>/dev/null || true
+        rm -f /tmp/stockwinner_sdk.sock 2>/dev/null || true
         # 确认 SDK TCP 连接已断开
         sleep 1
         if ss -tn | grep -q ':8600'; then
@@ -162,6 +165,9 @@ case "$1" in
                 fi
             fi
         fi
+        # 强制清理 SDK 子进程 + socket（SIGKILL → TCP RST → TGW 立即释放）
+        pkill -9 -f "sdk_subprocess_server" 2>/dev/null || true
+        rm -f /tmp/stockwinner_sdk.sock 2>/dev/null || true
         # 确保 SDK TCP 连接断开
         sleep 1
         if ss -tn | grep -q ':8600'; then

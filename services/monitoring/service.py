@@ -185,16 +185,29 @@ class TradingMonitor:
 
     async def _run_per_account(self, account_id: str, market_data_cache: Dict[str, Any]):
         """单个账户的监控逻辑"""
-        # 策略触发评估
+        from services.trading.trading_hours import can_trade
+
+        # 交易时段：过滤掉 kline_db 兜底数据，防止策略用陈旧价格误判
+        if can_trade():
+            tradable_data = {code: md for code, md in market_data_cache.items()
+                           if md and getattr(md, 'source', '') != 'kline_db'}
+            if len(tradable_data) < len(market_data_cache):
+                skipped = len(market_data_cache) - len(tradable_data)
+                get_logger("monitor").log_event("monitor_skip_stale",
+                    f"交易时段跳过 {skipped} 只 kline_db 兜底数据，仅用实时行情")
+        else:
+            tradable_data = market_data_cache
+
+        # 策略触发评估（需要实时行情）
         await self._evaluator.evaluate_trading_strategies(account_id)
 
-        # watchlist 止损止盈
-        await self._evaluator.monitor_watchlist(account_id, market_data_cache=market_data_cache)
+        # watchlist 止损止盈（需要实时行情）
+        await self._evaluator.monitor_watchlist(account_id, market_data_cache=tradable_data)
 
-        # 扫描手动 pending 信号
-        await self._executor.scan_pending_signals(account_id, market_data_cache=market_data_cache)
+        # 扫描手动 pending 信号（需要实时行情）
+        await self._executor.scan_pending_signals(account_id, market_data_cache=tradable_data)
 
-        # 刷新持仓盈亏
+        # 刷新持仓盈亏（可接受任何数据源）
         await self._price_mgr.refresh_positions_pnl(account_id, market_data_cache=market_data_cache)
 
     def get_status(self) -> Dict:

@@ -105,7 +105,7 @@ class GatewayDispatcher:
         codes = list(sub.stock_codes)
         result = await self._query_sdk(codes)
 
-        # 写入 PriceCache
+        # 写入 PriceCache（source 由 MarketData.source 自动决定）
         if result:
             self._write_to_price_cache(result)
 
@@ -205,20 +205,29 @@ class GatewayDispatcher:
         today_int = int(get_china_time().strftime('%Y%m%d'))
         all_snapshots: Dict[str, Any] = {}
 
-        # ① 优先尝试 snapshot
-        for i in range(0, len(codes), self._sdk_batch_size):
-            batch = codes[i:i + self._sdk_batch_size]
-            if not sdk_mgr.connect():
-                break
-            result = sdk_mgr.query_snapshot(code_list=batch, begin_date=today_int, end_date=today_int)
+        # ① 优先尝试 snapshot（首批失败则跳过剩余批次，走 kline fallback）
+        if sdk_mgr.connect():
+            snapshot_working = True
+            for i in range(0, len(codes), self._sdk_batch_size):
+                batch = codes[i:i + self._sdk_batch_size]
+                result = sdk_mgr.query_snapshot(code_list=batch, begin_date=today_int, end_date=today_int)
 
-            if result and isinstance(result, dict):
-                for date_key in result:
-                    inner = result[date_key]
-                    if isinstance(inner, dict):
-                        for code, df in inner.items():
-                            if df is not None and hasattr(df, 'empty') and not df.empty:
-                                all_snapshots[code] = df
+                batch_valid = 0
+                if result and isinstance(result, dict):
+                    for date_key in result:
+                        inner = result[date_key]
+                        if isinstance(inner, dict):
+                            for code, df in inner.items():
+                                if df is not None and hasattr(df, 'empty') and not df.empty:
+                                    all_snapshots[code] = df
+                                    batch_valid += 1
+                # 首批返回空 → snapshot 不可用（如 pandas 频率不兼容），跳过后面的批次
+                if i == 0 and batch_valid == 0:
+                    snapshot_working = False
+                    get_logger("dispatcher").log_event("snapshot_skip",
+                        f"首批 snapshot 返回空，跳过后面的 snapshot 批次，直接走 kline fallback")
+                    break
+        # snapshot 失败时 all_snapshots 为空 → 所有 code 进入 snapshot_failed → 自动走 fallback
 
         # 更新股票最后刷新时间
         now = time.time()
@@ -301,6 +310,14 @@ class GatewayDispatcher:
             return {}
 
         sdk_mgr = get_sdk_manager()
+
+        # 获取正确的日K线周期值
+        try:
+            from AmazingData import constant
+            DAY_PERIOD = constant.Period.day.value
+        except Exception:
+            DAY_PERIOD = 10008  # fallback
+
         end_dt = get_china_time()
         begin_dt = end_dt - timedelta(days=3)
         end_date_int = int((end_dt + timedelta(days=1)).strftime('%Y%m%d'))
@@ -318,7 +335,7 @@ class GatewayDispatcher:
                 code_list=batch,
                 begin_date=begin_date_int,
                 end_date=end_date_int,
-                period=1,  # day
+                period=DAY_PERIOD,
             )
 
             if result and isinstance(result, dict):
@@ -371,6 +388,7 @@ class GatewayDispatcher:
             bid_volume=[0] * 5,
             ask_volume=[0] * 5,
             trade_date=str(row.get('trade_date', row.get('kline_time', ''))),
+            source="kline",
         )
 
     @staticmethod
@@ -419,6 +437,7 @@ class GatewayDispatcher:
                         bid_volume=[0] * 5,
                         ask_volume=[0] * 5,
                         trade_date=str(row['trade_date'] or '').replace('-', ''),
+                        source="kline_db",
                     )
         except Exception:
             pass
@@ -485,11 +504,12 @@ class GatewayDispatcher:
             bid_volume=bid_volume,
             ask_volume=ask_volume,
             trade_date=get_str('trade_date', ''),
+            source="snapshot",
         )
 
     @staticmethod
     def _write_to_price_cache(results: Dict[str, Any]):
-        """将 MarketData 结果写入 PriceCache"""
+        """将 MarketData 结果写入 PriceCache（source 由 MarketData.source 决定）"""
         from services.common.price_cache import get_price_cache
 
         cache = get_price_cache()
@@ -504,6 +524,7 @@ class GatewayDispatcher:
                     volume=md.volume or 0,
                     amount=md.amount or 0,
                     change_pct=md.change_percent or 0.0,
+                    source=md.source if hasattr(md, 'source') else "",
                 )
 
     def get_status(self) -> Dict[str, Any]:

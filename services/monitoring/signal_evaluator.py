@@ -106,9 +106,10 @@ class SignalEvaluator:
                         high=ohlcv.get('high', 0), low=ohlcv.get('low', 0),
                         open_price=ohlcv.get('open', 0), prev_close=ohlcv.get('close', 0),
                         volume=int(ohlcv.get('volume', 0)), amount=ohlcv.get('amount', 0),
+                        source=ohlcv.get('source', ''),
                     )
             else:
-                get_logger("monitor").warning("monitor", f"_monitor_watchlist 无缓存数据，跳过账户 {account_id}")
+                get_logger("monitor").warn("monitor", f"_monitor_watchlist 无缓存数据，跳过账户 {account_id}")
                 return
 
         # 预加载交易策略配置

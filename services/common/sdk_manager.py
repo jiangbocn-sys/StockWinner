@@ -273,7 +273,7 @@ class SDKManager:
             result = self._call_ipc("query_kline", {
                 "code_list": code_list, "begin_date": begin_date,
                 "end_date": end_date, "period": period,
-            }, task_type, timeout, stock_count=stock_count, timeout=timeout)
+            }, task_type, timeout, stock_count=stock_count)
             return result if isinstance(result, dict) else {}
         except Exception:
             return {}
@@ -283,7 +283,7 @@ class SDKManager:
         try:
             result = self._call_ipc("query_snapshot", {
                 "code_list": code_list, "begin_date": begin_date, "end_date": end_date,
-            }, "query", 30.0, stock_count=stock_count, timeout=30.0)
+            }, "query", 30.0, stock_count=stock_count)
             return result if isinstance(result, dict) else {}
         except Exception:
             return {}

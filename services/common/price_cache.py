@@ -16,10 +16,12 @@ from services.common.structured_logger import get_logger
 
 # 数据格式 — 存储完整 OHLCV
 class PriceEntry:
-    __slots__ = ('price', 'open', 'high', 'low', 'close', 'volume', 'amount', 'change_pct', 'timestamp')
+    __slots__ = ('price', 'open', 'high', 'low', 'close', 'volume', 'amount',
+                 'change_pct', 'timestamp', 'source')
 
     def __init__(self, price: float, open: float = 0, high: float = 0, low: float = 0,
-                 close: float = 0, volume: float = 0, amount: float = 0, change_pct: float = 0.0):
+                 close: float = 0, volume: float = 0, amount: float = 0, change_pct: float = 0.0,
+                 source: str = ""):
         self.price = price
         self.open = open or price
         self.high = high or price
@@ -29,6 +31,7 @@ class PriceEntry:
         self.amount = amount or 0
         self.change_pct = change_pct
         self.timestamp = time.time()
+        self.source = source  # "snapshot" / "kline" / "kline_db" / ""(unknown)
 
 
 class PriceCache:
@@ -66,11 +69,14 @@ class PriceCache:
 
     def update_ohlcv(self, stock_code: str,
                      open: float, high: float, low: float, close: float,
-                     volume: float, amount: float, change_pct: float = 0.0):
+                     volume: float, amount: float, change_pct: float = 0.0,
+                     source: str = ""):
         """更新完整 OHLCV 行情（线程安全）
 
         保护机制：当新数据某字段为 0 但缓存中已有有效值时，保留旧值，避免用 0 覆盖。
+        source 优先级：snapshot > kline > kline_db。新数据 source 优先级低于已有数据时保留旧 source。
         """
+        _source_rank = {"snapshot": 3, "kline": 2, "kline_db": 1}
         with self._lock:
             existing = self._prices.get(stock_code)
             if existing:
@@ -81,9 +87,13 @@ class PriceCache:
                 close = close if close > 0 else existing.close
                 volume = volume if volume > 0 else existing.volume
                 amount = amount if amount > 0 else existing.amount
+                # source 优先级保护：低优先级不能覆盖高优先级
+                if _source_rank.get(source, 0) < _source_rank.get(existing.source, 0):
+                    source = existing.source
             self._prices[stock_code] = PriceEntry(
                 price=close, open=open, high=high, low=low,
-                close=close, volume=volume, amount=amount, change_pct=change_pct
+                close=close, volume=volume, amount=amount, change_pct=change_pct,
+                source=source,
             )
 
     def update_batch(self, data: Dict[str, dict]):
@@ -168,7 +178,7 @@ class PriceCache:
 
     def get_ohlcv_with_ttl(self, stock_code: str, max_age: int = None) -> Optional[Dict[str, Any]]:
         """获取 OHLCV + 新鲜度标记
-        Returns: {'data': {...}, 'is_fresh': bool} 或 None（缓存不存在）
+        Returns: {'data': {...}, 'is_fresh': bool, 'source': str} 或 None（缓存不存在）
         """
         with self._lock:
             entry = self._prices.get(stock_code)
@@ -184,6 +194,7 @@ class PriceCache:
                     'change_pct': entry.change_pct,
                 },
                 'is_fresh': is_fresh,
+                'source': entry.source or "",
             }
 
     def get_all(self, max_age: int = None) -> Dict[str, Dict[str, float]]:
@@ -205,7 +216,7 @@ class PriceCache:
 
     def get_all_for_codes(self, codes: Set[str], max_age: int = None) -> Dict[str, Dict[str, float]]:
         """获取指定股票列表的 OHLCV 行情（过滤过期条目）
-        Returns: {stock_code: {open, high, low, close, volume, amount, change_pct}}
+        Returns: {stock_code: {open, high, low, close, volume, amount, change_pct, source}}
         """
         with self._lock:
             result = {}
@@ -218,6 +229,7 @@ class PriceCache:
                         'open': entry.open, 'high': entry.high, 'low': entry.low,
                         'close': entry.close, 'volume': entry.volume, 'amount': entry.amount,
                         'change_pct': entry.change_pct,
+                        'source': entry.source or "",
                     }
             return result
 
@@ -262,6 +274,21 @@ class PriceCache:
                 "total_entries": len(self._prices),
                 "last_flush_age_seconds": round(time.time() - self._last_flush, 0),
             }
+
+    def is_tradable(self, stock_code: str, max_age: int = None) -> bool:
+        """判断缓存数据是否可用于交易决策
+
+        规则：source 必须为 'snapshot' 或 'kline'（SDK 实时源），且未过期。
+        kline_db 兜底数据不可用于交易决策。
+        """
+        with self._lock:
+            entry = self._prices.get(stock_code)
+            if not entry:
+                return False
+            if entry.source not in ("snapshot", "kline"):
+                return False
+            now = time.time()
+            return (now - entry.timestamp) <= (max_age or self._ttl)
 
 
 # 全局单例

@@ -23,7 +23,7 @@ class MarketData:
                  prev_close: float, volume: int, amount: float,
                  bid: List[float] = None, ask: List[float] = None,
                  bid_volume: List[float] = None, ask_volume: List[float] = None,
-                 trade_date: str = ""):
+                 trade_date: str = "", source: str = ""):
         self.stock_code = stock_code
         self.stock_name = stock_name
         self.current_price = current_price
@@ -39,6 +39,7 @@ class MarketData:
         self.bid_volume = bid_volume or []
         self.ask_volume = ask_volume or []
         self.trade_date = trade_date
+        self.source = source  # "snapshot" / "kline" / "kline_db" / "" (unknown)
 
 
 class TradingGatewayInterface(ABC):

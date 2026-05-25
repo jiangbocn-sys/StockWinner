@@ -312,6 +312,10 @@ class StructuredLogger:
         extra = f" | {json.dumps(ctx, ensure_ascii=False, default=str)}" if ctx else ""
         self._logger.warning(f"[{component}] WARN | {message}{extra}")
 
+    def warning(self, component: str, message: str, context: Optional[Dict[str, Any]] = None, **kwargs):
+        """兼容别名 — 与 warn() 相同"""
+        self.warn(component, message, context, **kwargs)
+
     def info(self, component: str, message: str, context: Optional[Dict[str, Any]] = None, **kwargs):
         ctx = context or {}
         ctx.update(kwargs)

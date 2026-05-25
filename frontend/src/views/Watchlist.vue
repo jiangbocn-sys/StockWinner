@@ -1656,8 +1656,7 @@ const startWatchlistPriceRefresh = () => {
 }
 
 onMounted(async () => {
-  await loadStrategies()
-  await loadGroups()
+  await Promise.all([loadStrategies(), loadGroups()])
   if (candidateGroups.value.length > 0) {
     selectedGroupId.value = candidateGroups.value[0].id
     await loadCurrentGroupStocks()

@@ -558,7 +558,7 @@ async def get_watchlist(
 
     watchlist = await db.fetchall(base_sql, tuple(params))
 
-    # 从内存价格缓存注入实时现价；缓存过期/缺失时通过 gateway 触发刷新
+    # 从内存价格缓存注入实时现价；缓存过期/缺失时后台异步刷新
     try:
         from services.common.price_cache import get_price_cache
         from services.common.stock_code import normalize_stock_code
@@ -576,20 +576,49 @@ async def get_watchlist(
         logger.info("watchlist_price", f"wl_codes={len(wl_codes)}, stale={len(stale_codes)}, cache_total={len(cache._prices)}, stale_sample={list(stale_codes)[:3]}")
 
         if stale_codes:
-            # 有过期/缺失数据，通过 gateway 批量刷新
+            # 有过期/缺失数据，后台异步刷新，不阻塞返回
             from services.trading.gateway import get_gateway
+            from services.trading.trading_hours import can_trade
+
             gw = await get_gateway()
             sub_id = f"wl:{account_id}"
             gw.subscribe(sub_id, stale_codes, refresh_interval=0, priority=2)
-            sdk_results = await gw.refresh_now(sub_id)
-            gw.unsubscribe(sub_id)
 
-            sdk_valid = sum(1 for v in sdk_results.values() if v is not None and v.current_price > 0)
-            sdk_none = sum(1 for v in sdk_results.values() if v is None)
-            sample_prices = {c: (v.current_price if v else None) for c, v in list(sdk_results.items())[:3]}
-            logger.info("watchlist_refresh", f"requested={len(stale_codes)}, sdk_valid={sdk_valid}, sdk_none={sdk_none}, total_keys={len(sdk_results)}, sample={sample_prices}")
+            async def _bg_refresh_wl():
+                try:
+                    await gw.refresh_now(sub_id)
+                    gw.unsubscribe(sub_id)
+                    # 刷新后更新 DB watchlist 的 current_price
+                    cache_prices = cache.get_all_prices()
+                    update_list = []
+                    for item in watchlist:
+                        code = item.get("stock_code")
+                        if code:
+                            norm = normalize_stock_code(code)
+                            if norm in cache_prices and cache_prices[norm] > 0:
+                                update_list.append((cache_prices[norm], item["id"]))
+                    if update_list:
+                        await db.executemany(
+                            "UPDATE watchlist SET current_price = ? WHERE id = ?",
+                            update_list
+                        )
+                    # 交易时间内注册持续刷新
+                    if can_trade():
+                        from services.common.stock_quote_dispatcher import dispatcher
+                        dispatcher.update_subscription(sub_id, stale_codes, interval=60, priority=2)
+                except Exception as e:
+                    logger.error(f"watchlist 后台刷新失败: {e}")
+                    try:
+                        gw.unsubscribe(sub_id)
+                    except Exception:
+                        pass
 
-        # 从刷新后的 PriceCache 取最新价
+            import asyncio
+            asyncio.create_task(_bg_refresh_wl())
+        else:
+            sub_id = None  # 无 stale，不需要后台刷新
+
+        # 从 PriceCache 取最新价（不等待刷新完成）
         cached_prices = cache.get_all_prices()
         price_injected = 0
         for item in watchlist:
@@ -631,13 +660,23 @@ async def get_watchlist(
         return {
             "account_id": account_id,
             "groups": list(groups.values()),
-            "total": len(watchlist)
+            "total": len(watchlist),
+            "price_freshness": {
+                "total": len(wl_codes) if 'wl_codes' in dir() else 0,
+                "fresh": len(wl_codes) - len(stale_codes) if 'wl_codes' in dir() and 'stale_codes' in dir() else 0,
+                "stale_count": len(stale_codes) if 'stale_codes' in dir() else 0
+            }
         }
 
     return {
         "account_id": account_id,
         "watchlist": watchlist,
-        "count": len(watchlist)
+        "count": len(watchlist),
+        "price_freshness": {
+            "total": len(wl_codes) if 'wl_codes' in dir() else 0,
+            "fresh": len(wl_codes) - len(stale_codes) if 'wl_codes' in dir() and 'stale_codes' in dir() else 0,
+            "stale_count": len(stale_codes) if 'stale_codes' in dir() else 0
+        }
     }
 
 

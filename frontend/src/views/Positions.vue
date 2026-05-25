@@ -493,6 +493,22 @@ const refreshPrices = async () => {
     totalAssets.value = marketValue.value + availableCash.value
     pnlPercent.value = (totalPnl.value / (totalAssets.value - availableCash.value)) * 100 || 0
 
+    // 如果后台仍在刷新 SDK，等完成后重新拉取
+    const cacheStatus = data.price_cache_status
+    if (cacheStatus && cacheStatus.refreshing) {
+      // 等待后台 SDK 刷新完成（最多 20 秒）
+      await new Promise(resolve => setTimeout(resolve, 3000))
+      // 重新从 GET 接口读取（此时 DB 已被后台任务更新）
+      const followUp = await fetch(`/api/v1/ui/${currentAccountId.value}/positions`)
+      const data2 = await followUp.json()
+      positions.value = data2.positions || []
+      availableCash.value = data2.available_cash || 0
+      marketValue.value = positions.value.reduce((sum, p) => sum + (p.market_value || 0), 0)
+      totalPnl.value = positions.value.reduce((sum, p) => sum + (p.profit_loss || 0), 0)
+      totalAssets.value = marketValue.value + availableCash.value
+      pnlPercent.value = (totalPnl.value / (totalAssets.value - availableCash.value)) * 100 || 0
+    }
+
     ElMessage.success('行情已刷新')
   } catch (error) {
     console.error('刷新行情失败:', error)
@@ -833,10 +849,12 @@ onUnmounted(() => {
 })
 
 onMounted(async () => {
-  // 先展示 DB 数据
-  await loadPositions()
-  await loadClosedPositions()
-  await loadStrategyStats()
+  // 并行加载所有数据，哪个先到就先展示
+  await Promise.all([
+    loadPositions(),
+    loadClosedPositions(),
+    loadStrategyStats()
+  ])
   // 先渲染页面，再异步刷新实时行情（不阻塞 UI）
   await nextTick()
   setTimeout(() => refreshPrices(), 0)

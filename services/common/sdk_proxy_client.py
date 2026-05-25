@@ -74,7 +74,7 @@ class SDKProxyClient:
             self._connected = False
 
     def _call_ipc(self, method: str, kwargs: dict, timeout: float = 30.0) -> any:
-        """通过 IPC 调用 SDK 子进程"""
+        """通过 IPC 调用 SDK 子进程（自动重连）"""
         logger = get_logger("sdk_proxy")
         request_id = f"{time.monotonic()}_{os.getpid()}"
         request = {
@@ -85,7 +85,14 @@ class SDKProxyClient:
 
         with self._lock:
             if not self._connected:
-                raise ConnectionError("未连接 SDK 子进程")
+                # 自动重连：socket 文件存在说明子进程还在，只需重建 IPC 连接
+                if os.path.exists(SOCKET_PATH):
+                    if self.connect_to_subprocess(timeout=3.0):
+                        logger.log_event("sdk_ipc_reconnect", "IPC 自动重连成功")
+                    else:
+                        raise ConnectionError("未连接 SDK 子进程（重连失败）")
+                else:
+                    raise ConnectionError("未连接 SDK 子进程（socket 不存在）")
 
             # 动态设置 socket 超时（不同方法需要不同超时时间）
             prev_timeout = self._socket.gettimeout()
@@ -128,14 +135,19 @@ class SDKProxyClient:
         self._close_socket()
 
     def is_connected(self) -> bool:
-        """检查连接状态（验证 socket 文件是否存活）"""
-        if not self._connected:
-            return False
-        # 检查 IPC socket 文件是否存在（防止僵尸连接）
-        if not os.path.exists(SOCKET_PATH):
-            self._connected = False
-            return False
-        return True
+        """检查连接状态（自动重连）"""
+        if self._connected:
+            # 检查 IPC socket 文件是否存在（防止僵尸连接）
+            if not os.path.exists(SOCKET_PATH):
+                self._connected = False
+                return False
+            return True
+        # 断连但 socket 存在 → 自动重连
+        if os.path.exists(SOCKET_PATH):
+            if self.connect_to_subprocess(timeout=3.0):
+                get_logger("sdk_proxy").log_event("sdk_ipc_auto_reconnect", "IPC 自动重连成功")
+                return True
+        return False
 
     def get_info(self):
         """获取 InfoData 实例（缓存由子进程管理）"""
@@ -487,17 +499,18 @@ class SDKSubprocessManager:
         self._ready_event.clear()
 
     def _kill_subprocess(self):
-        """终止子进程"""
+        """终止子进程
+
+        直接 SIGKILL：让 TCP 发 RST 而非 FIN，TGW 服务端立即释放连接槽，
+        避免 TIME_WAIT 导致下次 login 被"连接超限"拒绝。
+        """
         logger = get_logger("sdk_subprocess_mgr")
         if self._subprocess:
             try:
-                self._subprocess.terminate()
+                self._subprocess.kill()  # SIGKILL → TCP RST → TGW 立即释放
                 self._subprocess.wait(timeout=5)
             except Exception:
-                try:
-                    self._subprocess.kill()
-                except Exception:
-                    pass
+                pass
             logger.log_event("sdk_subprocess_killed",
                 f"子进程已终止 (PID: {self._subprocess_pid})")
             self._subprocess = None

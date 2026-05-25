@@ -78,6 +78,9 @@ def create_lifespan():
         except Exception as e:
             log.error("price_cache_ttl", f"初始化 PriceCache TTL 失败: {e}")
 
+        # 启动时预热 PriceCache（持仓 + 活跃 watchlist）
+        asyncio.create_task(_preload_price_cache(log, db_manager))
+
         # 设置 FastAPI 事件循环引用
         loop = asyncio.get_running_loop()
         _set_fastapi_loop(loop)
@@ -721,3 +724,55 @@ async def _init_channel_router(db_manager, log):
         log.log_event("data_source_init", "多数据源 ChannelRouter 已初始化（amazingdata + eastmoney + tushare + sina + tencent + akshare）")
     except Exception as e:
         log.error("data_source_init", f"ChannelRouter 初始化失败: {e}")
+
+
+async def _preload_price_cache(log, db_manager):
+    """启动时预热 PriceCache：持仓 + 活跃 watchlist + 候选股
+
+    后台异步执行，不阻塞应用启动。SDK 不可用时跳过。
+    """
+    import asyncio
+    from services.common.price_cache import get_price_cache
+
+    await asyncio.sleep(3)  # 等 SDK 子进程完全就绪
+
+    try:
+        cache = get_price_cache()
+        stock_codes = set()
+
+        # 1. 持仓股
+        positions = await db_manager.fetchall(
+            "SELECT DISTINCT stock_code FROM stock_positions WHERE quantity > 0"
+        )
+        for p in positions:
+            if p.get("stock_code"):
+                stock_codes.add(p["stock_code"])
+
+        # 2. 活跃 watchlist
+        wl = await db_manager.fetchall(
+            "SELECT DISTINCT stock_code FROM watchlist WHERE status IN ('pending', 'watching', 'bought') AND is_active = 1"
+        )
+        for w in wl:
+            if w.get("stock_code"):
+                stock_codes.add(w["stock_code"])
+
+        if not stock_codes:
+            log.log_event("price_cache_preload", "无需预热的股票，跳过")
+            return
+
+        stock_codes = list(stock_codes)
+        log.log_event("price_cache_preload", f"开始预热 {len(stock_codes)} 只股票的行情", total=len(stock_codes))
+
+        # 3. 通过 gateway 批量拉取
+        from services.trading.gateway import get_gateway
+        gw = await get_gateway()
+        gw.subscribe("_startup_preload", set(stock_codes), refresh_interval=0, priority=1)
+        results = await gw.refresh_now("_startup_preload")
+        gw.unsubscribe("_startup_preload")
+
+        # 4. 统计
+        valid = sum(1 for v in results.values() if v is not None and getattr(v, 'current_price', 0) > 0)
+        log.log_event("price_cache_preload_done", f"预热完成: 总计 {len(stock_codes)} 只, 有效行情 {valid} 只", total=len(stock_codes), valid=valid)
+
+    except Exception as e:
+        log.error("price_cache_preload", f"预热失败: {e}")

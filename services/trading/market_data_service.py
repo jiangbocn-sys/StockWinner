@@ -28,6 +28,7 @@ class MarketDataService:
             volume=int(ohlcv.get('volume', 0)), amount=ohlcv.get('amount', 0),
             bid=[close] * 5, ask=[close] * 5,
             bid_volume=[0] * 5, ask_volume=[0] * 5, trade_date='',
+            source=ohlcv.get('source', ''),
         )
 
     @staticmethod
@@ -65,6 +66,7 @@ class MarketDataService:
                         bid=[close] * 5, ask=[close] * 5,
                         bid_volume=[0] * 5, ask_volume=[0] * 5,
                         trade_date=str(row['trade_date'] or '').replace('-', ''),
+                        source="kline_db",
                     )
         except Exception as e:
             logger.debug(f"kline.db 兜底查询失败: {e}")
@@ -154,6 +156,7 @@ class MarketDataService:
                 bid_volume=fallback_result.get("bid_volume", []),
                 ask_volume=fallback_result.get("ask_volume", []),
                 trade_date=fallback_result.get("trade_date", ""),
+                source="channel",
             )
         return None
 
@@ -234,6 +237,7 @@ class MarketDataService:
                             bid_volume=fb.get("bid_volume", []),
                             ask_volume=fb.get("ask_volume", []),
                             trade_date=fb.get("trade_date", ""),
+                            source="channel",
                         )
                     else:
                         results[code] = None
