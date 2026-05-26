@@ -199,7 +199,7 @@ class SchedulerService:
                     factor_result.update(self._run_daily_factor_calc(
                         None,  # 让函数自动确定起始日期
                         expected_date,
-                        force_full=True  # 覆盖率不足时强制全量计算
+                        force_full=False  # 仅计算缺失日期，不重算已有数据
                     ))
                 thread = threading.Thread(target=_do_factor_calc)
                 thread.start()
