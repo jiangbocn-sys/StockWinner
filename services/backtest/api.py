@@ -150,28 +150,23 @@ async def create_backtest_run(
         if key in body:
             strategy_config[key] = body[key]
 
-    # 重复检测：相同 name + strategy_id + mode + 日期 + 股票池 → 阻止创建
-    stock_pool_key = json.dumps(sorted(stock_pool), ensure_ascii=False) if stock_pool else None
+    # 重复检测：相同配置 → 阻止（含止盈止损+成交价模式）
+    sl = body.get("stop_loss_pct", 0)
+    tp = body.get("take_profit_pct", 0)
+    ts = body.get("trailing_stop_pct", 0)
+    exec_mode = body.get("stop_execution_price", "close")
     existing = await db.fetchone(
         "SELECT id FROM backtest_runs WHERE account_id = ? AND name = ? AND mode = ? "
-        "AND start_date = ? AND end_date = ? AND initial_capital = ?",
-        (account_id, name, mode, start_date, end_date, initial_capital)
+        "AND start_date = ? AND end_date = ? AND initial_capital = ? "
+        "AND stop_loss_pct = ? AND take_profit_pct = ? "
+        "AND COALESCE(trailing_stop_pct, 0) = ? AND stop_execution_price = ?",
+        (account_id, name, mode, start_date, end_date, initial_capital, sl, tp, ts, exec_mode)
     )
-    if existing and stock_pool_key:
-        # 进一步检查 stock_pool 是否相同
-        existing_pool = await db.fetchone(
-            "SELECT stock_pool FROM backtest_runs WHERE id = ?", (existing["id"],)
+    if existing:
+        raise HTTPException(
+            status_code=400,
+            detail=f"已存在相同配置的回测任务 (run_id={existing['id']})，请勿重复创建"
         )
-        if existing_pool and existing_pool.get("stock_pool"):
-            try:
-                existing_key = json.dumps(sorted(json.loads(existing_pool["stock_pool"])), ensure_ascii=False)
-                if existing_key == stock_pool_key:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"已存在相同配置的回测任务 (run_id={existing['id']})，请勿重复创建"
-                    )
-            except (json.JSONDecodeError, TypeError):
-                pass
     run_id = await engine.create_run(
         name=name,
         strategy_id=strategy_id,
