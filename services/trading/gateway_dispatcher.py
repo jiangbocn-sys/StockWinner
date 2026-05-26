@@ -200,6 +200,7 @@ class GatewayDispatcher:
 
         所有 SDK 调用通过 asyncio.to_thread 运行在线程池中，不阻塞事件循环。
         """
+        global _snapshot_permanently_disabled
         import asyncio
         from services.common.sdk_manager import get_sdk_manager
         from services.common.timezone import get_china_time
@@ -213,7 +214,6 @@ class GatewayDispatcher:
         all_snapshots: Dict[str, Any] = {}
 
         # ① 优先尝试 snapshot（首次失败后永久跳过——pandas 2.x 不兼容）
-        global _snapshot_permanently_disabled
         if not _snapshot_permanently_disabled and await asyncio.to_thread(sdk_mgr.connect):
             for i in range(0, len(codes), self._sdk_batch_size):
                 batch = codes[i:i + self._sdk_batch_size]
@@ -233,7 +233,6 @@ class GatewayDispatcher:
                                     batch_valid += 1
                 # 首批返回空 → snapshot 不可用，永久禁用
                 if i == 0 and batch_valid == 0:
-                    global _snapshot_permanently_disabled
                     _snapshot_permanently_disabled = True
                     get_logger("dispatcher").log_event("snapshot_disabled",
                         "snapshot 不可用（pandas 2.x 不兼容），已永久禁用，后续直接走 kline fallback")
