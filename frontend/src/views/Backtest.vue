@@ -828,18 +828,7 @@ const handleStartBacktest = async () => {
     return
   }
 
-  // 交易时间内禁止全市场回测
-  const hasDynamicPool = form.value.use_dynamic_pool && poolSchedule.value.length > 0
-  const hasGroupIds = form.value.group_ids && form.value.group_ids.length > 0
-  const hasStockPool = false  // 前端不直接传 stock_pool
-  const hasLimitedMarket = form.value.markets && form.value.markets.length > 0 && form.value.markets.length < 2
-  const isFullMarket = !hasDynamicPool && !hasGroupIds && !hasStockPool && !hasLimitedMarket
-
-  if (isFullMarket) {
-    ElMessage.warning('交易时间内禁止全市场回测（占用过多系统资源）。请选择候选组作为股票池，或在非交易时段进行全市场回测。')
-    return
-  }
-
+  // 后端已有时段判断，前端不再拦截
   running.value = true
   try {
     const body = {
