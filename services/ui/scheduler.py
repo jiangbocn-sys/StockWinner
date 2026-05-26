@@ -500,6 +500,7 @@ async def create_strategy_task(
     cron_expression: str = Body(..., description="Cron 表达式或自然语言描述"),
     enabled: int = Body(1, description="是否启用"),
     require_trading_day: int = Body(0, description="是否仅交易日执行"),
+    full_market: int = Body(0, description="全市场模式（非交易时段全A股扫描）"),
 ):
     """创建调度任务"""
     from services.common.database import get_db_manager
@@ -588,6 +589,7 @@ async def create_strategy_task(
         "cron_expression": cron_expression,
         "enabled": enabled,
         "require_trading_day": require_trading_day,
+        "full_market": full_market,
     })
 
     from services.common.scheduler_service import get_scheduler
@@ -602,6 +604,7 @@ async def update_strategy_task(
     cron_expression: Optional[str] = Body(None, description="Cron 表达式"),
     enabled: Optional[int] = Body(None, description="是否启用"),
     require_trading_day: Optional[int] = Body(None, description="是否仅交易日执行"),
+    full_market: Optional[int] = Body(None, description="全市场模式"),
     strategy_id: Optional[int] = Body(None, description="关联策略 ID"),
     group_id: Optional[int] = Body(None, description="候选分组 ID"),
 ):
@@ -624,6 +627,8 @@ async def update_strategy_task(
         update_data["enabled"] = enabled
     if require_trading_day is not None:
         update_data["require_trading_day"] = require_trading_day
+    if full_market is not None:
+        update_data["full_market"] = full_market
     if strategy_id is not None:
         update_data["strategy_id"] = strategy_id
     if group_id is not None:

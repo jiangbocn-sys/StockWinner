@@ -218,7 +218,11 @@
                   </el-form-item>
                   <el-form-item label="仅交易日">
                     <el-switch v-model="newTaskForm.requireTradingDay" :active-value="1" :inactive-value="0" />
-                    <span class="hint" style="margin-left: 8px; color: #909399">开启后仅在交易日执行（自动判断调休等节假日）</span>
+                    <span class="hint" style="margin-left: 8px; color: #909399">开启后仅在交易日执行</span>
+                  </el-form-item>
+                  <el-form-item label="全市场">
+                    <el-switch v-model="newTaskForm.fullMarket" :active-value="1" :inactive-value="0" />
+                    <span class="hint" style="margin-left: 8px; color: #E6A23C">遍历全部A股（非交易时段使用），无需选分组</span>
                   </el-form-item>
                   <el-form-item>
                     <el-button type="primary" @click="createTask" :loading="creatingTask">
@@ -416,7 +420,8 @@ const newTaskForm = reactive({
   cron: '',
   cronText: '',
   enabled: 1,
-  requireTradingDay: 0
+  requireTradingDay: 0,
+  fullMarket: 0
 })
 
 const filteredStrategyTasks = computed(() => {
@@ -693,9 +698,23 @@ const createTask = async () => {
     ElMessage.warning('请选择策略')
     return
   }
-  if (newTaskForm.taskType === 'strategy' && !newTaskForm.groupId) {
+  if (newTaskForm.taskType === 'strategy' && !newTaskForm.fullMarket && !newTaskForm.groupId) {
     ElMessage.warning('请选择候选分组')
     return
+  }
+  if (newTaskForm.fullMarket) {
+    // 全市场必须非交易时段：cron 小时不在 9-14 范围
+    const parts = newTaskForm.cron.trim().split(/\s+/)
+    if (parts.length >= 2) {
+      const hour = parts[1]
+      if (hour !== '*' && !isNaN(hour)) {
+        const h = parseInt(hour)
+        if (h >= 9 && h <= 14) {
+          ElMessage.warning('全市场策略请设置在非交易时段（如 15:00 之后或 9:00 之前）')
+          return
+        }
+      }
+    }
   }
   if (!newTaskForm.cron.trim()) {
     if (newTaskForm.cronText.trim()) {
@@ -732,13 +751,14 @@ const createTask = async () => {
       cron_expression: newTaskForm.cron,
       enabled: newTaskForm.enabled,
       require_trading_day: newTaskForm.requireTradingDay,
+      full_market: newTaskForm.fullMarket,
     }
     if (newTaskForm.taskType === 'builtin') {
       body.module = newTaskForm.module
       body.account_id = 'SYSTEM'
     } else {
       body.strategy_id = newTaskForm.strategyId
-      body.group_id = newTaskForm.groupId
+      body.group_id = newTaskForm.fullMarket ? null : newTaskForm.groupId
     }
 
     let res
