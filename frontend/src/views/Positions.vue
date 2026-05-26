@@ -78,21 +78,21 @@
         </template>
 
         <!-- 当前持仓表格 -->
-        <el-table v-show="activeTab === 'holding'" :data="paginatedPositions" stripe style="width: 100%" @row-dblclick="showKline">
+        <el-table v-show="activeTab === 'holding'" :data="paginatedPositions" stripe style="width: 100%" @row-dblclick="showKline" @sort-change="onPosSortChange">
           <el-table-column type="index" label="序号" width="60" align="center" :index="indexMethod" />
-          <el-table-column prop="stock_code" label="股票代码" width="100" />
-          <el-table-column prop="stock_name" label="股票名称" width="120" />
-          <el-table-column prop="quantity" label="数量" width="100" align="right" />
-          <el-table-column prop="avg_cost" label="成本价" width="100" align="right">
+          <el-table-column prop="stock_code" label="股票代码" width="100" sortable="custom" />
+          <el-table-column prop="stock_name" label="股票名称" width="120" sortable="custom" />
+          <el-table-column prop="quantity" label="数量" width="100" align="right" sortable="custom" />
+          <el-table-column prop="avg_cost" label="成本价" width="100" align="right" sortable="custom">
             <template #default="{ row }">¥{{ Number(row.avg_cost || 0).toFixed(2) }}</template>
           </el-table-column>
-          <el-table-column prop="current_price" label="当前价" width="100" align="right">
+          <el-table-column prop="current_price" label="当前价" width="100" align="right" sortable="custom">
             <template #default="{ row }">¥{{ row.current_price }}</template>
           </el-table-column>
-          <el-table-column prop="market_value" label="市值" width="120" align="right">
+          <el-table-column prop="market_value" label="市值" width="120" align="right" sortable="custom">
             <template #default="{ row }">¥{{ formatNumber(row.market_value) }}</template>
           </el-table-column>
-          <el-table-column prop="profit_loss" label="盈亏" width="120" align="right">
+          <el-table-column prop="profit_loss" label="盈亏" width="120" align="right" sortable="custom">
             <template #default="{ row }">
               <span :class="row.profit_loss >= 0 ? 'profit-positive' : 'profit-negative'">
                 {{ row.profit_loss >= 0 ? '+' : '' }}¥{{ formatNumber(Math.abs(row.profit_loss)) }}
@@ -367,12 +367,35 @@ const totalPnl = computed(() => posStore.totalPnl)
 const totalAssets = computed(() => posStore.totalAssets)
 const pnlPercent = computed(() => posStore.pnlPercent)
 
-// 分页
+// 排序
+const posSortProp = ref('profit_loss')
+const posSortOrder = ref('descending')
+const onPosSortChange = ({ prop, order }) => {
+  posSortProp.value = prop || 'profit_loss'
+  posSortOrder.value = order || 'descending'
+  posCurrentPage.value = 1
+}
+
+// 分页（先全量排序再分页）
+const sortedPositions = computed(() => {
+  const arr = [...positions.value]
+  const prop = posSortProp.value
+  const desc = posSortOrder.value === 'descending'
+  arr.sort((a, b) => {
+    const av = a[prop]; const bv = b[prop]
+    if (av == null && bv == null) return 0
+    if (av == null) return desc ? 1 : -1
+    if (bv == null) return desc ? -1 : 1
+    const cmp = typeof av === 'number' ? av - bv : String(av).localeCompare(String(bv))
+    return desc ? -cmp : cmp
+  })
+  return arr
+})
 const posCurrentPage = ref(1)
 const posPageSize = ref(20)
 const paginatedPositions = computed(() => {
   const start = (posCurrentPage.value - 1) * posPageSize.value
-  return positions.value.slice(start, start + posPageSize.value)
+  return sortedPositions.value.slice(start, start + posPageSize.value)
 })
 const indexMethod = (index) => (posCurrentPage.value - 1) * posPageSize.value + index + 1
 
