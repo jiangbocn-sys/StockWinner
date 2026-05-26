@@ -57,7 +57,6 @@ class SimulatedTradingEngine:
         self.initial_cash = initial_cash  # 分段回测用：上一段继承的现金
         self.liquidate_at_end = liquidate_at_end  # 是否在段末清仓
         self._pending_signals: List[Dict] = []  # 当日策略信号，次日执行
-        self._sold_today = False  # 当日是否有卖出
 
         # 策略类型检测
         self.is_code_strategy = strategy_config.get("strategy_type") == "python"
@@ -228,7 +227,6 @@ class SimulatedTradingEngine:
             return
 
         prices = {code: d["close"] for code, d in ohlc_data.items()}
-        self._sold_today = False
 
         # 2. 执行前一日pending买入信号（T日执行T-1日生成的信号）
         self._execute_pending_buys(trade_date, prices, ohlc_data)
@@ -240,8 +238,8 @@ class SimulatedTradingEngine:
         for code, price in prices.items():
             self.execution.update_position_mark(code, price)
 
-        # 5. 盘后选股：仓位已满且当日无卖出时跳过扫描
-        if not self._sold_today and not self._is_position_full():
+        # 5. 盘后选股：仓位满则跳过（卖出后仓位不满则正常扫描）
+        if not self._is_position_full():
             self._check_buy_signals(trade_date, prices)
 
         # 6. 记录当日净值
@@ -282,17 +280,14 @@ class SimulatedTradingEngine:
 
             # Priority 1: 固定止盈止损
             if self._check_fixed_stop(code, price, pos, trade_date, prev_close, ohlc):
-                self._sold_today = True
                 continue
 
             # Priority 2: 移动止盈
             if self._check_trailing_stop(code, price, pos, trade_date, prev_close, ohlc):
-                self._sold_today = True
                 continue
 
             # Priority 3: 策略代码型卖出信号
             if self._check_strategy_sell(code, price, pos, trade_date, prev_close):
-                self._sold_today = True
                 continue
 
     def _check_fixed_stop(
