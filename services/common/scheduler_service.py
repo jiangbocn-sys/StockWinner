@@ -1658,6 +1658,14 @@ class SchedulerService:
                         (task["account_id"],)
                     )
                     logger.info(f"交易型策略 '{strategy['name']}'，获取到 {len(stocks)} 只已买入股票")
+                elif task.get("full_market"):
+                    # 全市场模式：从 kline.db 获取所有股票代码
+                    from services.common.database import get_sync_connection
+                    knn = get_sync_connection("kline")
+                    knn.row_factory = __import__('sqlite3').Row
+                    codes = knn.execute("SELECT DISTINCT stock_code FROM kline_data WHERE stock_code NOT LIKE '801%.SI'").fetchall()
+                    stocks = [{"stock_code": r["stock_code"], "stock_name": r["stock_code"]} for r in codes]
+                    logger.info(f"全市场策略 '{strategy['name']}'，获取到 {len(stocks)} 只股票")
                 else:
                     # 选股型策略：获取候选组股票
                     stocks = await db.fetchall(
