@@ -482,13 +482,12 @@ async def get_sdk_code_list(
         from services.common.sdk_manager import get_sdk_manager
         import aiosqlite
 
+        import asyncio
         sdk_manager = get_sdk_manager()
 
-        # Ensure SDK is logged in
-        sdk_manager.connect()
-
-        # Get stock list from SDK
-        stock_list = sdk_manager.get_code_list(security_type=security_type)
+        # Ensure SDK is logged in + get stock list（线程池执行，不阻塞事件循环）
+        await asyncio.to_thread(sdk_manager.connect)
+        stock_list = await asyncio.to_thread(sdk_manager.get_code_list, security_type=security_type)
 
         # Build stock name cache from database
         db_path = KLINE_DB_PATH

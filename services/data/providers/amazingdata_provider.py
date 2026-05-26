@@ -89,11 +89,10 @@ class AmazingDataProvider(DataProvider):
                     "latency_ms": round(latency_ms, 1),
                 }
 
-            # 实际调用 SDK 验证连接有效性
-            # 先用 get_code_list() 测试，它返回纯 Python list，不涉
+            # 实际调用 SDK 验证连接有效性（线程池执行，不阻塞事件循环）
+            import asyncio
             try:
-                codes = sdk_mgr.get_code_list()
-                # 能拿到股票列表（哪怕是空列表）说明 IPC + SDK 都正常
+                codes = await asyncio.to_thread(sdk_mgr.get_code_list)
                 connected = isinstance(codes, list)
             except Exception:
                 connected = False
