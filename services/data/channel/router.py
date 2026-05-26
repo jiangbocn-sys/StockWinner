@@ -110,44 +110,45 @@ class ChannelRouter:
                     method(**kwargs),
                     timeout=config.timeout_seconds,
                 )
-                # 成功：重置失败计数
+                # 成功：重置失败计数 + 更新仪表盘状态
                 self._failure_counts[provider_id] = 0
                 logger.debug(
                     "channel_execute",
                     f"通道 {channel_type.value}.{method_name} 成功: {provider_id}"
                 )
+                try:
+                    from services.ui.dashboard import update_provider_status
+                    update_provider_status(provider_id, True)
+                except Exception:
+                    pass
                 return result
 
             except asyncio.TimeoutError:
                 self._failure_counts[provider_id] = self._failure_counts.get(provider_id, 0) + 1
-                last_error = DataProviderError(
-                    provider_id,
-                    f"超时 ({config.timeout_seconds}s)",
-                )
-                logger.warning(
-                    "channel_timeout",
-                    f"Provider {provider_id} 超时: {method_name}({kwargs})"
-                )
+                last_error = DataProviderError(provider_id, f"超时 ({config.timeout_seconds}s)")
+                logger.warning("channel_timeout", f"Provider {provider_id} 超时: {method_name}({kwargs})")
+                try:
+                    from services.ui.dashboard import update_provider_status
+                    update_provider_status(provider_id, False, f"超时 ({config.timeout_seconds}s)")
+                except Exception: pass
 
             except DataProviderError as e:
                 self._failure_counts[provider_id] = self._failure_counts.get(provider_id, 0) + 1
                 last_error = e
-                logger.warning(
-                    "channel_error",
-                    f"Provider {provider_id} 失败: {e}"
-                )
+                logger.warning("channel_error", f"Provider {provider_id} 失败: {e}")
+                try:
+                    from services.ui.dashboard import update_provider_status
+                    update_provider_status(provider_id, False, str(e))
+                except Exception: pass
 
             except Exception as e:
                 self._failure_counts[provider_id] = self._failure_counts.get(provider_id, 0) + 1
-                last_error = DataProviderError(
-                    provider_id,
-                    str(e),
-                    e,
-                )
-                logger.warning(
-                    "channel_error",
-                    f"Provider {provider_id} 异常: {method_name}({kwargs}): {e}"
-                )
+                last_error = DataProviderError(provider_id, str(e), e)
+                logger.warning("channel_error", f"Provider {provider_id} 异常: {method_name}({kwargs}): {e}")
+                try:
+                    from services.ui.dashboard import update_provider_status
+                    update_provider_status(provider_id, False, str(e))
+                except Exception: pass
 
         # 所有 Provider 均失败
         failed_list = ", ".join(tried)
