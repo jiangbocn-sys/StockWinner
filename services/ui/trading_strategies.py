@@ -17,6 +17,26 @@ router = APIRouter()
 # 个股交易策略 API（trading_strategies 表）- 止损止盈配置
 # ============================================================
 
+@router.get("/api/v1/ui/{account_id}/trading-strategies/stock-list")
+async def list_trading_strategies(
+    account_id: str = Path(..., description="账户 ID"),
+):
+    """列出个股交易策略"""
+    db = get_db_manager()
+    account = await db.fetchone(
+        "SELECT 1 FROM accounts WHERE account_id = ? AND is_active = 1",
+        (account_id,)
+    )
+    if not account:
+        raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
+
+    strategies = await db.fetchall(
+        "SELECT * FROM trading_strategies WHERE account_id = ? ORDER BY created_at DESC",
+        (account_id,)
+    )
+    return {"success": True, "strategies": strategies}
+
+
 @router.post("/api/v1/ui/{account_id}/trading-strategies/stock")
 async def upsert_stock_trading_strategy(
     account_id: str = Path(..., description="账户 ID"),

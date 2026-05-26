@@ -269,12 +269,12 @@
           </el-tabs>
         </el-tab-pane>
 
-        <!-- 个股策略 -->
-        <el-tab-pane label="个股策略" name="trading">
+        <!-- 个股止损止盈 -->
+        <el-tab-pane label="个股止损止盈" name="trading">
           <el-card>
             <template #header>
               <div class="card-header">
-                <span>个股交易策略</span>
+                <span>个股止损止盈（固定价/百分比/移动止损）</span>
                 <el-space>
                   <el-input
                     v-model="searchStockCode"
@@ -1973,7 +1973,7 @@ const generateLLMStrategy = async () => {
 const loadTradingStrategies = async () => {
   loadingTrading.value = true
   try {
-    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/trading-strategies`)
+    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/trading-strategies/stock-list`)
     const data = await res.json()
     if (data.success) {
       tradingStrategies.value = data.strategies
