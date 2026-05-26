@@ -271,8 +271,15 @@ class GatewayDispatcher:
                 if code in kline_results:
                     results[code] = kline_results[code]
 
-        # ③ 仍有 None 的代码 → 从本地 kline.db 兜底（仅非交易时段）
-        # 交易时段不使用 kline.db 兜底，避免用昨收价冒充实时价误导策略
+        # ③ 仍有 None → 尝试多数据源 channel provider（AKShare/新浪/腾讯等）
+        still_none = [c for c in codes if results.get(c) is None]
+        if still_none:
+            channel_results = await self._fallback_channel_providers(still_none)
+            for code, md in channel_results.items():
+                if md and md.current_price > 0:
+                    results[code] = md
+
+        # ④ 仍有 None 的代码 → 从本地 kline.db 兜底（仅非交易时段）
         still_none = [c for c in codes if results.get(c) is None]
         if still_none:
             from services.trading.trading_hours import can_trade
@@ -450,6 +457,48 @@ class GatewayDispatcher:
                         trade_date=str(row['trade_date'] or '').replace('-', ''),
                         source="kline_db",
                     )
+        except Exception:
+            pass
+        return results
+
+    @staticmethod
+    async def _fallback_channel_providers(codes: List[str]) -> Dict[str, Any]:
+        """SDK kline 失败后，通过多数据源 channel provider（AKShare/新浪/腾讯等）获取行情"""
+        import asyncio
+        from services.trading.gateway import MarketData
+
+        if not codes:
+            return {}
+
+        results: Dict[str, Any] = {}
+        try:
+            from services.data.channel import get_channel_router, ChannelType
+            router = get_channel_router()
+            batch_result = await router.execute(
+                ChannelType.TRADING, "get_batch_market_data",
+                stock_codes=codes,
+            )
+            if batch_result and isinstance(batch_result, dict):
+                for code, raw in batch_result.items():
+                    if raw and raw.get("current_price", 0) > 0:
+                        results[code] = MarketData(
+                            stock_code=raw.get("stock_code", code),
+                            stock_name=raw.get("stock_name", ""),
+                            current_price=float(raw.get("current_price", 0)),
+                            change_percent=float(raw.get("change_percent", 0)),
+                            high=float(raw.get("high", 0)),
+                            low=float(raw.get("low", 0)),
+                            open_price=float(raw.get("open_price", 0)),
+                            prev_close=float(raw.get("prev_close", 0)),
+                            volume=int(raw.get("volume", 0)),
+                            amount=float(raw.get("amount", 0)),
+                            bid=raw.get("bid", []),
+                            ask=raw.get("ask", []),
+                            bid_volume=raw.get("bid_volume", []),
+                            ask_volume=raw.get("ask_volume", []),
+                            trade_date=raw.get("trade_date", ""),
+                            source="channel",
+                        )
         except Exception:
             pass
         return results
