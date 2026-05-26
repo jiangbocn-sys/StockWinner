@@ -106,25 +106,30 @@ class KlineManager:
         """
         从数据库获取 K 线数据。
 
+        limit > 0 时返回最近 N 条记录（按 trade_date ASC 排序）。
+        无 limit 时返回全部记录。
+
         Returns:
             DataFrame with columns: stock_code, stock_name, trade_date,
             open, high, low, close, volume, amount
         """
         conn = self._conn()
-        query = 'SELECT * FROM kline_data WHERE stock_code = ?'
+        inner_query = 'SELECT * FROM kline_data WHERE stock_code = ?'
         params: list = [stock_code]
 
         if start_date:
-            query += ' AND trade_date >= ?'
+            inner_query += ' AND trade_date >= ?'
             params.append(start_date)
         if end_date:
-            query += ' AND trade_date <= ?'
+            inner_query += ' AND trade_date <= ?'
             params.append(end_date)
 
-        query += ' ORDER BY trade_date ASC'
-        if limit:
-            query += ' LIMIT ?'
+        if limit and limit > 0:
+            # 子查询取最近 N 条：先 DESC 倒序取 limit 条，再 ASC 正序
+            query = f'SELECT * FROM ({inner_query} ORDER BY trade_date DESC LIMIT ?) ORDER BY trade_date ASC'
             params.append(limit)
+        else:
+            query = inner_query + ' ORDER BY trade_date ASC'
 
         df = pd.read_sql_query(query, conn, params=params)
         return df

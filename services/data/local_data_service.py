@@ -424,21 +424,22 @@ class LocalKlineDataService:
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
 
-        query = 'SELECT * FROM kline_data WHERE stock_code = ?'
+        inner = 'SELECT * FROM kline_data WHERE stock_code = ?'
         params = [stock_code]
 
         if start_date:
-            query += ' AND trade_date >= ?'
+            inner += ' AND trade_date >= ?'
             params.append(start_date)
         if end_date:
-            query += ' AND trade_date <= ?'
+            inner += ' AND trade_date <= ?'
             params.append(end_date)
 
-        query += ' ORDER BY trade_date ASC'
-
-        if limit:
-            query += ' LIMIT ?'
+        if limit and limit > 0:
+            # 子查询取最近 N 条：先 DESC 倒序取 limit 条，再 ASC 正序
+            query = f'SELECT * FROM ({inner} ORDER BY trade_date DESC LIMIT ?) ORDER BY trade_date ASC'
             params.append(limit)
+        else:
+            query = inner + ' ORDER BY trade_date ASC'
 
         cursor.execute(query, params)
         rows = cursor.fetchall()
