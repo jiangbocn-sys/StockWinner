@@ -112,8 +112,9 @@
           <el-table-column prop="take_profit_price" label="止盈价" width="100" align="right">
             <template #default="{ row }">{{ row.take_profit_price ? '¥' + Number(row.take_profit_price).toFixed(2) : '-' }}</template>
           </el-table-column>
-          <el-table-column label="操作" fixed="right" width="280">
+          <el-table-column label="操作" fixed="right" width="340">
             <template #default="{ row }">
+              <el-button type="success" size="small" plain @click="openStrategyDialog(row)">止损止盈</el-button>
               <el-button type="info" size="small" @click="handleDsaAnalysis(row)" :loading="dsaAnalyzing === row.stock_code">DSA 分析</el-button>
               <el-button type="primary" size="small" @click="handleAction(row, 'add')">加仓</el-button>
               <el-button type="warning" size="small" @click="handleAction(row, 'reduce')">减仓</el-button>
@@ -340,6 +341,35 @@
           </el-button>
         </template>
       </el-dialog>
+
+      <!-- 止损止盈设置对话框 -->
+      <el-dialog v-model="strategyDialogVisible" title="设置止损止盈" width="450px">
+        <el-form :model="strategyForm" label-width="100px">
+          <el-form-item label="股票代码">
+            <el-input :model-value="strategyForm.stock_code" disabled />
+          </el-form-item>
+          <el-form-item label="股票名称">
+            <el-input :model-value="strategyForm.stock_name" disabled />
+          </el-form-item>
+          <el-form-item label="止损价">
+            <el-input-number v-model="strategyForm.stop_loss_price" :min="0" :precision="2" controls-position="right" style="width:100%" />
+          </el-form-item>
+          <el-form-item label="止损比例">
+            <el-input-number v-model="strategyForm.stop_loss_pct" :min="0" :max="0.5" :step="0.01" :precision="2" controls-position="right" style="width:100%" />
+            <div style="font-size:12px;color:#909399">止损价优先，为空时用比例</div>
+          </el-form-item>
+          <el-form-item label="止盈价">
+            <el-input-number v-model="strategyForm.take_profit_price" :min="0" :precision="2" controls-position="right" style="width:100%" />
+          </el-form-item>
+          <el-form-item label="止盈比例">
+            <el-input-number v-model="strategyForm.take_profit_pct" :min="0" :max="1.0" :step="0.01" :precision="2" controls-position="right" style="width:100%" />
+          </el-form-item>
+        </el-form>
+        <template #footer>
+          <el-button @click="strategyDialogVisible = false">取消</el-button>
+          <el-button type="primary" :loading="strategySaving" @click="saveStrategy">保存</el-button>
+        </template>
+      </el-dialog>
     </el-main>
   </div>
 </template>
@@ -510,6 +540,53 @@ const refreshPrices = async () => {
 }
 
 import { formatNumber, formatPct } from '../utils/format'
+
+// 止损止盈设置
+const strategyDialogVisible = ref(false)
+const strategySaving = ref(false)
+const strategyForm = ref({
+  stock_code: '',
+  stock_name: '',
+  stop_loss_price: null,
+  stop_loss_pct: 0.05,
+  take_profit_price: null,
+  take_profit_pct: 0.15,
+})
+
+const openStrategyDialog = (row) => {
+  strategyForm.value = {
+    stock_code: row.stock_code,
+    stock_name: row.stock_name || row.stock_code,
+    stop_loss_price: row.stop_loss_price || null,
+    stop_loss_pct: 0.05,
+    take_profit_price: row.take_profit_price || null,
+    take_profit_pct: 0.15,
+  }
+  strategyDialogVisible.value = true
+}
+
+const saveStrategy = async () => {
+  if (!strategyForm.value.stock_code) return
+  strategySaving.value = true
+  try {
+    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/trading-strategies/stock`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(strategyForm.value)
+    })
+    const data = await res.json()
+    if (data.success) {
+      ElMessage.success(data.message || '已保存')
+      strategyDialogVisible.value = false
+    } else {
+      ElMessage.error(data.message || '保存失败')
+    }
+  } catch (e) {
+    ElMessage.error('保存失败')
+  } finally {
+    strategySaving.value = false
+  }
+}
 
 const handleAction = async (row, action) => {
   if (action === 'clear') {
