@@ -2011,6 +2011,7 @@ const saveTradingStrategy = async () => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         stock_code: newTrading.stock_code,
+        stock_name: newTrading.stock_name || newTrading.stock_code,
         entry_price: newTrading.entry_price || null,
         stop_loss_price: newTrading.stop_loss_price || null,
         take_profit_price: newTrading.take_profit_price || null,
@@ -2082,7 +2083,7 @@ const updateTradingStrategy = async () => {
 const deleteTradingStrategy = async (row) => {
   try {
     await ElMessageBox.confirm('确定删除该交易策略？', '确认删除', { type: 'warning' })
-    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/trading-strategies/${row.stock_code}`, {
+    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/trading-strategies/stock/${row.stock_code}`, {
       method: 'DELETE'
     })
     const data = await res.json()

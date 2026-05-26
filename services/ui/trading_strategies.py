@@ -41,6 +41,7 @@ async def list_trading_strategies(
 async def upsert_stock_trading_strategy(
     account_id: str = Path(..., description="账户 ID"),
     stock_code: str = Body(..., description="股票代码"),
+    stock_name: str = Body("", description="股票名称"),
     strategy_type: str = Body("fixed", description="策略类型：fixed/trailing_stop"),
     config: Optional[str] = Body(None, description="策略配置 JSON"),
     entry_price: Optional[float] = Body(None, description="建仓价"),
@@ -96,6 +97,9 @@ async def upsert_stock_trading_strategy(
         if max_trade_quantity is not None:
             update_fields.append("max_trade_quantity = ?")
             params.append(max_trade_quantity)
+        if stock_name is not None and stock_name != "":
+            update_fields.append("stock_name = ?")
+            params.append(stock_name)
         if strategy_type is not None:
             update_fields.append("strategy_type = ?")
             params.append(strategy_type)
@@ -118,6 +122,7 @@ async def upsert_stock_trading_strategy(
             {
                 "account_id": account_id,
                 "stock_code": stock_code,
+                "stock_name": stock_name or stock_code,
                 "strategy_type": strategy_type or "fixed",
                 "config": config or "{}",
                 "entry_price": entry_price or 0,
@@ -211,7 +216,7 @@ async def copy_trading_strategy(
     }
 
 
-@router.get("/api/v1/ui/{account_id}/trading-strategies/{stock_code}")
+@router.get("/api/v1/ui/{account_id}/trading-strategies/stock/{stock_code}")
 async def get_trading_strategy(
     account_id: str = Path(..., description="账户 ID"),
     stock_code: str = Path(..., description="股票代码")
@@ -252,7 +257,7 @@ async def get_trading_strategy(
     }
 
 
-@router.put("/api/v1/ui/{account_id}/trading-strategies/{stock_code}")
+@router.put("/api/v1/ui/{account_id}/trading-strategies/stock/{stock_code}")
 async def update_trading_strategy_per_stock(
     account_id: str = Path(..., description="账户 ID"),
     stock_code: str = Path(..., description="股票代码"),
@@ -324,7 +329,7 @@ async def update_trading_strategy_per_stock(
     }
 
 
-@router.delete("/api/v1/ui/{account_id}/trading-strategies/{stock_code}")
+@router.delete("/api/v1/ui/{account_id}/trading-strategies/stock/{stock_code}")
 async def delete_trading_strategy(
     account_id: str = Path(..., description="账户 ID"),
     stock_code: str = Path(..., description="股票代码")
