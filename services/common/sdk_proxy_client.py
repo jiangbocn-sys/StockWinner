@@ -31,7 +31,7 @@ class SDKProxyClient:
         self._socket: Optional[socket.socket] = None
         self._subprocess_pid: Optional[int] = None
         self._connected = False
-        self._lock = threading.Lock()  # 串行化 IPC 调用
+        self._lock = threading.RLock()  # 可重入锁：connect_to_subprocess 和 _call_ipc 可能嵌套调用
 
     @classmethod
     def get_instance(cls) -> 'SDKProxyClient':
