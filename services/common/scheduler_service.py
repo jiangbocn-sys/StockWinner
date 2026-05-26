@@ -1590,7 +1590,7 @@ class SchedulerService:
             logger.error(f"任务 {task_id} 不存在")
             return
 
-        # 防止重复启动：如果任务已是 running 状态，无论手动/自动都跳过
+        # 防止重复启动：任务已在运行时跳过（NULL 视为未执行过）
         if task.get("last_status") == "running":
             logger.info(f"任务 {task_id} 已在运行中，跳过重复执行")
             return
@@ -1610,10 +1610,11 @@ class SchedulerService:
                 return
 
         try:
-            # 原子 CAS：last_status != 'running' 才更新，防止并发重复执行
+            # 原子 CAS：last_status 不是 'running' 才更新，防止并发重复执行
+            # 注意：SQL 中 NULL != 'running' 结果是 NULL 不是 True，必须显式处理 NULL
             result = await db.execute(
                 "UPDATE strategy_tasks SET last_run_at = ?, last_status = 'running' "
-                "WHERE id = ? AND last_status != 'running'",
+                "WHERE id = ? AND (last_status != 'running' OR last_status IS NULL)",
                 (get_china_time().isoformat(), task_id)
             )
             if getattr(result, 'rowcount', 1) == 0:
