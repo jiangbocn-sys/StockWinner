@@ -117,11 +117,11 @@ class TradingMonitor:
         log.log_event("monitor_loop_stop", "交易监控服务已停止")
 
     async def _run_monitoring_global(self, account_ids: list[str]):
-        """全局监控：收集实际需要监控的股票，通过 dispatcher 统一获取行情"""
+        """全局监控：刷新所有活跃 watchlist + 持仓股行情，统一通过 dispatcher 批量获取"""
         db = get_db_manager()
         log = get_logger("monitor")
 
-        # 收集所有账户需要监控股票
+        # 收集所有需要刷新的股票：活跃 watchlist（全部状态）+ 持仓
         monitoring_codes: set = set()
         account_stocks: Dict[str, set] = {}
         for acct_id in account_ids:
@@ -129,19 +129,17 @@ class TradingMonitor:
                 return
             codes = set()
             try:
-                pending = await db.fetchall(
-                    "SELECT stock_code FROM watchlist WHERE account_id = ? AND is_active = 1 AND status = 'pending'",
+                # 全部活跃 watchlist 股票
+                wl = await db.fetchall(
+                    "SELECT DISTINCT stock_code FROM watchlist "
+                    "WHERE account_id = ? AND is_active = 1 AND status IN ('pending', 'watching', 'bought')",
                     (acct_id,),
                 )
-                codes.update(r["stock_code"] for r in pending)
-                sl_tp = await db.fetchall(
-                    "SELECT stock_code FROM watchlist WHERE account_id = ? AND is_active = 1"
-                    " AND status IN ('watching', 'bought') AND (stop_loss_price > 0 OR take_profit_price > 0)",
-                    (acct_id,),
-                )
-                codes.update(r["stock_code"] for r in sl_tp)
+                codes.update(r["stock_code"] for r in wl)
+                # 持仓股
                 pos = await db.fetchall(
-                    "SELECT stock_code FROM stock_positions WHERE account_id = ?", (acct_id,),
+                    "SELECT stock_code FROM stock_positions WHERE account_id = ? AND quantity > 0",
+                    (acct_id,),
                 )
                 codes.update(r["stock_code"] for r in pos)
             except Exception:
@@ -152,7 +150,7 @@ class TradingMonitor:
         if not monitoring_codes:
             return
 
-        # 通过 dispatcher 获取行情
+        # 通过 dispatcher 批量获取行情（一次订阅，批量 kline 查询）
         market_data_cache: Dict[str, Any] = {}
         try:
             gw = await get_gateway()

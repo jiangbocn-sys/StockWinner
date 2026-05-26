@@ -50,7 +50,7 @@ class GatewayDispatcher:
         self._stock_last_refresh: Dict[str, float] = {}  # stock_code → last refresh time
         self._min_refresh_gap: float = 25.0  # 同一股票最小刷新间隔
         self._tick_interval: float = 10.0    # 后台循环 tick 间隔
-        self._sdk_batch_size: int = 100       # 每批 SDK 查询股票数（kline 可支持更大批次）
+        self._sdk_batch_size: int = 2000      # SDK kline 单次可查询大量股票
         self._loop_id: Optional[int] = None  # 记录当前事件循环 ID
         self._sdk_healthy = True
         self._sdk_error_time: Optional[str] = None
@@ -336,8 +336,8 @@ class GatewayDispatcher:
 
         results: Dict[str, Any] = {}
 
-        # 分批查询 K 线，每批 100 只
-        batch_size = 100
+        # 批量查询 K 线（一次查完，不分批）
+        batch_size = 2000
         for i in range(0, len(codes), batch_size):
             batch = codes[i:i + batch_size]
             if not await asyncio.to_thread(sdk_mgr.is_connected):
