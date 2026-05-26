@@ -42,7 +42,7 @@ class GatewayDispatcher:
     - 后台循环自动刷新活跃的订阅
     """
 
-    _snapshot_disabled = False  # 类变量，跨实例持久化
+    _snapshot_disabled = True   # pandas 2.x 不兼容 snapshot，默认跳过
 
     def __init__(self):
         self._lock: Optional[asyncio.Lock] = None
@@ -211,8 +211,7 @@ class GatewayDispatcher:
         today_int = int(get_china_time().strftime('%Y%m%d'))
         all_snapshots: Dict[str, Any] = {}
 
-        # ① 优先尝试 snapshot（首次失败后永久跳过——pandas 2.x 不兼容）
-        get_logger("dispatcher").log_event("snapshot_check", f"_snapshot_disabled={GatewayDispatcher._snapshot_disabled}, codes={len(codes)}")
+        # ① snapshot 默认跳过（pandas 2.x 不兼容），直接走 kline fallback
         if not GatewayDispatcher._snapshot_disabled and await asyncio.to_thread(sdk_mgr.connect):
             for i in range(0, len(codes), self._sdk_batch_size):
                 batch = codes[i:i + self._sdk_batch_size]
