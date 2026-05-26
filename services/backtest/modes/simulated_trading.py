@@ -56,6 +56,7 @@ class SimulatedTradingEngine:
         self.initial_positions = initial_positions  # 分段回测用：上一段继承的持仓
         self.initial_cash = initial_cash  # 分段回测用：上一段继承的现金
         self.liquidate_at_end = liquidate_at_end  # 是否在段末清仓
+        self._pending_signals: List[Dict] = []  # 当日策略信号，次日执行
 
         # 策略类型检测
         self.is_code_strategy = strategy_config.get("strategy_type") == "python"
@@ -214,27 +215,33 @@ class SimulatedTradingEngine:
         }
 
     def _step(self, trade_date: str):
-        """单个交易日的处理流程"""
-        # 1. 获取当日 OHLC 数据（止盈止损用 high/low，其他用 close）
+        """单个交易日的处理流程
+
+        T日盘后: 策略选股 → 生成买入信号 → 存为pending
+        T+1日盘中: 执行pending信号（检查触发价/收盘价）
+        """
+        # 1. 获取当日 OHLC 数据
         ohlc_data = self._get_daily_ohlc(trade_date)
         if not ohlc_data:
             self._record_nav(trade_date)
             return
 
-        # 为了方便后续方法复用，提取 close 字典
         prices = {code: d["close"] for code, d in ohlc_data.items()}
 
-        # 2. 检查持仓卖出信号
-        self._check_sell_signals(trade_date, prices, ohlc_data)
+        # 2. 执行前一日pending买入信号（T日执行T-1日生成的信号）
+        self._execute_pending_buys(trade_date, prices, ohlc_data)
 
-        # 3. 执行选股买入信号（优化：仓位已满且无卖出时跳过扫描）
-        self._check_buy_signals(trade_date, prices)
+        # 3. 检查持仓卖出信号
+        self._check_sell_signals(trade_date, prices, ohlc_data)
 
         # 4. 更新持仓标记价格（移动止盈用）
         for code, price in prices.items():
             self.execution.update_position_mark(code, price)
 
-        # 5. 记录当日净值
+        # 5. 盘后选股：生成次日买入信号
+        self._check_buy_signals(trade_date, prices)
+
+        # 6. 记录当日净值
         self._record_nav(trade_date, prices)
 
     def _get_daily_ohlc(self, trade_date: str) -> Dict[str, Dict[str, float]]:
@@ -408,36 +415,82 @@ class SimulatedTradingEngine:
         return False
 
     def _check_buy_signals(self, trade_date: str, prices: Dict[str, float]):
-        """执行选股买入信号"""
-        # 优化：仓位已满且无卖出时跳过全池扫描（最耗时的步骤）
+        """盘后选股：生成买入信号存入pending，次日执行"""
         if not self._has_buy_capacity():
             return
 
-        # 代码型策略不需要 buy_conditions，直接走信号筛选
         if not self.is_code_strategy and not self.buy_conditions:
             return
 
-        # 获取当日所有股票指标
         candidates = self._screen_candidates(trade_date, prices)
 
+        # 清空旧pending，存入新信号
+        self._pending_signals = []
         for candidate in candidates:
             code = candidate["stock_code"]
-            price = candidate.get("price", 0)
-            if price <= 0:
-                continue
-
-            # 检查是否已有持仓
             if code in self.execution.positions:
                 continue
+            self._pending_signals.append({
+                "stock_code": code,
+                "stock_name": candidate.get("stock_name", code),
+                "signal_price": candidate.get("price", 0),        # 信号日收盘价
+                "trigger_price": candidate.get("trigger_price", 0),  # 策略建议买入价
+                "stop_loss_pct": candidate.get("stop_loss_pct", 0.05),
+                "take_profit_pct": candidate.get("take_profit_pct", 0.15),
+            })
+
+    def _execute_pending_buys(self, trade_date: str, prices: Dict[str, float],
+                               ohlc_data: Dict[str, Dict[str, float]]):
+        """T日执行T-1日生成的pending买入信号
+
+        根据stop_execution_price模式决定成交价：
+        - "close": 用当日收盘价（简化模式）
+        - "trigger": 当日最低价≤触发价≤当日最高价时，用触发价成交
+        """
+        if not self._pending_signals:
+            return
+
+        executed = []
+        for sig in self._pending_signals:
+            code = sig["stock_code"]
+            if code in self.execution.positions:
+                continue
+            if not self._has_buy_capacity():
+                break
+
+            ohlc = ohlc_data.get(code)
+            if not ohlc:
+                continue
+
+            trigger = sig.get("trigger_price", 0)
+            signal_price = sig.get("signal_price", 0)
+
+            if self.stop_execution_price == "trigger" and trigger > 0:
+                low = ohlc.get("low", trigger)
+                high = ohlc.get("high", trigger)
+                # 触发价在当日波动区间内 → 用触发价成交
+                if low <= trigger <= high:
+                    buy_price = trigger
+                else:
+                    continue  # 当日未触及触发价，信号失效
+            else:
+                # close模式：用当日收盘价
+                buy_price = ohlc.get("close", 0)
+                if buy_price <= 0:
+                    continue
 
             prev_close = self._get_prev_close(code, trade_date)
             self.execution.buy(
                 stock_code=code,
-                price=price,
+                price=buy_price,
                 date=trade_date,
-                stock_name=candidate.get("stock_name", ""),
+                stock_name=sig.get("stock_name", code),
                 prev_close=prev_close,
             )
+            executed.append(code)
+
+        # 已执行的信号从pending中移除
+        self._pending_signals = [s for s in self._pending_signals if s["stock_code"] not in executed]
 
     def _has_buy_capacity(self) -> bool:
         """判断是否有买入空间（资金 + 仓位数量）"""
@@ -519,6 +572,7 @@ class SimulatedTradingEngine:
             candidates.append({
                 "stock_code": code,
                 "price": price,
+                "trigger_price": signal.get("trigger_price", price),
                 "stock_name": signal.get("stock_name", code),
                 "stop_loss_pct": signal.get("stop_loss_pct", 0.05),
                 "take_profit_pct": signal.get("take_profit_pct", 0.15),
