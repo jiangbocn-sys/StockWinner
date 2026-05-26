@@ -128,7 +128,13 @@ class PriceCache:
                     )
                 elif isinstance(item, tuple) and len(item) >= 2:
                     price, change_pct = item[0], item[1]
-                    self._prices[code] = PriceEntry(price, change_pct=change_pct)
+                    if existing and existing.close > 0:
+                        # 仅更新 price/change_pct，保留已有完整 OHLCV
+                        existing.price = price
+                        existing.change_pct = change_pct
+                        existing.timestamp = time.time()
+                    else:
+                        self._prices[code] = PriceEntry(price, change_pct=change_pct)
 
     def get(self, stock_code: str) -> Optional[float]:
         """获取最新价，未找到或过期返回 None"""
