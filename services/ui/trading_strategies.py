@@ -136,6 +136,33 @@ async def upsert_stock_trading_strategy(
         )
         message = "交易策略创建成功"
 
+    # 同步到 watchlist：计算有效止损止盈价
+    try:
+        pos = await db.fetchone(
+            "SELECT avg_cost FROM stock_positions WHERE account_id = ? AND stock_code = ? AND quantity > 0",
+            (account_id, stock_code)
+        )
+        avg_cost = float(pos["avg_cost"]) if pos and pos.get("avg_cost", 0) > 0 else 0
+
+        sl = stop_loss_price if (stop_loss_price and stop_loss_price > 0) else (
+            round(avg_cost * (1 - (stop_loss_pct or 0)), 2) if avg_cost > 0 and (stop_loss_pct or 0) > 0 else 0
+        )
+        tp = take_profit_price if (take_profit_price and take_profit_price > 0) else (
+            round(avg_cost * (1 + (take_profit_pct or 0)), 2) if avg_cost > 0 and (take_profit_pct or 0) > 0 else 0
+        )
+
+        existing_wl = await db.fetchone(
+            "SELECT id FROM watchlist WHERE account_id = ? AND stock_code = ? AND is_active = 1",
+            (account_id, stock_code)
+        )
+        if existing_wl and (sl > 0 or tp > 0):
+            await db.execute(
+                "UPDATE watchlist SET stop_loss_price = ?, take_profit_price = ?, updated_at = ? WHERE id = ?",
+                (sl, tp, format_china_time(), existing_wl["id"])
+            )
+    except Exception:
+        pass
+
     return {
         "success": True,
         "message": message,
