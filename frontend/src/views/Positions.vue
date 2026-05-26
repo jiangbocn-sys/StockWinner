@@ -795,7 +795,7 @@ const startPriceRefresh = () => {
     } catch (e) {
       // 静默失败，不弹提示
     }
-  }, 10000)  // 每 10 秒刷新一次
+  }, 30000)  // 每 30 秒静默刷新
 }
 
 let posAbortController = null

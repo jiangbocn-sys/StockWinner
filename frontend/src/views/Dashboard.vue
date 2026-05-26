@@ -541,8 +541,10 @@ const REFRESH_INTERVAL = 300000 // 5 分钟（仅刷新业务数据，不触发 
 
 onMounted(async () => {
   abortController = new AbortController()
-  await accountStore.loadAccounts()
-  await loadDashboard(false, abortController.signal)
+  await Promise.all([
+    accountStore.loadAccounts(),
+    loadDashboard(false, abortController.signal)
+  ])
   // 每 5 分钟自动刷新（业务数据，不阻塞）
   refreshTimer = setInterval(() => loadDashboard(true), REFRESH_INTERVAL)
 })

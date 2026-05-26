@@ -1651,7 +1651,7 @@ const startWatchlistPriceRefresh = () => {
     } catch (e) {
       // 静默失败
     }
-  }, 10000)  // 每 10 秒
+  }, 30000)  // 每 30 秒静默刷新
 }
 
 onMounted(async () => {
