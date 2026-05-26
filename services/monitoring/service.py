@@ -42,7 +42,7 @@ class TradingMonitor:
         self._price_mgr = PriceCacheManager()
         self._health = HealthTracker()
 
-    async def start_monitoring(self, account_ids: Optional[list[str]] = None, interval: int = 30):
+    async def start_monitoring(self, account_ids: Optional[list[str]] = None, interval: int = 60):
         """启动交易监控服务"""
         if self._running:
             if self._task and self._task.done():

@@ -1188,7 +1188,7 @@ class SchedulerService:
                             asyncio.set_event_loop(loop)
                             try:
                                 result.update(loop.run_until_complete(
-                                    monitor.start_monitoring(interval=30)
+                                    monitor.start_monitoring(interval=60)
                                 ))
                             finally:
                                 loop.close()
@@ -1283,7 +1283,7 @@ class SchedulerService:
             return
 
         # 自动启动所有活跃账户的监控
-        result = await monitor.start_monitoring(interval=30)
+        result = await monitor.start_monitoring(interval=60)
         logger.info(f"交易监控自动启动结果: {result}")
 
     def reload_strategy_tasks(self):
@@ -1417,7 +1417,7 @@ class SchedulerService:
         loop = _get_fastapi_loop()
         if loop and loop.is_running():
             asyncio.run_coroutine_threadsafe(
-                monitor.start_monitoring(account_id, interval=30),
+                monitor.start_monitoring(account_id, interval=60),
                 loop
             )
             logger.info(f"已提交监控启动请求: {account_id}")

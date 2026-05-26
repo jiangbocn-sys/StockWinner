@@ -102,7 +102,7 @@ def create_lifespan():
             from services.trading.trading_hours import can_trade, is_today_trading_day
             if is_today_trading_day() and can_trade():
                 monitor = get_trading_monitor()
-                result = await monitor.start_monitoring(interval=30)
+                result = await monitor.start_monitoring(interval=60)
                 log.log_event("monitor_autostart", f"交易监控已启动: {result.get('message', '')}")
             else:
                 log.log_event("monitor_autostart", "不在交易时段或非交易日，跳过自动启动监控")
