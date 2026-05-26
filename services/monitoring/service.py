@@ -132,7 +132,7 @@ class TradingMonitor:
                 # 全部活跃 watchlist 股票
                 wl = await db.fetchall(
                     "SELECT DISTINCT stock_code FROM watchlist "
-                    "WHERE account_id = ? AND is_active = 1 AND status IN ('pending', 'watching', 'bought')",
+                    "WHERE account_id = ? AND is_active = 1",
                     (acct_id,),
                 )
                 codes.update(r["stock_code"] for r in wl)
