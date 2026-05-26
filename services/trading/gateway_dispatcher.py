@@ -212,6 +212,7 @@ class GatewayDispatcher:
         all_snapshots: Dict[str, Any] = {}
 
         # ① 优先尝试 snapshot（首次失败后永久跳过——pandas 2.x 不兼容）
+        get_logger("dispatcher").log_event("snapshot_check", f"_snapshot_disabled={GatewayDispatcher._snapshot_disabled}, codes={len(codes)}")
         if not GatewayDispatcher._snapshot_disabled and await asyncio.to_thread(sdk_mgr.connect):
             for i in range(0, len(codes), self._sdk_batch_size):
                 batch = codes[i:i + self._sdk_batch_size]
