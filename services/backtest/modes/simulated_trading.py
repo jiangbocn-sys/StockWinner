@@ -289,12 +289,11 @@ class SimulatedTradingEngine:
         """固定止盈止损检查"""
         if self.stop_loss_pct is not None:
             stop_price = pos.avg_cost * (1 - self.stop_loss_pct)
-            # 检查是否触发止损
             if ohlc and self.stop_execution_price == "trigger":
                 low = ohlc.get("low", price)
                 if low <= stop_price:
-                    # 按当日最低价成交（滑点在 sell() 内部自动扣除）
-                    self.execution.sell(code, low, date, reason="止损", prev_close=prev_close)
+                    # trigger 模式：用止损价格成交
+                    self.execution.sell(code, stop_price, date, reason="止损", prev_close=prev_close)
                     return True
             elif price <= stop_price:
                 self.execution.sell(code, price, date, reason="止损", prev_close=prev_close)
@@ -302,12 +301,11 @@ class SimulatedTradingEngine:
 
         if self.take_profit_pct is not None:
             take_price = pos.avg_cost * (1 + self.take_profit_pct)
-            # 检查是否触发止盈
             if ohlc and self.stop_execution_price == "trigger":
                 high = ohlc.get("high", price)
                 if high >= take_price:
-                    # 按当日最高价成交（滑点在 sell() 内部自动扣除）
-                    self.execution.sell(code, high, date, reason="止盈", prev_close=prev_close)
+                    # trigger 模式：用止盈价格成交
+                    self.execution.sell(code, take_price, date, reason="止盈", prev_close=prev_close)
                     return True
             elif price >= take_price:
                 self.execution.sell(code, price, date, reason="止盈", prev_close=prev_close)
