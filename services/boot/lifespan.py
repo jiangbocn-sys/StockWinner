@@ -115,10 +115,6 @@ def create_lifespan():
         # 初始化多数据源 ChannelRouter
         await _init_channel_router(db_manager, log)
 
-        # 启动数据源状态定期刷新（每60s）
-        from services.ui.dashboard import start_data_sources_refresh
-        await start_data_sources_refresh(interval=60)
-
         yield
 
         # ========== 关闭流程 ==========

@@ -117,28 +117,6 @@ async def _refresh_data_sources_background():
             _data_sources_cache.append(result)
 
 
-_data_sources_refresh_started = False
-
-
-async def start_data_sources_refresh(interval: int = 60):
-    """启动定期刷新数据源状态的后台任务（每60秒）"""
-    global _data_sources_refresh_started
-    if _data_sources_refresh_started:
-        return
-    _data_sources_refresh_started = True
-
-    import asyncio
-    async def _loop():
-        while True:
-            await asyncio.sleep(interval)
-            try:
-                await _refresh_data_sources_background()
-            except Exception:
-                pass
-
-    asyncio.create_task(_loop())
-
-
 async def _ensure_data_sources_init():
     """首次调用返回占位符并触发后台刷新；后续调用触发异步刷新"""
     global _data_sources_cache
