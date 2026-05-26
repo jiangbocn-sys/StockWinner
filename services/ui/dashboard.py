@@ -51,10 +51,11 @@ async def _get_data_sources_status() -> list:
 
 
 async def _refresh_data_sources_background():
-    """后台逐个检测数据源状态，更新缓存"""
+    """并行检测所有数据源，完成一个立即更新缓存"""
     from services.data.channel.config_manager import get_all_provider_configs
     from services.data.channel.router import get_channel_router
     from services.common.timezone import get_china_time
+    import asyncio
 
     try:
         configs = await get_all_provider_configs()
@@ -67,10 +68,12 @@ async def _refresh_data_sources_background():
     except Exception:
         registered = {}
 
-    result = []
-    for cfg in configs:
+    global _data_sources_cache
+
+    async def check_one(cfg):
         pid = cfg["provider_id"]
         provider = registered.get(pid)
+        now = get_china_time().isoformat()
 
         if provider:
             try:
@@ -91,18 +94,27 @@ async def _refresh_data_sources_background():
             error_msg = None
             latency_ms = -1
 
-        result.append({
+        return {
             "provider_id": pid,
             "display_name": cfg.get("display_name", pid),
             "is_enabled": bool(cfg.get("is_enabled", False)),
             "status": status,
             "error_message": error_msg,
             "latency_ms": latency_ms,
-            "last_check_time": get_china_time().isoformat(),
-        })
+            "last_check_time": now,
+        }
 
-    global _data_sources_cache
-    _data_sources_cache = result
+    # 并行启动所有检测，完成一个就更新缓存
+    tasks = [check_one(cfg) for cfg in configs]
+    for coro in asyncio.as_completed(tasks):
+        result = await coro
+        # 即时更新缓存中对应 provider 的状态
+        for i, item in enumerate(_data_sources_cache):
+            if item.get("provider_id") == result["provider_id"]:
+                _data_sources_cache[i] = result
+                break
+        else:
+            _data_sources_cache.append(result)
 
 
 async def _ensure_data_sources_init():
