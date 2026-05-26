@@ -31,7 +31,7 @@ async def list_trading_strategies(
         raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
 
     strategies = await db.fetchall(
-        "SELECT * FROM trading_strategies WHERE account_id = ? ORDER BY created_at DESC",
+        "SELECT * FROM trading_strategies WHERE account_id = ? ORDER BY updated_at DESC",
         (account_id,)
     )
     return {"success": True, "strategies": strategies}
