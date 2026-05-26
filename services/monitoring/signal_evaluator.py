@@ -274,76 +274,11 @@ class SignalEvaluator:
         sell_strategy_id: Optional[int] = None,
         kline_cache: Optional[Dict[str, Any]] = None,
     ) -> Dict:
-        """评估是否应该卖出 — 3 优先级：个股动态策略 → 卖出代码策略 → watchlist 止盈止损"""
+        """评估是否应该卖出 — 2 优先级：卖出代码策略 → watchlist 止盈止损"""
         db = get_db_manager()
         result = {"should_sell": False, "reason": "", "stop_loss_price": 0, "take_profit_price": 0}
 
-        # 优先级 1：个股动态策略
-        ts = ts_config
-        if ts is None:
-            ts = await db.fetchone(
-                "SELECT * FROM trading_strategies WHERE account_id = ? AND stock_code = ?",
-                (account_id, stock_code),
-            )
-
-        if ts:
-            strategy_type = ts.get("strategy_type", "fixed")
-            avg_cost = stock.get("trigger_price", 0) or stock.get("current_price", 0)
-
-            if strategy_type == "trailing_stop":
-                position = await db.fetchone(
-                    "SELECT highest_price FROM stock_positions WHERE account_id = ? AND stock_code = ?",
-                    (account_id, stock_code),
-                )
-                highest = position.get("highest_price", 0) if position else 0
-                if current_price > highest:
-                    highest = current_price
-                    await db.execute(
-                        "UPDATE stock_positions SET highest_price = ? WHERE account_id = ? AND stock_code = ?",
-                        (highest, account_id, stock_code),
-                    )
-
-                take_profit_pct = ts.get("take_profit_pct", 0.05)
-                stop_loss_pct = ts.get("stop_loss_pct", 0.05)
-                if highest > 0 and take_profit_pct > 0:
-                    trail_stop = round(highest * (1 - take_profit_pct), 2)
-                    result["take_profit_price"] = trail_stop
-                    if current_price <= trail_stop:
-                        result["should_sell"] = True
-                        result["reason"] = "trailing_stop"
-                        return result
-                if avg_cost > 0 and stop_loss_pct > 0:
-                    hard_stop = round(avg_cost * (1 - stop_loss_pct), 2)
-                    result["stop_loss_price"] = hard_stop
-                    if current_price <= hard_stop:
-                        result["should_sell"] = True
-                        result["reason"] = "stop_loss"
-                        return result
-                return result
-
-            if strategy_type == "fixed":
-                sl = ts.get("stop_loss_price", 0) or 0
-                tp = ts.get("take_profit_price", 0) or 0
-                if sl > 0:
-                    result["stop_loss_price"] = float(sl)
-                if tp > 0:
-                    result["take_profit_price"] = float(tp)
-                if sl <= 0 and ts.get("stop_loss_pct", 0) > 0 and avg_cost > 0:
-                    result["stop_loss_price"] = round(avg_cost * (1 - ts["stop_loss_pct"]), 2)
-                if tp <= 0 and ts.get("take_profit_pct", 0) > 0 and avg_cost > 0:
-                    result["take_profit_price"] = round(avg_cost * (1 + ts["take_profit_pct"]), 2)
-                if result["stop_loss_price"] > 0 and current_price <= result["stop_loss_price"]:
-                    result["should_sell"] = True
-                    result["reason"] = "stop_loss"
-                elif result["take_profit_price"] > 0 and current_price >= result["take_profit_price"]:
-                    result["should_sell"] = True
-                    result["reason"] = "take_profit"
-                return result
-
-            get_logger("monitor").error("monitor", f"{stock_code} 未知策略类型: {strategy_type}，回退到 watchlist",
-                                         stock_code=stock_code, strategy_type=strategy_type)
-
-        # 优先级 2：关联的卖出代码策略
+        # 优先级 1：关联的卖出代码策略
         if screening_strategy_id:
             if sell_strategy_id is None:
                 sell_strategy_id = await db.fetchval(
@@ -358,7 +293,7 @@ class SignalEvaluator:
                 if code_result["should_sell"]:
                     return code_result
 
-        # 优先级 3：watchlist 止盈止损值
+        # 优先级 2：watchlist 止盈止损值（含个股策略同步的价格）
         sl = stock.get("stop_loss_price", 0) or 0
         tp = stock.get("take_profit_price", 0) or 0
         result["stop_loss_price"] = float(sl)
