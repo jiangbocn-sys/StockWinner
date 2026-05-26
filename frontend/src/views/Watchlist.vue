@@ -137,7 +137,7 @@
               </div>
             </template>
 
-            <el-table :data="paginatedStocks" stripe style="width: 100%" v-loading="stocksLoading" @selection-change="handleStockSelectionChange" @row-dblclick="showKline">
+            <el-table :data="paginatedStocks" stripe style="width: 100%" v-loading="stocksLoading" @selection-change="handleStockSelectionChange" @row-dblclick="showKline" @sort-change="onTableSortChange">
               <el-table-column type="selection" width="50" />
               <el-table-column prop="stock_code" label="股票代码" width="120" sortable />
               <el-table-column prop="stock_name" label="股票名称" width="120" sortable />
@@ -594,14 +594,31 @@ const filterStatus = ref('')
 const currentPage = ref(1)
 const pageSize = 20
 
-// 当前组股票（含排序，与表格 default-sort 一致）
+// 排序状态
+const sortProp = ref('updated_at')
+const sortOrder = ref('descending')
+
+const onTableSortChange = ({ prop, order }) => {
+  sortProp.value = prop || 'updated_at'
+  sortOrder.value = order || 'descending'
+  currentPage.value = 1
+}
+
+// 当前组股票（对整个数组排序后分页）
 const sortedCurrentStocks = computed(() => {
   const sorted = [...currentStocks.value]
+  const prop = sortProp.value
+  const desc = sortOrder.value === 'descending'
   sorted.sort((a, b) => {
-    const aVal = a.updated_at || ''
-    const bVal = b.updated_at || ''
-    // 默认降序（descending）
-    return bVal.localeCompare(aVal)
+    const aVal = a[prop]
+    const bVal = b[prop]
+    if (aVal == null && bVal == null) return 0
+    if (aVal == null) return desc ? 1 : -1
+    if (bVal == null) return desc ? -1 : 1
+    if (typeof aVal === 'number' && typeof bVal === 'number') {
+      return desc ? bVal - aVal : aVal - bVal
+    }
+    return desc ? String(bVal).localeCompare(String(aVal)) : String(aVal).localeCompare(String(bVal))
   })
   return sorted
 })
