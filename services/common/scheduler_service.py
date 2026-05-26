@@ -1745,12 +1745,11 @@ class SchedulerService:
                             realtime_quotes[code] = _pre_fetched_realtime_quotes[code]
                         else:
                             missing_codes.append(code)
-                    # 盘中时段：任何缺失实时数据的股票都不应参与策略判断
+                    # 少数股票缺失（停牌等）→ 跳过，不影响整体筛选
                     if is_trading_hours() and missing_codes:
-                        raise RuntimeError(
-                            f"盘中时段需要实时行情数据，但 {len(missing_codes)}/{len(stock_codes)} 只股票缺失当日实时数据：{missing_codes[:5]}。"
-                            "请检查 SDK 连接状态或 TGW 连接数，确认数据源正常后再执行策略。"
-                        )
+                        import logging
+                        logging.getLogger("scheduler").warning(
+                            f"策略执行: {len(missing_codes)}/{len(stock_codes)} 只股票无实时行情，跳过: {missing_codes[:5]}")
                     return lds.get_kline_spliced(stock_codes, lookback=lookback, realtime_quotes=realtime_quotes if realtime_quotes else None)
 
                 # ⑤b 智能 K 线获取：根据交易时段自动选择数据源
@@ -1768,14 +1767,13 @@ class SchedulerService:
                         # 盘后：直接返回本地数据
                         raw = lds.get_batch_kline(stock_codes, limit=lookback)
                     else:
-                        # 盘中：必须全部有预取实时数据
+                        # 盘中：跳过缺失实时数据的股票（停牌等）
                         realtime_quotes = {code: data for code, data in _pre_fetched_realtime_quotes.items() if code in stock_codes}
                         missing = [c for c in stock_codes if c not in realtime_quotes]
                         if missing:
-                            raise RuntimeError(
-                                f"盘中时段需要实时行情数据，但 {len(missing)}/{len(stock_codes)} 只股票缺失当日实时数据：{missing[:5]}。"
-                                "请检查 SDK 连接状态或 TGW 连接数，确认数据源正常后再执行策略。"
-                            )
+                            import logging
+                            logging.getLogger("scheduler").warning(
+                                f"策略执行: {len(missing)}/{len(stock_codes)} 只股票无实时行情，跳过: {missing[:5]}")
                         raw = lds.get_kline_spliced(stock_codes, lookback=lookback, realtime_quotes=realtime_quotes)
 
                     # DataFrame → List[Dict] 转换，兼容策略代码
