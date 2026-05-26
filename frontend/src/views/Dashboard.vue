@@ -536,8 +536,26 @@ const formatNumber = (num) => {
 
 // 自动刷新定时器
 let refreshTimer = null
+let healthTimer = null
 let abortController = null
-const REFRESH_INTERVAL = 300000 // 5 分钟（仅刷新业务数据，不触发 SDK 健康检查）
+const REFRESH_INTERVAL = 300000 // 5 分钟（业务数据全量刷新）
+const HEALTH_INTERVAL = 30000  // 30 秒（仅数据通道状态）
+
+// 轻量轮询：仅刷新数据通道状态，不触发 SDK 调用
+const refreshHealthStatus = async () => {
+  try {
+    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/dashboard`)
+    if (!res.ok) return
+    const data = await res.json()
+    if (data.data_sources_status) {
+      dataSources.value = data.data_sources_status.map(ds => ({ ...ds, _checking: ds.status === 'checking' }))
+    }
+    if (data.system_health) {
+      healthStatus.value = data.system_health.status || 'unknown'
+      sdkIssues.value = data.system_health.issues || []
+    }
+  } catch { /* 静默 */ }
+}
 
 onMounted(async () => {
   abortController = new AbortController()
@@ -545,14 +563,15 @@ onMounted(async () => {
     accountStore.loadAccounts(),
     loadDashboard(false, abortController.signal)
   ])
-  // 每 5 分钟自动刷新（业务数据，不阻塞）
   refreshTimer = setInterval(() => loadDashboard(true), REFRESH_INTERVAL)
+  healthTimer = setInterval(refreshHealthStatus, HEALTH_INTERVAL)
 })
 
 onUnmounted(() => {
   abortController?.abort()
   if (uptimeTimer) clearInterval(uptimeTimer)
   if (refreshTimer) clearInterval(refreshTimer)
+  if (healthTimer) clearInterval(healthTimer)
 })
 </script>
 
