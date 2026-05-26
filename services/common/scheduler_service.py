@@ -1590,6 +1590,11 @@ class SchedulerService:
             logger.error(f"任务 {task_id} 不存在")
             return
 
+        # 防止重复启动：如果任务已是 running 状态，跳过
+        if not force and task.get("last_status") == "running":
+            logger.info(f"任务 {task_id} 已在运行中，跳过重复执行")
+            return
+
         task_type = task.get("task_type", "strategy")
 
         # 交易日检查：require_trading_day=1 且今天不是交易日时跳过执行
