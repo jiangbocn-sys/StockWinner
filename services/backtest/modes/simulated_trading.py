@@ -57,6 +57,7 @@ class SimulatedTradingEngine:
         self.initial_cash = initial_cash  # 分段回测用：上一段继承的现金
         self.liquidate_at_end = liquidate_at_end  # 是否在段末清仓
         self._pending_signals: List[Dict] = []  # 当日策略信号，次日执行
+        self._sold_today = False  # 当日是否有卖出
 
         # 策略类型检测
         self.is_code_strategy = strategy_config.get("strategy_type") == "python"
@@ -227,6 +228,7 @@ class SimulatedTradingEngine:
             return
 
         prices = {code: d["close"] for code, d in ohlc_data.items()}
+        self._sold_today = False
 
         # 2. 执行前一日pending买入信号（T日执行T-1日生成的信号）
         self._execute_pending_buys(trade_date, prices, ohlc_data)
@@ -238,8 +240,9 @@ class SimulatedTradingEngine:
         for code, price in prices.items():
             self.execution.update_position_mark(code, price)
 
-        # 5. 盘后选股：生成次日买入信号
-        self._check_buy_signals(trade_date, prices)
+        # 5. 盘后选股：仓位已满且当日无卖出时跳过扫描
+        if not self._sold_today and not self._is_position_full():
+            self._check_buy_signals(trade_date, prices)
 
         # 6. 记录当日净值
         self._record_nav(trade_date, prices)
@@ -279,14 +282,17 @@ class SimulatedTradingEngine:
 
             # Priority 1: 固定止盈止损
             if self._check_fixed_stop(code, price, pos, trade_date, prev_close, ohlc):
-                continue  # 已卖出
+                self._sold_today = True
+                continue
 
             # Priority 2: 移动止盈
             if self._check_trailing_stop(code, price, pos, trade_date, prev_close, ohlc):
+                self._sold_today = True
                 continue
 
             # Priority 3: 策略代码型卖出信号
             if self._check_strategy_sell(code, price, pos, trade_date, prev_close):
+                self._sold_today = True
                 continue
 
     def _check_fixed_stop(
@@ -491,6 +497,10 @@ class SimulatedTradingEngine:
 
         # 已执行的信号从pending中移除
         self._pending_signals = [s for s in self._pending_signals if s["stock_code"] not in executed]
+
+    def _is_position_full(self) -> bool:
+        """仓位已满（资金不足或持仓数达上限）"""
+        return not self._has_buy_capacity()
 
     def _has_buy_capacity(self) -> bool:
         """判断是否有买入空间（资金 + 仓位数量）"""
