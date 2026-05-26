@@ -1590,8 +1590,8 @@ class SchedulerService:
             logger.error(f"任务 {task_id} 不存在")
             return
 
-        # 防止重复启动：如果任务已是 running 状态，跳过
-        if not force and task.get("last_status") == "running":
+        # 防止重复启动：如果任务已是 running 状态，无论手动/自动都跳过
+        if task.get("last_status") == "running":
             logger.info(f"任务 {task_id} 已在运行中，跳过重复执行")
             return
 
@@ -1610,11 +1610,15 @@ class SchedulerService:
                 return
 
         try:
-            # 更新任务状态为 running
-            await db.execute(
-                "UPDATE strategy_tasks SET last_run_at = ?, last_status = 'running' WHERE id = ?",
+            # 原子 CAS：last_status != 'running' 才更新，防止并发重复执行
+            result = await db.execute(
+                "UPDATE strategy_tasks SET last_run_at = ?, last_status = 'running' "
+                "WHERE id = ? AND last_status != 'running'",
                 (get_china_time().isoformat(), task_id)
             )
+            if getattr(result, 'rowcount', 1) == 0:
+                logger.info(f"任务 {task_id} 已被其他请求抢占执行，跳过")
+                return
 
             if task_type == "builtin":
                 # 内置功能任务
