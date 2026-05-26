@@ -468,39 +468,24 @@ async def get_local_kline(
                 "amount": float(r["amount"]) if r["amount"] else 0,
             })
 
-        # 交易时段拼接当日实时 K 线（周一~周五 9:30~15:00）
-        weekday = end_dt.weekday()  # 0=Mon .. 4=Fri
-        now_time = end_dt.time()
-        is_trading_hours = (
-            weekday < 5
-            and dt_time(9, 30) <= now_time <= dt_time(15, 0)
-        )
-        if is_trading_hours and not seen_today:
+        # 拼接当日实时 K 线（从 PriceCache 取，不调 SDK）
+        if not seen_today:
             try:
-                from services.trading.gateway import get_gateway
-                gateway = await get_gateway()
-                today_kline = await gateway.get_kline_data(
-                    stock_code=stock_code,
-                    period="day",
-                    start_date=today_str.replace("-", ""),
-                    end_date=today_str.replace("-", ""),
-                    limit=1,
-                )
-                if today_kline and len(today_kline) > 0:
-                    row = today_kline[0]
+                from services.common.price_cache import get_price_cache
+                cache = get_price_cache()
+                ohlcv = cache.get_ohlcv(stock_code)
+                if ohlcv and ohlcv.get('close', 0) > 0:
                     kline.append({
                         "trade_date": today_str.replace("-", ""),
-                        "open": float(row.get("open", 0)),
-                        "close": float(row.get("close", 0)),
-                        "low": float(row.get("low", 0)),
-                        "high": float(row.get("high", 0)),
-                        "volume": float(row.get("volume", 0)),
-                        "amount": float(row.get("amount", 0)),
+                        "open": ohlcv.get('open', ohlcv.get('close', 0)),
+                        "close": ohlcv.get('close', 0),
+                        "low": ohlcv.get('low', ohlcv.get('close', 0)),
+                        "high": ohlcv.get('high', ohlcv.get('close', 0)),
+                        "volume": ohlcv.get('volume', 0),
+                        "amount": ohlcv.get('amount', 0),
                     })
-            except Exception as e:
-                # SDK 拼接失败不影响返回历史数据
-                import logging
-                logging.getLogger("market_data").debug(f"拼接当日 K 线失败: {e}")
+            except Exception:
+                pass
 
         return {"success": True, "stock_code": stock_code, "kline": kline, "count": len(kline)}
     except Exception as e:
