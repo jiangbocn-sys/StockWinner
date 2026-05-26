@@ -457,7 +457,20 @@
       <el-dialog v-model="showTradingDialog" title="新建交易策略" width="500px">
         <el-form :model="newTrading" label-width="120px">
           <el-form-item label="股票代码" required>
-            <el-input v-model="newTrading.stock_code" placeholder="如：600000.SH" />
+            <el-autocomplete
+              v-model="newTrading.stock_code"
+              :fetch-suggestions="searchStocksTrading"
+              placeholder="输入代码/名称/拼音"
+              :debounce="300"
+              value-key="stock_code"
+              clearable
+              @select="onTradingStockSelect"
+            >
+              <template #default="{ item }">
+                <span style="font-weight:500;min-width:90px">{{ item.stock_code }}</span>
+                <span style="color:#909399;margin-left:8px">{{ item.stock_name }}</span>
+              </template>
+            </el-autocomplete>
           </el-form-item>
           <el-form-item label="建仓价">
             <el-input-number v-model="newTrading.entry_price" :min="0" :precision="2" />
@@ -1973,6 +1986,18 @@ const loadTradingStrategies = async () => {
 }
 
 // 保存交易策略
+const searchStocksTrading = async (query, cb) => {
+  if (!query || query.trim().length < 2) { cb([]); return }
+  try {
+    const resp = await fetch(`/api/v1/ui/stocks/search?q=${encodeURIComponent(query.trim())}&limit=10`)
+    const data = await resp.json()
+    cb(data.stocks || [])
+  } catch { cb([]) }
+}
+const onTradingStockSelect = (item) => {
+  newTrading.stock_name = item.stock_name || ''
+}
+
 const saveTradingStrategy = async () => {
   if (!newTrading.stock_code) {
     ElMessage.warning('请输入股票代码')
@@ -1981,10 +2006,18 @@ const saveTradingStrategy = async () => {
 
   savingTrading.value = true
   try {
-    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/trading-strategies`, {
+    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/trading-strategies/stock`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(newTrading)
+      body: JSON.stringify({
+        stock_code: newTrading.stock_code,
+        entry_price: newTrading.entry_price || null,
+        stop_loss_price: newTrading.stop_loss_price || null,
+        take_profit_price: newTrading.take_profit_price || null,
+        stop_loss_pct: newTrading.stop_loss_pct,
+        take_profit_pct: newTrading.take_profit_pct,
+        max_trade_quantity: newTrading.max_trade_quantity || null,
+      })
     })
     const data = await res.json()
     if (data.success) {
