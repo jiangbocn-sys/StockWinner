@@ -103,6 +103,21 @@
                     <el-radio-button value="bought">已买入</el-radio-button>
                     <el-radio-button value="sold">已卖出</el-radio-button>
                   </el-radio-group>
+                  <el-autocomplete
+                    v-model="stockQuickSearch"
+                    :fetch-suggestions="searchStocksForAdd"
+                    placeholder="输入代码/名称定位股票"
+                    :debounce="300"
+                    size="small"
+                    style="width: 200px;"
+                    clearable
+                    @select="onQuickSearchSelect"
+                  >
+                    <template #default="{ item }">
+                      <span style="font-weight:500;min-width:90px">{{ item.stock_code }}</span>
+                      <span style="color:#909399;margin-left:8px">{{ item.stock_name }}</span>
+                    </template>
+                  </el-autocomplete>
                   <el-button v-if="selectedGroupId" type="success" size="small" @click="showAddStockDialog = true">
                     <el-icon><Plus /></el-icon>
                     添加
@@ -1039,6 +1054,34 @@ const nextStock = async () => {
 }
 
 // 搜索股票（智能搜索：代码/拼音/名称）
+// 股票快速定位搜索
+const stockQuickSearch = ref('')
+const onQuickSearchSelect = (item) => {
+  const found = currentStocks.value.find(s => s.stock_code === item.stock_code)
+  if (found) {
+    // 在列表中 → 筛选显示
+    filterStatus.value = ''
+    // 将匹配的股票排到当前页第一位
+    const idx = currentStocks.value.findIndex(s => s.stock_code === item.stock_code)
+    if (idx >= 0) {
+      currentPage.value = Math.floor(idx / pageSize) + 1
+    }
+    ElMessage.success(`${item.stock_code} 已在当前分组中`)
+  } else {
+    // 不在列表中 → 询问添加
+    ElMessageBox.confirm(
+      `${item.stock_code} ${item.stock_name} 不在当前分组中，是否添加？`,
+      '添加股票',
+      { confirmButtonText: '添加', cancelButtonText: '取消', type: 'info' }
+    ).then(() => {
+      showAddStockDialog.value = true
+      addStockForm.selectedStockCode = item.stock_code
+      addStockForm.stock_name = item.stock_name
+    }).catch(() => {})
+  }
+  stockQuickSearch.value = ''
+}
+
 const searchStocksForAdd = async (query) => {
   if (!query || query.length < 1) {
     stockSearchResults.value = []
