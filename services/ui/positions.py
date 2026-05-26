@@ -195,23 +195,31 @@ async def get_positions(
 
     if stock_code:
         positions = await db.fetchall(
-            """SELECT p.*, w.stop_loss_price, w.take_profit_price
+            """SELECT p.*,
+                      COALESCE(t.stop_loss_price, w.stop_loss_price) as stop_loss_price,
+                      COALESCE(t.take_profit_price, w.take_profit_price) as take_profit_price
                FROM stock_positions p
                LEFT JOIN (SELECT account_id, stock_code, stop_loss_price, take_profit_price
                           FROM watchlist WHERE is_active = 1
                           GROUP BY account_id, stock_code) w
                  ON p.account_id = w.account_id AND p.stock_code = w.stock_code
+               LEFT JOIN trading_strategies t
+                 ON p.account_id = t.account_id AND p.stock_code = t.stock_code
                WHERE p.account_id = ? AND p.stock_code = ? AND p.quantity > 0""",
             (account_id, stock_code)
         )
     else:
         positions = await db.fetchall(
-            """SELECT p.*, w.stop_loss_price, w.take_profit_price
+            """SELECT p.*,
+                      COALESCE(t.stop_loss_price, w.stop_loss_price) as stop_loss_price,
+                      COALESCE(t.take_profit_price, w.take_profit_price) as take_profit_price
                FROM stock_positions p
                LEFT JOIN (SELECT account_id, stock_code, stop_loss_price, take_profit_price
                           FROM watchlist WHERE is_active = 1
                           GROUP BY account_id, stock_code) w
                  ON p.account_id = w.account_id AND p.stock_code = w.stock_code
+               LEFT JOIN trading_strategies t
+                 ON p.account_id = t.account_id AND p.stock_code = t.stock_code
                WHERE p.account_id = ? AND p.quantity > 0 ORDER BY p.stock_code""",
             (account_id,)
         )
