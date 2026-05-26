@@ -245,6 +245,8 @@ async def download_all_kline_data(
     downloaded_count = 0
     failed_count = 0
     global_progress = 0
+    consecutive_failures = 0
+    MAX_CONSECUTIVE_FAILURES = 3  # 连续失败 N 批则中止下载
 
     for market in market_order:
         mkt_stocks = markets[market]
@@ -303,6 +305,13 @@ async def download_all_kline_data(
             except Exception as e:
                 print(f"[LocalData] [{market}] 批次 {i//mkt_batch_size + 1} 下载失败：{e}")
                 failed_count += len(batch)
+                consecutive_failures += 1
+                if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                    print(f"[LocalData] 连续 {MAX_CONSECUTIVE_FAILURES} 批失败，中止下载（可能 SDK 连接异常）")
+                    tracker.set_status_sync(DownloadStatus.ERROR, f"连续 {MAX_CONSECUTIVE_FAILURES} 批下载失败，已中止")
+                    return False
+            else:
+                consecutive_failures = 0  # 成功则重置计数器
 
     # 计算因子（可选，后续 NightTaskQueue 会将此作为独立步骤）
     if calculate_factors and downloaded_count > 0:
