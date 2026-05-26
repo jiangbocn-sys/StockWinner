@@ -468,7 +468,7 @@ class StrategyEngine:
 
         # 2. 查询账户下所有待交易/监控中的股票（不限组，用于跨组去重）
         existing_rows = await db.fetchall(
-            "SELECT stock_code, trigger_price, stop_loss_price, take_profit_price FROM watchlist WHERE account_id = ? AND status IN ('pending', 'watching')",
+            "SELECT stock_code, trigger_price, stop_loss_price, take_profit_price, status FROM watchlist WHERE account_id = ? AND status IN ('pending', 'watching')",
             (account_id,)
         )
         existing = {row["stock_code"]: row for row in existing_rows}
@@ -494,13 +494,14 @@ class StrategyEngine:
 
             if code in existing:
                 old = existing[code]
+                old_status = old.get("status")
                 old_price = old.get("trigger_price")
 
-                # 新价格更优的判断：
-                # 1. 原信号无价格但新信号有 → 更新
-                # 2. 新旧都有价格，新价格更低 → 更新
-                # 3. 否则保留原信号
-                if new_price and not old_price:
+                # watching 状态：新信号直接升为 pending（突破/首次触发）
+                if old_status != 'pending':
+                    should_update = True
+                # pending 状态：价格比较——新价更低（更优）才更新
+                elif new_price and not old_price:
                     should_update = True
                 elif new_price and old_price and new_price < old_price:
                     should_update = True
