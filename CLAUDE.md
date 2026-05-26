@@ -51,44 +51,121 @@ curl http://localhost:8080/api/v1/ui/accounts
 ## Architecture
 
 ### Backend Structure (services/)
-- **main.py**: FastAPI app entry point, router registration, lifespan management
+- **boot/**: App entry point, lifespan (startup/shutdown), middleware, router registration
 - **common/**: Shared utilities
-  - `database.py`: SQLite async database manager (WAL mode)
-  - `sdk_manager.py`: Centralized AmazingData SDK instance management (singleton pattern - avoids TGW connection limits)
-  - `sdk_connection_manager.py`: Rate limiting for SDK queries (semaphore-based)
-  - `account_manager.py`: Multi-account management
-  - `technical_indicators.py`: MA, RSI, MACD, BOLL, KDJ, ATR, CCI, ADX
-  - `timezone.py`: China timezone (Asia/Shanghai) utilities
-- **trading/gateway.py**: Trading gateway abstraction with AmazingData/银河 SDK implementations
-- **screening/**: Stock screening service with factor registry
-- **monitoring/**: Trading signal monitoring service
-- **ui/**: REST API endpoints for frontend (accounts, dashboard, positions, trades, strategies, screening, monitoring, market_data, data_explorer, factors)
-- **auth/**: User authentication service
-- **account_management/**: Broker account management API
-- **strategy/**: Strategy management API
-- **llm/**: LLM integration for strategy generation
-- **data/**: Local data service and download utilities
-- **factors/**: Factor calculators (daily, monthly, fundamental)
+  - `database.py`: SQLite async/sync connection managers (WAL mode, busy_timeout)
+  - `sdk_manager.py`: SDK 调用入口单例，所有 SDK 数据查询通过 IPC 代理 → 子进程
+  - `sdk_proxy_client.py`: IPC 客户端（Unix socket），自动重连，RLock 串行化
+  - `sdk_subprocess_server.py`: SDK 子进程服务端，login + 所有 SDK 调用
+  - `sdk_connection_manager.py`: TGW 连接生命周期管理（按需连接+grace period 释放）
+  - `sdk_ipc.py`: IPC 协议定义（base64 pickle 序列化 DataFrame）
+  - `price_cache.py`: 内存 OHLCV 行情缓存，source 标记 + TTL 管理
+  - `structured_logger.py`: 结构化日志（JSON 格式）
+  - `timezone.py`: 中国时区（唯一合法来源，禁止各模块自己定义）
+  - `stock_code.py`: 股票代码规范化
+  - `task_manager.py`: 后台任务状态管理
+- **trading/**: 交易网关
+  - `gateway.py`: 门面，委托给子服务模块
+  - `gateway_dispatcher.py`: 行情调度器，管理订阅/去重/批量刷新/PriceCache 写入
+  - `market_data_service.py`: 行情数据（缓存优先→并发 SDK+备用→kline.db 兜底）
+  - `kline_service.py`: K 线数据
+  - `trading_hours.py`: 交易时间判断（日历缓存 24h）
+  - `models.py`: MarketData, OrderResult, TradingGatewayInterface
+- **monitoring/**: 交易监控
+  - `service.py`: 监控循环（60s 刷新全量 watchlist+持仓），委托给子模块
+  - `signal_evaluator.py`: 信号评估（三层策略优先级）
+  - `signal_executor.py`: 信号执行
+  - `price_cache_manager.py`: 持仓盈亏刷新+DB 刷盘
+  - `health_tracker.py`: SDK 健康跟踪
+- **ui/**: FastAPI 端点
+  - `dashboard.py`: 仪表盘（数据源并行健康检测）
+  - `positions.py`: 持仓分析（JOIN watchlist 止盈止损价）
+  - `screening.py`: 选股监控（缓存优先+后台异步刷新）
+  - `market_data.py`: 行情查询+K 线拼接
+  - `trading_strategies.py`: 个股止损止盈（trading_strategies 表）
+  - `trades.py`: 交易策略配置（trading_strategy_config 表）
+- **data/**: 数据下载+多数据源 Provider
+  - `data_download.py`: K 线增量下载（连续失败 3 批自动中止）
+  - `local_data_service.py`: 本地 K 线保存/查询
+  - `providers/`: AmazingData/Eastmoney/Tushare/Sina/Tencent/AKShare
 
-### Frontend Structure (frontend/src/)
-- Vue 3 + Vite + Element Plus + Pinia + Vue Router + ECharts
-- **views/**: Dashboard, Trades, Positions, Strategies, DataExplorer, Watchlist, Signals, Accounts, Settings, Login
-- **components/**: Reusable Vue components
-- **router/**: Route definitions with auth guards
-- **stores/**: Pinia state management
+### SDK 子进程隔离架构（核心）
 
-### Database Tables
-Located in `data/stockwinner.db` (core business) and `data/kline.db` (market data):
-- `accounts`: Account information and credentials
-- `positions`: Holdings records
-- `trades`: Trade history
-- `strategies`: Investment strategies
-- `watchlist`: Watch list
-- `candidate_stocks`: Screening candidates
-- `trading_signals`: Trade signals
-- `stock_daily_factors`: Daily factors (~5.8M records)
-- `stock_monthly_factors`: Monthly factors (~290K records)
-- `kline_data`: K-line historical data
+```
+主进程 (FastAPI)
+  └─ SDKManager → SDKProxyClient (IPC, RLock 串行化)
+       └─ Unix socket (/tmp/stockwinner_sdk.sock)
+            └─ SDK 子进程 (sdk_subprocess_server.py)
+                 └─ AmazingData SDK → TGW TCP (单用户单连接)
+```
+
+关键约束：
+- **TGW 单连接限制**：所有 SDK 调用必须串行化，RLock 确保不重入死锁
+- **Snapshot 永久禁用**：pandas 2.x 不兼容 'S' 频率别名，snapshot 已默认跳过
+- **Kline fallback**：所有实时行情通过日 K 线（period=10008）获取，batch 200 只/次
+- **asyncio.to_thread**：所有 async 路径的 SDK 调用必须包装在线程池中，防止阻塞事件循环
+- **is_connected 不重连**：只检查状态，不自动重连（避免主线程死锁），重连由 _call_ipc 内部完成
+- **子进程生命周期**：kill -9 直接发 TCP RST 释放 TGW 连接槽，start_backend.sh 重启时强杀清理
+
+### 数据源架构
+
+```
+GatewayDispatcher._query_sdk(codes)
+  ├─ ① snapshot: 已永久跳过 (pandas 不兼容)
+  ├─ ② kline fallback: SDK query_kline(period=day, batch=200)
+  │      → _build_market_data_from_kline() → MarketData(source="kline")
+  └─ ③ kline.db 兜底: 仅非交易时段，source="kline_db"
+       → _write_to_price_cache() → PriceCache
+```
+
+### PriceCache 行情缓存
+
+- 线程安全的内存 OHLCV 单例，全局共享（不按账户隔离）
+- `source` 标记：`snapshot`(3) > `kline`(2) > `kline_db`(1)，低优先级不覆盖高优先级
+- TTL：交易时段 600s，非交易时段 43200s
+- `is_tradable()`：策略执行只使用 source=snapshot/kline 的数据，kline_db 不可用于交易决策
+- 更新路径：
+  1. Monitor 循环（每 60s 刷新全量 watchlist+持仓）
+  2. UI 后台异步刷新（用户打开页面时按需触发）
+  3. 启动预热（持仓+活跃 watchlist，一次）
+
+### K 线拼接
+
+`GET /stocks/{code}/kline-local` 端点：
+- 从 kline.db 读历史数据
+- 当日数据从 PriceCache 拼接（不调 SDK）
+- 若 PriceCache 中 OHLC 全等（不完整日线），跳过当日拼接
+
+### 监控策略三层结构
+
+```
+_evaluate_sell_decision (每只股票):
+  ① 个股止损止盈 (trading_strategies 表) — 优先级最高
+     ├─ trailing_stop: 最高价 × (1-take_profit_pct)
+     ├─ stop_loss_pct: avg_cost × (1-stop_loss_pct)
+     └─ fixed: 固定 stop_loss_price / take_profit_price
+  ② 代码卖出策略 (strategies 表) — 中间层
+  ③ watchlist 止盈止损 (watchlist 表) — 兜底
+
+evaluate_trading_strategies (股票池):
+  → trading_strategy_config 表 → 条件评估 → 批量买卖
+```
+
+### 策略表区分
+
+| 表 | 用途 | UI 标签 |
+|---|------|--------|
+| `trading_strategies` | 个股止损止盈（固定价/百分比/移动止损）| 策略管理→"个股止损止盈" |
+| `trading_strategy_config` | 代码策略的条件配置（股票池级别）| 策略管理→"代码策略" |
+| `watchlist` | 候选股止损止盈价（仅固定价格）| 选股监控 |
+
+### 前端性能
+
+- **Pinia stores**：positions/dashboard/watchlist 数据跨页面持久化，切标签不重载
+- **AbortController**：组件卸载时取消未完成的 fetch，防止快速切换竞争
+- **轮询间隔**：持仓/自选静默刷新 10s→30s
+- **并行加载**：Dashboard onMounted 中 loadAccounts+loadDashboard 并行
+- **健康检测并行**：6 个数据源并行检测→完成即更新缓存→逐个亮灯
 
 ## Key Patterns
 
