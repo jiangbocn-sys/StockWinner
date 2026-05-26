@@ -33,6 +33,8 @@ class Subscription:
     priority: int = 2               # 1=高(监控), 2=中(UI), 3=低(后台)
 
 
+_snapshot_permanently_disabled = False  # 模块级：进程生命周期内不重置
+
 class GatewayDispatcher:
     """行情刷新调度器 — 作为 gateway 的内部组件
 
@@ -58,7 +60,7 @@ class GatewayDispatcher:
         self._consecutive_errors = 0
         self._last_data_time: Optional[str] = None
         self._data_stale = False
-        self._snapshot_disabled = False     # pandas 2.x 不兼容，首次失败后永久跳过
+        pass
 
     def _get_lock(self) -> asyncio.Lock:
         """延迟初始化 Lock，支持事件循环切换"""
@@ -211,7 +213,8 @@ class GatewayDispatcher:
         all_snapshots: Dict[str, Any] = {}
 
         # ① 优先尝试 snapshot（首次失败后永久跳过——pandas 2.x 不兼容）
-        if not self._snapshot_disabled and await asyncio.to_thread(sdk_mgr.connect):
+        global _snapshot_permanently_disabled
+        if not _snapshot_permanently_disabled and await asyncio.to_thread(sdk_mgr.connect):
             for i in range(0, len(codes), self._sdk_batch_size):
                 batch = codes[i:i + self._sdk_batch_size]
                 result = await asyncio.to_thread(
@@ -230,7 +233,8 @@ class GatewayDispatcher:
                                     batch_valid += 1
                 # 首批返回空 → snapshot 不可用，永久禁用
                 if i == 0 and batch_valid == 0:
-                    self._snapshot_disabled = True
+                    global _snapshot_permanently_disabled
+                    _snapshot_permanently_disabled = True
                     get_logger("dispatcher").log_event("snapshot_disabled",
                         "snapshot 不可用（pandas 2.x 不兼容），已永久禁用，后续直接走 kline fallback")
                     break
