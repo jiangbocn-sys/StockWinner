@@ -121,22 +121,31 @@ class TradingMonitor:
         db = get_db_manager()
         log = get_logger("monitor")
 
-        # 收集所有需要刷新的股票：活跃 watchlist（全部状态）+ 持仓
+        # 收集所有需要刷新的股票：全账户去重，不按用户区分
         monitoring_codes: set = set()
         account_stocks: Dict[str, set] = {}
+        try:
+            # 全部活跃 watchlist 股票（跨账户去重）
+            wl = await db.fetchall("SELECT DISTINCT stock_code FROM watchlist WHERE is_active = 1")
+            all_wl_codes = {r["stock_code"] for r in wl}
+            # 全部持仓股
+            pos = await db.fetchall("SELECT DISTINCT stock_code FROM stock_positions WHERE quantity > 0")
+            all_pos_codes = {r["stock_code"] for r in pos}
+            monitoring_codes = all_wl_codes | all_pos_codes
+        except Exception:
+            pass
+
+        # 每个账户分发时只传该账户实际有持仓/watchlist的股票
         for acct_id in account_ids:
             if not self._running:
                 return
             codes = set()
             try:
-                # 全部活跃 watchlist 股票
                 wl = await db.fetchall(
-                    "SELECT DISTINCT stock_code FROM watchlist "
-                    "WHERE account_id = ? AND is_active = 1",
+                    "SELECT DISTINCT stock_code FROM watchlist WHERE account_id = ? AND is_active = 1",
                     (acct_id,),
                 )
                 codes.update(r["stock_code"] for r in wl)
-                # 持仓股
                 pos = await db.fetchall(
                     "SELECT stock_code FROM stock_positions WHERE account_id = ? AND quantity > 0",
                     (acct_id,),
@@ -145,7 +154,6 @@ class TradingMonitor:
             except Exception:
                 pass
             account_stocks[acct_id] = codes
-            monitoring_codes.update(codes)
 
         if not monitoring_codes:
             return
