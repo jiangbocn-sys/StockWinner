@@ -195,12 +195,18 @@ async def get_positions(
 
     if stock_code:
         positions = await db.fetchall(
-            "SELECT * FROM stock_positions WHERE account_id = ? AND stock_code = ? AND quantity > 0",
+            """SELECT p.*, w.stop_loss_price, w.take_profit_price
+               FROM stock_positions p
+               LEFT JOIN watchlist w ON p.account_id = w.account_id AND p.stock_code = w.stock_code
+               WHERE p.account_id = ? AND p.stock_code = ? AND p.quantity > 0""",
             (account_id, stock_code)
         )
     else:
         positions = await db.fetchall(
-            "SELECT * FROM stock_positions WHERE account_id = ? AND quantity > 0 ORDER BY stock_code",
+            """SELECT p.*, w.stop_loss_price, w.take_profit_price
+               FROM stock_positions p
+               LEFT JOIN watchlist w ON p.account_id = w.account_id AND p.stock_code = w.stock_code
+               WHERE p.account_id = ? AND p.quantity > 0 ORDER BY p.stock_code""",
             (account_id,)
         )
 

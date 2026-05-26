@@ -106,6 +106,12 @@
               </span>
             </template>
           </el-table-column>
+          <el-table-column prop="stop_loss_price" label="止损价" width="100" align="right">
+            <template #default="{ row }">{{ row.stop_loss_price ? '¥' + Number(row.stop_loss_price).toFixed(2) : '-' }}</template>
+          </el-table-column>
+          <el-table-column prop="take_profit_price" label="止盈价" width="100" align="right">
+            <template #default="{ row }">{{ row.take_profit_price ? '¥' + Number(row.take_profit_price).toFixed(2) : '-' }}</template>
+          </el-table-column>
           <el-table-column label="操作" fixed="right" width="280">
             <template #default="{ row }">
               <el-button type="info" size="small" @click="handleDsaAnalysis(row)" :loading="dsaAnalyzing === row.stock_code">DSA 分析</el-button>
@@ -433,6 +439,8 @@ const holdingColumns = [
   { label: '市值', prop: 'market_value' },
   { label: '盈亏', prop: 'profit_loss' },
   { label: '盈亏比例', prop: 'profit_percent' },
+  { label: '止损价', prop: 'stop_loss_price' },
+  { label: '止盈价', prop: 'take_profit_price' },
 ]
 const closedColumns = [
   { label: '股票代码', prop: 'stock_code' },
