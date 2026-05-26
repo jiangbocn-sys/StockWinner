@@ -50,7 +50,7 @@ class GatewayDispatcher:
         self._stock_last_refresh: Dict[str, float] = {}  # stock_code → last refresh time
         self._min_refresh_gap: float = 25.0  # 同一股票最小刷新间隔
         self._tick_interval: float = 10.0    # 后台循环 tick 间隔
-        self._sdk_batch_size: int = 15       # 每批 SDK 查询股票数（snapshot 30s 超时限制）
+        self._sdk_batch_size: int = 100       # 每批 SDK 查询股票数（kline 可支持更大批次）
         self._loop_id: Optional[int] = None  # 记录当前事件循环 ID
         self._sdk_healthy = True
         self._sdk_error_time: Optional[str] = None
@@ -58,6 +58,7 @@ class GatewayDispatcher:
         self._consecutive_errors = 0
         self._last_data_time: Optional[str] = None
         self._data_stale = False
+        self._snapshot_disabled = False     # pandas 2.x 不兼容，首次失败后永久跳过
 
     def _get_lock(self) -> asyncio.Lock:
         """延迟初始化 Lock，支持事件循环切换"""
@@ -209,9 +210,8 @@ class GatewayDispatcher:
         today_int = int(get_china_time().strftime('%Y%m%d'))
         all_snapshots: Dict[str, Any] = {}
 
-        # ① 优先尝试 snapshot（首批失败则跳过剩余批次，走 kline fallback）
-        if await asyncio.to_thread(sdk_mgr.connect):
-            snapshot_working = True
+        # ① 优先尝试 snapshot（首次失败后永久跳过——pandas 2.x 不兼容）
+        if not self._snapshot_disabled and await asyncio.to_thread(sdk_mgr.connect):
             for i in range(0, len(codes), self._sdk_batch_size):
                 batch = codes[i:i + self._sdk_batch_size]
                 result = await asyncio.to_thread(
@@ -228,13 +228,13 @@ class GatewayDispatcher:
                                 if df is not None and hasattr(df, 'empty') and not df.empty:
                                     all_snapshots[code] = df
                                     batch_valid += 1
-                # 首批返回空 → snapshot 不可用（如 pandas 频率不兼容），跳过后面的批次
+                # 首批返回空 → snapshot 不可用，永久禁用
                 if i == 0 and batch_valid == 0:
-                    snapshot_working = False
-                    get_logger("dispatcher").log_event("snapshot_skip",
-                        f"首批 snapshot 返回空，跳过后面的 snapshot 批次，直接走 kline fallback")
+                    self._snapshot_disabled = True
+                    get_logger("dispatcher").log_event("snapshot_disabled",
+                        "snapshot 不可用（pandas 2.x 不兼容），已永久禁用，后续直接走 kline fallback")
                     break
-        # snapshot 失败时 all_snapshots 为空 → 所有 code 进入 snapshot_failed → 自动走 fallback
+        # snapshot 跳过/失败时 all_snapshots 为空 → 所有 code 走 kline fallback
 
         # 更新股票最后刷新时间
         now = time.time()
@@ -336,8 +336,8 @@ class GatewayDispatcher:
 
         results: Dict[str, Any] = {}
 
-        # 分批查询 K 线，每批 15 只
-        batch_size = 15
+        # 分批查询 K 线，每批 100 只
+        batch_size = 100
         for i in range(0, len(codes), batch_size):
             batch = codes[i:i + batch_size]
             if not await asyncio.to_thread(sdk_mgr.is_connected):

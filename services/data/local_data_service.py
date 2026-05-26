@@ -119,6 +119,8 @@ def get_trading_day_end_date(current_time: Optional[datetime] = None,
         return end_date, f"周末（{day_name}），使用周五 {end_date}"
 
 
+_stock_names_global_cache = None  # 股票名称全局缓存，避免下载时每批重复调 SDK
+
 class LocalKlineDataService:
     """本地 K 线数据服务"""
 
@@ -289,17 +291,22 @@ class LocalKlineDataService:
         if not kline_batch:
             return 0
 
-        # 先获取股票名称缓存（SDK 调用，不持有数据库连接）
-        stock_names_cache = {}
-        try:
-            from services.common.sdk_manager import get_sdk_manager
-            sdk_mgr = get_sdk_manager()
-            code_info = sdk_mgr.get_code_info(security_type='EXTRA_STOCK_A')
-            if code_info is not None:
-                for idx, row in code_info.iterrows():
-                    stock_names_cache[idx] = row.get('symbol', idx)
-        except Exception as e:
-            print(f"[LocalData] 获取股票名称失败：{e}，使用传入的股票名称")
+        # 股票名称全局缓存（一次下载只调一次 SDK，避免每批重复耗时 15s）
+        global _stock_names_global_cache
+        if _stock_names_global_cache is None:
+            try:
+                from services.common.sdk_manager import get_sdk_manager
+                sdk_mgr = get_sdk_manager()
+                code_info = sdk_mgr.get_code_info(security_type='EXTRA_STOCK_A')
+                if code_info is not None:
+                    _stock_names_global_cache = {}
+                    for idx, row in code_info.iterrows():
+                        _stock_names_global_cache[idx] = row.get('symbol', idx)
+                print(f"[LocalData] 股票名称缓存已加载：{len(_stock_names_global_cache or {})} 只")
+            except Exception as e:
+                print(f"[LocalData] 获取股票名称失败：{e}，使用传入的股票名称")
+                _stock_names_global_cache = {}  # 标记已尝试，不再重试
+        stock_names_cache = _stock_names_global_cache or {}
 
         conn = self._get_conn(timeout=60)
         cursor = conn.cursor()
