@@ -197,7 +197,10 @@ async def get_positions(
         positions = await db.fetchall(
             """SELECT p.*, w.stop_loss_price, w.take_profit_price
                FROM stock_positions p
-               LEFT JOIN watchlist w ON p.account_id = w.account_id AND p.stock_code = w.stock_code
+               LEFT JOIN (SELECT account_id, stock_code, stop_loss_price, take_profit_price
+                          FROM watchlist WHERE is_active = 1
+                          GROUP BY account_id, stock_code) w
+                 ON p.account_id = w.account_id AND p.stock_code = w.stock_code
                WHERE p.account_id = ? AND p.stock_code = ? AND p.quantity > 0""",
             (account_id, stock_code)
         )
@@ -205,7 +208,10 @@ async def get_positions(
         positions = await db.fetchall(
             """SELECT p.*, w.stop_loss_price, w.take_profit_price
                FROM stock_positions p
-               LEFT JOIN watchlist w ON p.account_id = w.account_id AND p.stock_code = w.stock_code
+               LEFT JOIN (SELECT account_id, stock_code, stop_loss_price, take_profit_price
+                          FROM watchlist WHERE is_active = 1
+                          GROUP BY account_id, stock_code) w
+                 ON p.account_id = w.account_id AND p.stock_code = w.stock_code
                WHERE p.account_id = ? AND p.quantity > 0 ORDER BY p.stock_code""",
             (account_id,)
         )
