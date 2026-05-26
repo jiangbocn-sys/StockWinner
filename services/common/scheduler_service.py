@@ -1642,7 +1642,6 @@ class SchedulerService:
                 # 代码型策略任务
                 from services.strategy.engine import get_strategy_engine
                 from services.common import technical_indicators
-                from services.trading.gateway import get_gateway
 
                 strategy = await db.fetchone("SELECT * FROM strategies WHERE id = ?", (task["strategy_id"],))
                 if not strategy:
@@ -1689,34 +1688,10 @@ class SchedulerService:
                                         'amount': ohlcv.get('amount', 0),
                                     }
 
-                        # ② 对 price_cache 中没有的股票，通过 gateway dispatcher 刷新
-                        missing_codes = [c for c in stock_codes if c not in _pre_fetched_realtime_quotes]
-                        if missing_codes:
-                            from services.trading.gateway import get_gateway
-                            gw = await get_gateway()
-                            sub_id = f"task:{task.get('id', 'unknown')}"
-                            gw.subscribe(sub_id, set(missing_codes), refresh_interval=0, priority=2)
-                            await gw.refresh_now(sub_id)
-                            gw.unsubscribe(sub_id)
-
-                            # 重新从 price_cache 读取（dispatcher 已写入）
-                            updated_ohlcv = cache.get_all_for_codes(set(missing_codes))
-                            for code in missing_codes:
-                                if code in updated_ohlcv:
-                                    ohlcv = updated_ohlcv[code]
-                                    if ohlcv.get('close', 0) > 0:
-                                        _pre_fetched_realtime_quotes[code] = {
-                                            'open': ohlcv.get('open', ohlcv['close']),
-                                            'high': ohlcv.get('high', ohlcv['close']),
-                                            'low': ohlcv.get('low', ohlcv['close']),
-                                            'close': ohlcv['close'],
-                                            'volume': ohlcv.get('volume', 0),
-                                            'amount': ohlcv.get('amount', 0),
-                                        }
-
                         cached_count = len([c for c in stock_codes if c in cached_ohlcv])
-                        sdk_count = len(_pre_fetched_realtime_quotes) - cached_count
-                        logger.info(f"预取实时行情: {len(_pre_fetched_realtime_quotes)}/{len(stock_codes)} 只（price_cache={cached_count}, dispatcher补充={sdk_count}）")
+                        missing_codes = [c for c in stock_codes if c not in _pre_fetched_realtime_quotes]
+                        logger.info(f"预取实时行情: {cached_count}/{len(stock_codes)} 只来自 PriceCache"
+                                    + (f"，{len(missing_codes)} 只缺失" if missing_codes else ""))
                     elif not is_trading_hours():
                         logger.info("非交易时段，跳过实时行情预取")
                 except Exception as e:
