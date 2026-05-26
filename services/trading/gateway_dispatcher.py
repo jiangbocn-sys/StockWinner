@@ -340,8 +340,6 @@ class GatewayDispatcher:
         batch_size = 200
         for i in range(0, len(codes), batch_size):
             batch = codes[i:i + batch_size]
-            if not await asyncio.to_thread(sdk_mgr.is_connected):
-                break
             result = await asyncio.to_thread(
                 sdk_mgr.query_kline,
                 code_list=batch,
