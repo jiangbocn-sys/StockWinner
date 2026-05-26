@@ -302,6 +302,12 @@ class GatewayDispatcher:
                 self._sdk_error_time = None
                 self._sdk_error_msg = ""
                 self._consecutive_errors = 0
+            # 数据流驱动：SDK kline 正常工作 → 标记 AmazingData 已连接
+            try:
+                from services.ui.dashboard import update_provider_status
+                update_provider_status("amazingdata", True)
+            except Exception:
+                pass
         elif len(codes) > 0:
             self._data_stale = True
             self._sdk_healthy = False

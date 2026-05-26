@@ -45,9 +45,21 @@ def get_uptime_text() -> str:
 
 
 async def _get_data_sources_status() -> list:
-    """返回数据源状态缓存（不阻塞，首次调用触发后台刷新）"""
-    await _ensure_data_sources_init()
+    """返回数据源状态缓存（仅读，不触发检测）"""
+    if not _data_sources_cache:
+        await _ensure_data_sources_init()
     return list(_data_sources_cache)
+
+
+def update_provider_status(provider_id: str, ok: bool, message: str = ""):
+    """数据流驱动：实际数据通过某 provider 后更新其状态"""
+    global _data_sources_cache
+    for item in _data_sources_cache:
+        if item.get("provider_id") == provider_id:
+            item["status"] = "connected" if ok else "error"
+            item["error_message"] = None if ok else message
+            item["last_check_time"] = get_china_time().isoformat()
+            return
 
 
 async def _refresh_data_sources_background():
@@ -118,44 +130,41 @@ async def _refresh_data_sources_background():
 
 
 async def _ensure_data_sources_init():
-    """首次调用返回占位符并触发后台刷新；后续调用触发异步刷新"""
+    """仅首次调用时初始化缓存+检测，后续不触发"""
     global _data_sources_cache
-    if not _data_sources_cache:
-        # 首次：构建占位符（checking 状态）
-        from services.data.channel.config_manager import get_all_provider_configs
-        from services.data.channel.router import get_channel_router
+    if _data_sources_cache:
+        return
 
+    from services.data.channel.config_manager import get_all_provider_configs
+    from services.data.channel.router import get_channel_router
+
+    try:
+        configs = await get_all_provider_configs()
+        registered = {}
         try:
-            configs = await get_all_provider_configs()
-            registered = {}
-            try:
-                registered = get_channel_router().get_providers()
-            except Exception:
-                pass
-
-            placeholders = []
-            for cfg in configs:
-                pid = cfg["provider_id"]
-                placeholders.append({
-                    "provider_id": pid,
-                    "display_name": cfg.get("display_name", pid),
-                    "is_enabled": bool(cfg.get("is_enabled", False)),
-                    "status": "checking",
-                    "error_message": None,
-                    "latency_ms": -1,
-                    "last_check_time": None,
-                })
-            _data_sources_cache = placeholders
+            registered = get_channel_router().get_providers()
         except Exception:
             pass
 
-        # 触发后台异步刷新，不阻塞
-        import asyncio
-        asyncio.create_task(_refresh_data_sources_background())
-    else:
-        # 已有缓存，也触发异步刷新（不阻塞返回）
-        import asyncio
-        asyncio.create_task(_refresh_data_sources_background())
+        placeholders = []
+        for cfg in configs:
+            pid = cfg["provider_id"]
+            placeholders.append({
+                "provider_id": pid,
+                "display_name": cfg.get("display_name", pid),
+                "is_enabled": bool(cfg.get("is_enabled", False)),
+                "status": "checking",
+                "error_message": None,
+                "latency_ms": -1,
+                "last_check_time": None,
+            })
+        _data_sources_cache = placeholders
+    except Exception:
+        pass
+
+    # 启动后做一次完整检测
+    import asyncio
+    asyncio.create_task(_refresh_data_sources_background())
 
 
 def check_sdk_connection() -> str:
