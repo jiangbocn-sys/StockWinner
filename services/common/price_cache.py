@@ -5,14 +5,24 @@
 - 监控循环/API 调用更新完整 OHLCV 行情
 - 策略任务直接从缓存取当日数据，无需再调 SDK snapshot
 - 每 15 分钟刷盘兜底
+- 容量上限：最多 10000 条股票记录，超出时清理最旧条目
 
 注意：行情是市场数据，与账户无关。缓存按 stock_code 索引，不按 account 隔离。
+
+资源管理文档：
+- MAX_SIZE = 10000 条股票（约 A 股全市场 5000+ 只的两倍）
+- 超过上限时，按 timestamp 清理最旧的条目
+- TTL 过期条目不自动清理，但在读取时跳过
 """
 
 import time
 import threading
 from typing import Dict, Optional, Any, Set
 from services.common.structured_logger import get_logger
+
+# 容量上限配置（记录到系统文档）
+PRICE_CACHE_MAX_SIZE = 10000  # 最多缓存 10000 只股票
+
 
 # 数据格式 — 存储完整 OHLCV
 class PriceEntry:
@@ -35,7 +45,13 @@ class PriceEntry:
 
 
 class PriceCache:
-    """线程安全的内存行情缓存（全局共享，不按账户隔离）"""
+    """线程安全的内存行情缓存（全局共享，不按账户隔离）
+
+    容量管理：
+    - MAX_SIZE = 10000 条股票上限
+    - 添加新条目时检查容量，超出则清理最旧的 100 条
+    - 清理在 update 方法中自动触发
+    """
 
     def __init__(self):
         self._lock = threading.Lock()
@@ -44,6 +60,30 @@ class PriceCache:
         self._flush_interval = 900  # 15 分钟
         self._last_flush = time.time()
         self._ttl = 600  # 缓存过期时间（秒），默认 10 分钟
+        self._max_size = PRICE_CACHE_MAX_SIZE
+
+    def _prune_if_exceeded(self):
+        """清理超限条目：按 timestamp 清理最旧的 100 条"""
+        if len(self._prices) <= self._max_size:
+            return 0
+
+        # 按时间戳排序，清理最旧的
+        entries = [(code, entry.timestamp) for code, entry in self._prices.items()]
+        entries.sort(key=lambda x: x[1])  # 升序
+
+        excess = len(self._prices) - self._max_size + 50  # 多清理 50 条，留缓冲空间
+        removed = 0
+        for i in range(min(excess, len(entries))):
+            code = entries[i][0]
+            del self._prices[code]
+            removed += 1
+
+        get_logger("price_cache").log_event(
+            "cache_prune",
+            f"PriceCache 容量超限，清理 {removed} 条最旧条目",
+            before=len(self._prices) + removed, after=len(self._prices), max_size=self._max_size
+        )
+        return removed
 
     def update(self, stock_code: str, price: float,
                open: float = 0, high: float = 0, low: float = 0,
@@ -52,6 +92,7 @@ class PriceCache:
         """更新单只股票行情（线程安全）
 
         保护机制：当新数据某字段为 0 但缓存中已有有效值时，保留旧值。
+        容量管理：新条目添加后检查是否超限，超出则清理最旧条目。
         """
         with self._lock:
             existing = self._prices.get(stock_code)
@@ -66,6 +107,9 @@ class PriceCache:
                 price=close, open=open, high=high, low=low,
                 close=close, volume=volume, amount=amount, change_pct=change_pct
             )
+            # 新条目添加后检查容量
+            if not existing:
+                self._prune_if_exceeded()
 
     def update_ohlcv(self, stock_code: str,
                      open: float, high: float, low: float, close: float,
@@ -75,6 +119,7 @@ class PriceCache:
 
         保护机制：当新数据某字段为 0 但缓存中已有有效值时，保留旧值，避免用 0 覆盖。
         source 优先级：snapshot > kline > kline_db。新数据 source 优先级低于已有数据时保留旧 source。
+        容量管理：新条目添加后检查是否超限。
         """
         _source_rank = {"snapshot": 3, "kline": 2, "kline_db": 1}
         with self._lock:
@@ -95,6 +140,9 @@ class PriceCache:
                 close=close, volume=volume, amount=amount, change_pct=change_pct,
                 source=source,
             )
+            # 新条目添加后检查容量
+            if not existing:
+                self._prune_if_exceeded()
 
     def update_batch(self, data: Dict[str, dict]):
         """批量更新行情
@@ -102,8 +150,10 @@ class PriceCache:
         OHLCV_dict 需包含: close(或 price), open, high, low, volume, amount, change_pct
 
         保护机制：当新数据某字段为 0 但缓存中已有有效值时，保留旧值。
+        容量管理：批量添加后检查是否超限。
         """
         with self._lock:
+            new_count = 0
             for code, item in data.items():
                 existing = self._prices.get(code)
                 if isinstance(item, dict):
@@ -126,6 +176,8 @@ class PriceCache:
                         close=close_val, volume=vol_val, amount=amt_val,
                         change_pct=item.get('change_pct', 0)
                     )
+                    if not existing:
+                        new_count += 1
                 elif isinstance(item, tuple) and len(item) >= 2:
                     price, change_pct = item[0], item[1]
                     if existing and existing.close > 0:
@@ -135,6 +187,10 @@ class PriceCache:
                         existing.timestamp = time.time()
                     else:
                         self._prices[code] = PriceEntry(price, change_pct=change_pct)
+                        new_count += 1
+            # 批量添加后检查容量
+            if new_count > 0:
+                self._prune_if_exceeded()
 
     def get(self, stock_code: str) -> Optional[float]:
         """获取最新价，未找到或过期返回 None"""
@@ -274,11 +330,15 @@ class PriceCache:
         self._ttl = max(seconds, 60)  # 最低 60 秒
 
     def get_stats(self) -> Dict[str, Any]:
-        """获取缓存统计"""
+        """获取缓存统计（含容量上限信息）"""
         with self._lock:
+            entries = len(self._prices)
             return {
-                "total_entries": len(self._prices),
+                "total_entries": entries,
+                "max_size": self._max_size,
+                "usage_pct": round(entries / self._max_size * 100, 1) if self._max_size > 0 else 0,
                 "last_flush_age_seconds": round(time.time() - self._last_flush, 0),
+                "ttl_seconds": self._ttl,
             }
 
     def is_tradable(self, stock_code: str, max_age: int = None) -> bool:

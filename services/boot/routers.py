@@ -8,6 +8,7 @@ from services.ui import (
     screening, monitoring, market_data, data_explorer,
     position_rules, factors, scheduler, notifications,
     trading_strategies, strategy_performance, data_service, data_sources,
+    capital,
 )
 from services.backtest.api import router as backtest_router
 from services.strategy.api import router as strategy_v2_router
@@ -40,6 +41,7 @@ def register_routers(app: FastAPI):
     app.include_router(notifications.router)
     app.include_router(strategy_performance.router)
     app.include_router(data_service.router)
+    app.include_router(capital.router)
     app.include_router(backtest_router)
     app.include_router(data_sources.router)
 

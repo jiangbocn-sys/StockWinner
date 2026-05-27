@@ -140,13 +140,10 @@
                 </template>
               </el-table-column>
               <el-table-column prop="created_at" label="创建时间" width="160" />
-              <el-table-column label="操作" width="320">
+              <el-table-column label="操作" width="270">
                 <template #default="{ row }">
                   <el-button type="primary" size="small" @click="editScreeningStrategy(row)">
                     编辑
-                  </el-button>
-                  <el-button type="info" size="small" @click="viewScreeningStrategy(row)">
-                    详情
                   </el-button>
                   <el-button
                     :type="row.status === 'active' ? 'warning' : 'success'"
@@ -211,9 +208,8 @@
                       <el-tag :type="getStatusType(row.status)" size="small">{{ getStatusText(row.status) }}</el-tag>
                     </template>
                   </el-table-column>
-                  <el-table-column label="操作" width="520">
+                  <el-table-column label="操作" width="470">
                     <template #default="{ row }">
-                      <el-button type="info" size="small" @click="viewCodeStrategy(row)">详情</el-button>
                       <el-button type="primary" size="small" @click="editCodeStrategy(row)">编辑</el-button>
                       <el-button type="warning" size="small" @click="testRunStrategy(row)">试运行</el-button>
                       <el-button :type="row.status === 'active' ? 'warning' : 'success'" size="small" @click="toggleScreeningStrategy(row)">
@@ -251,9 +247,8 @@
                       <el-tag :type="getStatusType(row.status)" size="small">{{ getStatusText(row.status) }}</el-tag>
                     </template>
                   </el-table-column>
-                  <el-table-column label="操作" width="520">
+                  <el-table-column label="操作" width="470">
                     <template #default="{ row }">
-                      <el-button type="info" size="small" @click="viewCodeStrategy(row)">详情</el-button>
                       <el-button type="primary" size="small" @click="editCodeStrategy(row)">编辑</el-button>
                       <el-button type="warning" size="small" @click="testRunStrategy(row)">试运行</el-button>
                       <el-button :type="row.status === 'active' ? 'warning' : 'success'" size="small" @click="toggleScreeningStrategy(row)">
@@ -394,7 +389,139 @@
             <el-empty v-if="!loadingAlertStrategies && alertStrategyList.length === 0" description="暂无告警策略" />
           </el-card>
         </el-tab-pane>
+
+        <!-- 策略资金分配 -->
+        <el-tab-pane label="资金分配" name="capital">
+          <el-card>
+            <template #header>
+              <div class="card-header">
+                <span>策略资金分配（虚拟账户）</span>
+                <el-space>
+                  <el-button type="success" size="small" @click="showQuickAllocDialog = true">
+                    <el-icon><Coin /></el-icon>
+                    快速分配
+                  </el-button>
+                  <el-button type="primary" size="small" @click="loadStrategyCapital">
+                    <el-icon><Refresh /></el-icon>
+                    刷新
+                  </el-button>
+                </el-space>
+              </div>
+            </template>
+            <el-alert type="info" :closable="false" class="margin-bottom-15">
+              <template #default>
+                <div>每个策略是独立的虚拟账户：策略现金（strategy_cash）+ 持仓市值 = 策略总资产</div>
+                <div style="color: var(--el-color-warning); margin-top: 4px;" v-if="capitalData.cash_warning">
+                  ⚠️ 策略现金总和 ¥{{ capitalData.total_strategy_cash }} > 账户可用资金 ¥{{ capitalData.available_cash }}
+                </div>
+              </template>
+            </el-alert>
+            <el-descriptions :column="4" border size="small" class="margin-bottom-15">
+              <el-descriptions-item label="账户可用资金">¥{{ capitalData.available_cash?.toFixed(2) || '0.00' }}</el-descriptions-item>
+              <el-descriptions-item label="策略现金总和">¥{{ capitalData.total_strategy_cash?.toFixed(2) || '0.00' }}</el-descriptions-item>
+              <el-descriptions-item label="持仓总市值">¥{{ capitalData.total_mv?.toFixed(2) || '0.00' }}</el-descriptions-item>
+              <el-descriptions-item label="账户总资产">¥{{ capitalData.total_assets?.toFixed(2) || '0.00' }}</el-descriptions-item>
+            </el-descriptions>
+            <el-table :data="capitalData.strategy_stats" stripe v-loading="loadingCapital">
+              <el-table-column prop="strategy_name" label="策略名称" width="180">
+                <template #default="{ row }">
+                  {{ row.strategy_name || (row.strategy_id ? `策略#${row.strategy_id}` : '手动买入') }}
+                </template>
+              </el-table-column>
+              <el-table-column prop="strategy_cash" label="可用现金" width="120">
+                <template #default="{ row }">
+                  ¥{{ row.strategy_cash?.toFixed(2) || '0.00' }}
+                </template>
+              </el-table-column>
+              <el-table-column prop="total_mv" label="持仓市值" width="120">
+                <template #default="{ row }">
+                  ¥{{ row.total_mv?.toFixed(2) || '0.00' }}
+                </template>
+              </el-table-column>
+              <el-table-column prop="strategy_total_asset" label="总资产" width="130">
+                <template #default="{ row }">
+                  ¥{{ row.strategy_total_asset?.toFixed(2) || '0.00' }}
+                </template>
+              </el-table-column>
+              <el-table-column prop="position_count" label="持仓数" width="80" />
+              <el-table-column prop="total_pnl" label="盈亏" width="100">
+                <template #default="{ row }">
+                  <span :class="{ 'text-profit': row.total_pnl > 0, 'text-loss': row.total_pnl < 0 }">
+                    ¥{{ row.total_pnl?.toFixed(2) || '0.00' }}
+                  </span>
+                </template>
+              </el-table-column>
+              <el-table-column label="操作" width="150">
+                <template #default="{ row }">
+                  <el-button type="primary" size="small" @click="openCapitalAdjustDialog(row)" v-if="row.strategy_id">
+                    调整
+                  </el-button>
+                  <el-button type="info" size="small" @click="recalcStrategyCash(row.strategy_id)" v-if="row.strategy_id">
+                    重算
+                  </el-button>
+                </template>
+              </el-table-column>
+            </el-table>
+          </el-card>
+        </el-tab-pane>
       </el-tabs>
+
+      <!-- 策略资金调整对话框 -->
+      <el-dialog v-model="showCapitalAdjustDialog" title="调整策略资金" width="400px">
+        <el-form :model="capitalAdjustForm" label-width="120px">
+          <el-form-item label="策略名称">
+            <el-input :value="capitalAdjustForm.strategy_name" disabled />
+          </el-form-item>
+          <el-form-item label="当前现金">
+            <el-input :value="`¥${capitalAdjustForm.current_cash?.toFixed(2)}`" disabled />
+          </el-form-item>
+          <el-form-item label="现金调整">
+            <el-input-number v-model="capitalAdjustForm.cash_delta" :precision="2" style="width: 200px;" />
+            <div class="hint">正数为追加资金，负数为减少资金</div>
+          </el-form-item>
+        </el-form>
+        <template #footer>
+          <el-button @click="showCapitalAdjustDialog = false">取消</el-button>
+          <el-button type="primary" @click="saveCapitalAdjust" :loading="savingCapital">保存</el-button>
+        </template>
+      </el-dialog>
+
+      <!-- 快速分配对话框 -->
+      <el-dialog v-model="showQuickAllocDialog" title="快速分配策略资金" width="600px">
+        <el-alert type="info" :closable="false" class="margin-bottom-15">
+          将账户可用资金快速分配给各策略（总额不能超过账户可用资金 ¥{{ capitalData.available_cash?.toFixed(2) }}）
+        </el-alert>
+        <el-table :data="quickAllocList" stripe max-height="400">
+          <el-table-column prop="strategy_name" label="策略名称" width="180" />
+          <el-table-column prop="current_cash" label="当前现金" width="120">
+            <template #default="{ row }">¥{{ row.current_cash?.toFixed(2) || '0.00' }}</template>
+          </el-table-column>
+          <el-table-column prop="new_cash" label="新现金" width="150">
+            <template #default="{ row }">
+              <el-input-number v-model="row.new_cash" :min="0" :precision="2" size="small" style="width: 130px;" />
+            </template>
+          </el-table-column>
+          <el-table-column prop="delta" label="变化" width="100">
+            <template #default="{ row }">
+              <span :class="{ 'text-profit': row.new_cash > row.current_cash, 'text-loss': row.new_cash < row.current_cash }">
+                {{ row.new_cash > row.current_cash ? '+' : '' }}¥{{ (row.new_cash - row.current_cash)?.toFixed(2) || '0.00' }}
+              </span>
+            </template>
+          </el-table-column>
+        </el-table>
+        <div style="margin-top: 15px; text-align: right;">
+          <span>分配总额：¥{{ quickAllocTotal?.toFixed(2) }}</span>
+          <span :class="{ 'text-warning': quickAllocTotal > capitalData.available_cash }" style="margin-left: 20px;">
+            {{ quickAllocTotal > capitalData.available_cash ? '⚠️ 超出账户可用资金' : '✓ 未超限' }}
+          </span>
+        </div>
+        <template #footer>
+          <el-button @click="showQuickAllocDialog = false">取消</el-button>
+          <el-button type="primary" @click="executeQuickAlloc" :loading="savingCapital" :disabled="quickAllocTotal > capitalData.available_cash">
+            执行分配
+          </el-button>
+        </template>
+      </el-dialog>
 
       <!-- 持仓调整规则对话框 -->
       <el-dialog v-model="showRuleDialog" title="新建调整规则" width="550px">
@@ -1027,9 +1154,9 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Plus, Refresh, MagicStick } from '@element-plus/icons-vue'
+import { Plus, Refresh, MagicStick, Coin } from '@element-plus/icons-vue'
 import { useAccountStore } from '../stores/account'
 import NavBar from '../components/NavBar.vue'
 import ConditionTree from '../components/ConditionTree.vue'
@@ -1178,6 +1305,31 @@ const alertStrategyForm = reactive({
   enabled: 1,
 })
 
+// 策略资金分配
+const capitalData = reactive({
+  available_cash: 0,
+  total_strategy_cash: 0,
+  total_mv: 0,
+  total_assets: 0,
+  cash_warning: false,
+  strategy_stats: []
+})
+const loadingCapital = ref(false)
+const showCapitalAdjustDialog = ref(false)
+const savingCapital = ref(false)
+const capitalAdjustForm = reactive({
+  strategy_id: null,
+  strategy_name: '',
+  current_cash: 0,
+  new_allocated: 0,
+  cash_delta: 0
+})
+
+// 快速分配
+const showQuickAllocDialog = ref(false)
+const quickAllocList = ref([])
+const quickAllocTotal = computed(() => quickAllocList.value.reduce((sum, s) => sum + (s.new_cash || 0), 0))
+
 const alertStrategyDialogTitle = computed(() => alertStrategyForm.id ? '编辑告警策略' : '新建告警策略')
 
 const showAlertStrategyDialog = async () => {
@@ -1321,6 +1473,145 @@ const loadAllData = async () => {
   await loadTradingStrategies()
   await loadAlertStrategies()
   await loadCandidateGroups()
+  await loadStrategyCapital()
+}
+
+// 加载策略资金数据
+const loadStrategyCapital = async () => {
+  console.log('loadStrategyCapital called, account_id:', currentAccountId.value)
+  loadingCapital.value = true
+  try {
+    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/positions/strategy-stats`)
+    console.log('strategy-stats response status:', res.status)
+    const data = await res.json()
+    console.log('strategy-stats response data:', data)
+    if (data.success === false) {
+      console.error('加载策略资金失败:', data.message)
+      return
+    }
+    capitalData.available_cash = data.available_cash || 0
+    capitalData.total_strategy_cash = data.total_strategy_cash || 0
+    capitalData.total_mv = data.total_mv || 0
+    capitalData.total_assets = data.total_assets || 0
+    capitalData.cash_warning = data.cash_warning || false
+    capitalData.strategy_stats = data.strategy_stats || []
+  } catch (error) {
+    console.error('加载策略资金失败:', error)
+  } finally {
+    loadingCapital.value = false
+  }
+}
+
+// 打开资金调整对话框
+const openCapitalAdjustDialog = (row) => {
+  capitalAdjustForm.strategy_id = row.strategy_id
+  capitalAdjustForm.strategy_name = row.strategy_name
+  capitalAdjustForm.current_cash = row.strategy_cash || 0
+  capitalAdjustForm.new_allocated = row.allocated_capital || 0
+  capitalAdjustForm.cash_delta = 0
+  showCapitalAdjustDialog.value = true
+}
+
+// 保存资金调整
+const saveCapitalAdjust = async () => {
+  if (capitalAdjustForm.cash_delta === 0) {
+    ElMessage.info('未调整现金金额')
+    return
+  }
+  savingCapital.value = true
+  try {
+    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/capital/strategies/${capitalAdjustForm.strategy_id}/adjust-cash`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ delta: capitalAdjustForm.cash_delta })
+    })
+    const data = await res.json()
+    if (data.success) {
+      ElMessage.success('资金调整成功')
+      showCapitalAdjustDialog.value = false
+      await loadStrategyCapital()
+    } else {
+      ElMessage.error(data.message || '调整失败')
+    }
+  } catch (error) {
+    ElMessage.error('调整失败：' + error.message)
+  } finally {
+    savingCapital.value = false
+  }
+}
+
+// 重算策略现金
+const recalcStrategyCash = async (strategyId) => {
+  try {
+    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/capital/strategies/${strategyId}/recalc`, {
+      method: 'POST'
+    })
+    const data = await res.json()
+    if (data.success) {
+      ElMessage.success(`策略现金重算完成：¥${data.calculated_cash?.toFixed(2)}`)
+      await loadStrategyCapital()
+    } else {
+      ElMessage.error(data.message || '重算失败')
+    }
+  } catch (error) {
+    ElMessage.error('重算失败：' + error.message)
+  }
+}
+
+// 打开快速分配对话框时初始化列表
+watch(showQuickAllocDialog, (val) => {
+  if (val) {
+    quickAllocList.value = capitalData.strategy_stats
+      .filter(s => s.strategy_id)
+      .map(s => ({
+        strategy_id: s.strategy_id,
+        strategy_name: s.strategy_name,
+        current_cash: s.strategy_cash || 0,
+        new_cash: s.strategy_cash || 0
+      }))
+  }
+})
+
+// 执行快速分配
+const executeQuickAlloc = async () => {
+  if (quickAllocTotal.value > capitalData.available_cash) {
+    ElMessage.error('分配总额超过账户可用资金')
+    return
+  }
+  savingCapital.value = true
+  try {
+    const updates = quickAllocList.value
+      .filter(s => s.new_cash !== s.current_cash)
+      .map(s => ({
+        strategy_id: s.strategy_id,
+        delta: s.new_cash - s.current_cash
+      }))
+    if (updates.length === 0) {
+      ElMessage.info('没有需要调整的策略')
+      savingCapital.value = false
+      return
+    }
+    // 批量调用 adjust-cash API
+    for (const u of updates) {
+      const res = await fetch(`/api/v1/ui/${currentAccountId.value}/capital/strategies/${u.strategy_id}/adjust-cash`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ delta: u.delta })
+      })
+      const data = await res.json()
+      if (!data.success) {
+        ElMessage.error(`策略 ${u.strategy_id} 调整失败: ${data.message}`)
+        return
+      }
+    }
+    ElMessage.success('快速分配完成')
+    showQuickAllocDialog.value = false
+    await loadStrategyCapital()
+  } catch (error) {
+    ElMessage.error('分配失败：' + error.message)
+  } finally {
+    savingCapital.value = false
+  }
 }
 
 // 加载持仓策略
@@ -2203,6 +2494,18 @@ onMounted(() => {
 
 .margin-bottom-15 {
   margin-bottom: 15px;
+}
+
+.text-profit {
+  color: #67c23a;
+}
+
+.text-loss {
+  color: #f56c6c;
+}
+
+.text-warning {
+  color: #e6a23c;
 }
 
 .code-block {

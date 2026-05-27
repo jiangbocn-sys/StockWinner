@@ -18,7 +18,7 @@ def create_lifespan():
     import os
     import json
 
-    MIGRATION_VERSION = 13
+    MIGRATION_VERSION = 14
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -479,7 +479,6 @@ async def _run_migrations(db_manager, log, migration_version: int):
             {"task_type": "builtin", "module": "monthly_factors", "account_id": "SYSTEM", "cron_expression": "0 1 5 * *", "enabled": 1},
             {"task_type": "builtin", "module": "weekly_kline", "account_id": "SYSTEM", "cron_expression": "0 2 * * 6", "enabled": 1},
             {"task_type": "builtin", "module": "industry_download", "account_id": "SYSTEM", "cron_expression": "0 3 * * mon-fri", "enabled": 0},
-            {"task_type": "builtin", "module": "post_market_analysis", "account_id": "SYSTEM", "cron_expression": "30 15 * * mon-fri", "enabled": 1},
         ]
         for t in builtin_defaults:
             existing = await db_manager.fetchone(
@@ -652,6 +651,39 @@ async def _run_migrations(db_manager, log, migration_version: int):
     await run_migration(13, "watchlist 添加 is_active", [
         "ALTER TABLE watchlist ADD COLUMN is_active INTEGER DEFAULT 1",
         "CREATE INDEX IF NOT EXISTS idx_watchlist_active_status ON watchlist(stock_code, status) WHERE is_active = 1",
+    ])
+
+    # v14: 策略资金分配（虚拟账户模型）
+    await run_migration(14, "策略资金分配 - 虚拟账户模型", [
+        "ALTER TABLE strategies ADD COLUMN allocated_capital REAL DEFAULT 0",
+        "ALTER TABLE strategies ADD COLUMN strategy_cash REAL DEFAULT 0",
+        """CREATE TABLE IF NOT EXISTS strategy_cash_borrows (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            account_id TEXT NOT NULL,
+            strategy_id INTEGER NOT NULL,
+            borrow_amount REAL NOT NULL,
+            trade_record_id INTEGER,
+            status TEXT DEFAULT 'borrowed',
+            returned_amount REAL DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            returned_at TIMESTAMP
+        )""",
+        """CREATE TABLE IF NOT EXISTS strategy_cash_transactions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            account_id TEXT NOT NULL,
+            strategy_id INTEGER NOT NULL,
+            transaction_type TEXT NOT NULL,
+            amount REAL NOT NULL,
+            stock_code TEXT,
+            trade_record_id INTEGER,
+            balance_before REAL,
+            balance_after REAL,
+            reason TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_cash_borrows_strategy ON strategy_cash_borrows(strategy_id)",
+        "CREATE INDEX IF NOT EXISTS idx_cash_borrows_status ON strategy_cash_borrows(status)",
+        "CREATE INDEX IF NOT EXISTS idx_cash_tx_strategy ON strategy_cash_transactions(strategy_id)",
     ])
 
     # v7 数据源配置 seed

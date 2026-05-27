@@ -248,6 +248,107 @@ async def get_positions(
     }
 
 
+@router.get("/api/v1/ui/{account_id}/positions/strategy-stats")
+async def get_strategy_position_stats(
+    account_id: str = Path(..., description="账户 ID"),
+):
+    """按策略分组统计持仓（含策略现金）"""
+    db = get_db_manager()
+
+    account = await db.fetchone(
+        "SELECT available_cash FROM accounts WHERE account_id = ? AND is_active = 1",
+        (account_id,)
+    )
+    if not account:
+        raise HTTPException(status_code=404, detail=f"账户不存在：{account_id}")
+
+    available_cash = account.get("available_cash", 0)
+
+    # 查询总资产（持仓市值 + 可用资金）
+    pos = await db.fetchone(
+        "SELECT SUM(market_value) as total_mv FROM stock_positions WHERE account_id = ? AND quantity > 0",
+        (account_id,)
+    )
+    total_mv = pos["total_mv"] if pos and pos["total_mv"] else 0
+    total_assets = total_mv + available_cash
+
+    # 查询所有策略的现金配置
+    strategies = await db.fetchall(
+        "SELECT id, name, strategy_cash FROM strategies WHERE account_id = ? AND is_active = 1",
+        (account_id,)
+    )
+    strategy_map = {s["id"]: s for s in strategies}
+
+    # 按策略分组统计持仓
+    rows = await db.fetchall("""
+        SELECT strategy_id,
+               COUNT(*) as position_count,
+               SUM(market_value) as total_mv,
+               SUM(profit_loss) as total_pnl
+        FROM stock_positions
+        WHERE account_id = ? AND quantity > 0
+        GROUP BY strategy_id
+    """, (account_id,))
+
+    # 关联策略名称和现金信息
+    stats = []
+    total_strategy_cash = 0  # 统计策略现金总和
+    for row in rows:
+        sid = row["strategy_id"]
+        if sid and sid in strategy_map:
+            s = strategy_map[sid]
+            strategy_name = s["name"]
+            strategy_cash = s.get("strategy_cash") or 0
+        elif sid:
+            strategy_name = f"策略#{sid}"
+            strategy_cash = 0
+        else:
+            strategy_name = "手动买入"
+            strategy_cash = 0
+
+        pos_mv = row["total_mv"] or 0
+        strategy_total_asset = strategy_cash + pos_mv  # 策略总资产 = 现金 + 持仓市值
+
+        total_strategy_cash += strategy_cash
+
+        stats.append({
+            "strategy_id": sid,
+            "strategy_name": strategy_name,
+            "position_count": row["position_count"],
+            "total_mv": round(pos_mv, 2),
+            "total_pnl": round(row["total_pnl"] or 0, 2),
+            "position_pct": round(pos_mv / total_assets * 100, 2) if total_assets > 0 else 0,
+            "strategy_cash": round(strategy_cash, 2),
+            "strategy_total_asset": round(strategy_total_asset, 2),
+        })
+
+    # 补充未持有股票的策略（有现金分配但无持仓）
+    for s in strategies:
+        if s["id"] not in [r["strategy_id"] for r in rows if r["strategy_id"]]:
+            strategy_cash = s.get("strategy_cash") or 0
+            total_strategy_cash += strategy_cash
+            stats.append({
+                "strategy_id": s["id"],
+                "strategy_name": s["name"],
+                "position_count": 0,
+                "total_mv": 0,
+                "total_pnl": 0,
+                "position_pct": 0,
+                "strategy_cash": round(strategy_cash, 2),
+                "strategy_total_asset": round(strategy_cash, 2),
+            })
+
+    return {
+        "account_id": account_id,
+        "total_assets": round(total_assets, 2),
+        "total_mv": round(total_mv, 2),
+        "available_cash": available_cash,
+        "total_strategy_cash": round(total_strategy_cash, 2),  # 策略现金总和
+        "cash_warning": total_strategy_cash > available_cash,  # 是否超账户资金
+        "strategy_stats": stats,
+    }
+
+
 @router.get("/api/v1/ui/{account_id}/positions/{stock_code}")
 async def get_position(
     account_id: str = Path(..., description="账户 ID"),
@@ -273,83 +374,6 @@ async def get_position(
         raise HTTPException(status_code=404, detail=f"持仓不存在：{stock_code}")
 
     return {"position": position}
-
-
-@router.get("/api/v1/ui/{account_id}/positions/strategy-stats")
-async def get_strategy_position_stats(
-    account_id: str = Path(..., description="账户 ID"),
-):
-    """按策略分组统计持仓"""
-    db = get_db_manager()
-
-    account = await db.fetchone(
-        "SELECT available_cash FROM accounts WHERE account_id = ? AND is_active = 1",
-        (account_id,)
-    )
-    if not account:
-        raise HTTPException(status_code=404, detail=f"账户不存在：{account_id}")
-
-    available_cash = account.get("available_cash", 0)
-
-    # 查询总资产（持仓市值 + 可用资金）
-    pos = await db.fetchone(
-        "SELECT SUM(market_value) as total_mv FROM stock_positions WHERE account_id = ? AND quantity > 0",
-        (account_id,)
-    )
-    total_mv = pos["total_mv"] if pos and pos["total_mv"] else 0
-    total_assets = total_mv + available_cash
-
-    # 按策略分组统计
-    rows = await db.fetchall("""
-        SELECT strategy_id,
-               COUNT(*) as position_count,
-               SUM(market_value) as total_mv,
-               SUM(profit_loss) as total_pnl
-        FROM stock_positions
-        WHERE account_id = ? AND quantity > 0
-        GROUP BY strategy_id
-    """, (account_id,))
-
-    # 关联策略名称
-    stats = []
-    for row in rows:
-        sid = row["strategy_id"]
-        if sid:
-            strategy = await db.fetchone(
-                "SELECT name, config FROM strategies WHERE id = ? AND account_id = ?",
-                (sid, account_id)
-            )
-            strategy_name = strategy["name"] if strategy else f"策略#{sid}"
-            strategy_config = strategy.get("config", {}) if strategy else {}
-            if isinstance(strategy_config, str):
-                try:
-                    import json
-                    strategy_config = json.loads(strategy_config)
-                except (json.JSONDecodeError, TypeError):
-                    strategy_config = {}
-        else:
-            strategy_name = "手动买入"
-            strategy_config = {}
-
-        max_position_amount = strategy_config.get("max_position_amount")
-
-        stats.append({
-            "strategy_id": sid,
-            "strategy_name": strategy_name,
-            "position_count": row["position_count"],
-            "total_mv": round(row["total_mv"] or 0, 2),
-            "total_pnl": round(row["total_pnl"] or 0, 2),
-            "position_pct": round((row["total_mv"] or 0) / total_assets * 100, 2) if total_assets > 0 else 0,
-            "max_position_amount": max_position_amount,
-        })
-
-    return {
-        "account_id": account_id,
-        "total_assets": round(total_assets, 2),
-        "total_mv": round(total_mv, 2),
-        "available_cash": available_cash,
-        "strategy_stats": stats,
-    }
 
 
 @router.post("/api/v1/ui/{account_id}/positions/{stock_code}/dsa-analyze")

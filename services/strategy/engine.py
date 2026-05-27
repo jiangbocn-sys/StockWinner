@@ -426,6 +426,8 @@ class StrategyEngine:
         strategy_id: int,
         group_id: int,
         strategy_name: str = "",
+        signal_action: str = "trade",
+        source_group_id: int = None,
     ) -> Dict:
         """
         将策略信号写入 watchlist
@@ -436,6 +438,8 @@ class StrategyEngine:
         3. 已有信号，新价格更高 → 保留原信号，跳过
 
         Args:
+            group_id: 目标分组（信号写入的分组）
+            source_group_id: 源分组（股票池来源分组，用于通知显示）
             strategy_name: 策略名称（用于通知）
 
         Returns:
@@ -507,12 +511,55 @@ class StrategyEngine:
                     should_update = True
 
                 if should_update:
-                    await db.execute(
-                        "UPDATE watchlist SET trigger_price = ?, stop_loss_price = ?, take_profit_price = ?, "
-                        "reason = ?, strategy_id = ?, status = 'pending', created_at = ?, updated_at = ? WHERE account_id = ? AND stock_code = ?",
-                        (new_price, new_sl, new_tp, signal.get("reason", "价格更优"), strategy_id, now, now, account_id, code)
+                    # 检查是否在目标分组已有记录
+                    existing_in_target = await db.fetchone(
+                        "SELECT id, trigger_price FROM watchlist WHERE account_id = ? AND stock_code = ? AND group_id = ? AND status IN ('pending', 'watching')",
+                        (account_id, code, group_id)
                     )
-                    updated += 1
+                    new_status = "pending" if signal_action == "trade" else "watching"
+
+                    if existing_in_target:
+                        # 目标分组已有记录：更新该分组的记录
+                        old_target_price = existing_in_target.get("trigger_price")
+                        if new_price and (not old_target_price or new_price < old_target_price):
+                            await db.execute(
+                                "UPDATE watchlist SET trigger_price = ?, stop_loss_price = ?, take_profit_price = ?, "
+                                f"reason = ?, strategy_id = ?, status = '{new_status}', created_at = ?, updated_at = ? WHERE id = ?",
+                                (new_price, new_sl, new_tp, signal.get("reason", "价格更优"), strategy_id, now, now, existing_in_target["id"])
+                            )
+                            updated += 1
+                            get_logger("strategy").log_event("strategy_signal_update",
+                                f"策略信号更新为 {new_status}: {code}",
+                                account_id=account_id, stock_code=code, group_id=group_id,
+                                strategy_id=strategy_id, trigger_price=new_price,
+                                reason=signal.get("reason", "价格更优"))
+                        else:
+                            skipped += 1
+                    else:
+                        # 目标分组没有记录：新增一条（即使其他分组已有）
+                        await db.insert("watchlist", {
+                            "account_id": account_id,
+                            "strategy_id": strategy_id,
+                            "group_id": group_id,
+                            "source_type": "strategy",
+                            "stock_code": code,
+                            "stock_name": signal.get("stock_name", code),
+                            "reason": signal.get("reason", "策略信号"),
+                            "trigger_price": new_price,
+                            "stop_loss_price": new_sl,
+                            "take_profit_price": new_tp,
+                            "target_quantity": signal.get("target_quantity", 0),
+                            "status": new_status,
+                            "signal_type": signal.get("signal_type", "buy"),
+                            "created_at": now,
+                            "updated_at": now,
+                        })
+                        added += 1
+                        get_logger("strategy").log_event("strategy_signal_add",
+                            f"策略新增 {new_status} 信号: {code}",
+                            account_id=account_id, stock_code=code, group_id=group_id,
+                            strategy_id=strategy_id, trigger_price=new_price,
+                            reason=signal.get("reason", "策略信号"))
                     get_logger("strategy").log_event("strategy_signal_update",
                         f"策略信号更新为 pending: {code}",
                         account_id=account_id, stock_code=code,
@@ -539,13 +586,15 @@ class StrategyEngine:
                     "stop_loss_price": new_sl,
                     "take_profit_price": new_tp,
                     "target_quantity": signal.get("target_quantity", 0),
-                    "status": "pending",
+                    "status": "pending" if signal_action == "trade" else "watching",
+                    "signal_type": signal.get("signal_type", "buy"),
                     "created_at": now,
                     "updated_at": now,
                 })
                 added += 1
+                status_label = "pending" if signal_action == "trade" else "watching"
                 get_logger("strategy").log_event("strategy_signal_add",
-                    f"策略新增 pending 信号: {code}",
+                    f"策略新增 {status_label} 信号: {code}",
                     account_id=account_id, stock_code=code,
                     strategy_id=strategy_id, trigger_price=new_price,
                     reason=signal.get("reason", "策略信号"))
@@ -554,14 +603,14 @@ class StrategyEngine:
                 try:
                     from services.notifications import get_notification_service
                     notification = get_notification_service()
-                    # 查询候选组名称
-                    group_name = "-"
-                    if group_id:
-                        group_row = await db.fetchone(
-                            "SELECT name FROM candidate_groups WHERE id = ?", (group_id,)
+                    # 查询源分组名称（股票池来源）
+                    source_group_name = "-"
+                    if source_group_id:
+                        source_row = await db.fetchone(
+                            "SELECT name FROM candidate_groups WHERE id = ?", (source_group_id,)
                         )
-                        if group_row:
-                            group_name = group_row["name"]
+                        if source_row:
+                            source_group_name = source_row["name"]
                     await notification.emit(
                         event_type="signal_triggered",
                         account_id=account_id,
@@ -574,7 +623,7 @@ class StrategyEngine:
                             "take_profit_price": f"{new_tp:.2f}" if new_tp else "-",
                             "reason": signal.get("reason", "策略信号"),
                             "strategy_name": strategy_name or "策略信号",
-                            "group_name": group_name,
+                            "group_name": source_group_name,
                             "condition": f"新增信号 | 建议买入价 {new_price:.2f}" if new_price else "新增信号",
                         },
                     )
@@ -586,14 +635,14 @@ class StrategyEngine:
                 try:
                     from services.notifications import get_notification_service
                     notification = get_notification_service()
-                    # 查询候选组名称
-                    group_name = "-"
-                    if group_id:
-                        group_row = await db.fetchone(
-                            "SELECT name FROM candidate_groups WHERE id = ?", (group_id,)
+                    # 查询源分组名称（股票池来源）
+                    source_group_name = "-"
+                    if source_group_id:
+                        source_row = await db.fetchone(
+                            "SELECT name FROM candidate_groups WHERE id = ?", (source_group_id,)
                         )
-                        if group_row:
-                            group_name = group_row["name"]
+                        if source_row:
+                            source_group_name = source_row["name"]
                     await notification.emit(
                         event_type="signal_triggered",
                         account_id=account_id,
@@ -606,7 +655,7 @@ class StrategyEngine:
                             "take_profit_price": f"{new_tp:.2f}" if new_tp else "-",
                             "reason": signal.get("reason", "价格更优"),
                             "strategy_name": strategy_name or "策略信号",
-                            "group_name": group_name,
+                            "group_name": source_group_name,
                             "condition": f"价格更优 | 新买入价 {new_price:.2f}" if new_price else "价格更优",
                         },
                     )

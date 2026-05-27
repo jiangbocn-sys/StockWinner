@@ -51,12 +51,12 @@ def get_trading_phase(dt: datetime = None) -> TradingPhase:
         dt = get_china_time()
     t = dt.time()
 
-    for boundary, phase in PHASE_TIMES:
-        if t < boundary:
+    # 从后向前遍历，找到第一个时间 >= boundary 的阶段
+    # 这样可以正确处理边界时间（如 13:00 应返回 AFTERNOON_SESSION）
+    for boundary, phase in reversed(PHASE_TIMES):
+        if t >= boundary:
             return phase
 
-    if t >= dtime(15, 0):
-        return TradingPhase.POST_CLOSE
     return TradingPhase.PRE_OPEN
 
 

@@ -35,6 +35,7 @@ class TradingMonitor:
         self._task = None
         self._account_ids: list[str] = []
         self._state_lock = threading.Lock()
+        self._last_heartbeat: float = 0.0  # 上次心跳时间戳
 
         # 子模块
         self._executor = SignalExecutor()
@@ -79,6 +80,13 @@ class TradingMonitor:
                 await self._task
             except asyncio.CancelledError:
                 pass
+        # 释放 dispatcher 订阅
+        try:
+            from services.trading.gateway_dispatcher import get_gateway_dispatcher
+            dispatcher = get_gateway_dispatcher()
+            dispatcher.unsubscribe("monitor")
+        except Exception:
+            pass
         return {"success": True, "message": "交易监控服务已停止"}
 
     async def _run_monitoring_loop(self, account_ids: list[str], interval: int):
@@ -91,8 +99,13 @@ class TradingMonitor:
 
         while self._running:
             try:
+                # 更新心跳（每次循环开始）
+                self._last_heartbeat = time.time()
+
                 if can_trade():
                     await self._run_monitoring_global(account_ids)
+                    # 成功完成一轮，再次更新心跳
+                    self._last_heartbeat = time.time()
                     await asyncio.sleep(interval)
                 else:
                     next_time, reason = get_next_trading_window()
@@ -114,6 +127,13 @@ class TradingMonitor:
                 await asyncio.sleep(interval)
 
         self._running = False
+        # 释放 dispatcher 订阅
+        try:
+            from services.trading.gateway_dispatcher import get_gateway_dispatcher
+            dispatcher = get_gateway_dispatcher()
+            dispatcher.unsubscribe("monitor")
+        except Exception:
+            pass
         log.log_event("monitor_loop_stop", "交易监控服务已停止")
 
     async def _run_monitoring_global(self, account_ids: list[str]):
@@ -163,11 +183,20 @@ class TradingMonitor:
         try:
             gw = await get_gateway()
             gw.subscribe("monitor", monitoring_codes, refresh_interval=120, priority=1)
-            market_data_cache = await gw.refresh_now("monitor")
+            # 添加超时保护：SDK 调用最多等待 90 秒（考虑 984 只股票分批查询）
+            try:
+                market_data_cache = await asyncio.wait_for(gw.refresh_now("monitor"), timeout=90.0)
+            except asyncio.TimeoutError:
+                log.log_event("monitor_sdk_timeout", "SDK 刷新超时（90秒），跳过本轮监控")
+                self._health.record_sdk_error(Exception("SDK refresh timeout"))
+                return
             self._health.record_sdk_success()
 
             valid_count = sum(1 for md in market_data_cache.values() if md and getattr(md, 'current_price', 0) > 0)
             self._health.record_data_valid(valid_count, len(market_data_cache))
+
+            # 全局更新 PriceCache（一次写入，所有用户共享）
+            self._price_mgr.update_price_cache(market_data_cache)
         except Exception as e:
             self._health.record_sdk_error(e)
             return
@@ -192,6 +221,8 @@ class TradingMonitor:
     async def _run_per_account(self, account_id: str, market_data_cache: Dict[str, Any]):
         """单个账户的监控逻辑"""
         from services.trading.trading_hours import can_trade
+
+        # PriceCache 已在 _run_monitoring_global 中统一更新，此处不再重复
 
         # 交易时段：过滤掉 kline_db 兜底数据，防止策略用陈旧价格误判
         if can_trade():
@@ -218,10 +249,16 @@ class TradingMonitor:
 
     def get_status(self) -> Dict:
         """获取服务状态"""
+        # 僵尸检测：如果心跳超过 5 分钟无更新，标记为僵尸
+        heartbeat_age = time.time() - self._last_heartbeat if self._last_heartbeat > 0 else 0
+        is_zombie = heartbeat_age > 300 and self._running  # 5分钟无心跳且声称运行
+
         return {
             "running": self._running,
             "account_ids": self._account_ids,
             "task": "active" if self._task else None,
+            "heartbeat_age": round(heartbeat_age, 1),
+            "is_zombie": is_zombie,
             **self._health.get_status(),
         }
 

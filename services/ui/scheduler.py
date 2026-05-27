@@ -119,22 +119,6 @@ async def manual_industry_indices_download() -> Dict:
     return scheduler.run_manual_industry_indices_download()
 
 
-@router.post("/api/v1/ui/scheduler/post-market-analysis")
-async def manual_post_market_analysis() -> Dict:
-    """
-    手动触发盘后分析
-
-    对每只持仓股调用 DSA 进行分析，结果通过飞书发送
-
-    Returns:
-        任务启动状态
-    """
-    from services.common.scheduler_service import get_scheduler
-
-    scheduler = get_scheduler()
-    return scheduler.run_manual_post_market_analysis()
-
-
 @router.get("/api/v1/ui/data/status")
 async def get_data_status() -> Dict:
     """
@@ -496,11 +480,13 @@ async def create_strategy_task(
     task_type: str = Body("strategy", description="任务类型: builtin / strategy"),
     module: Optional[str] = Body(None, description="内置任务模块名（builtin 类型必填）"),
     strategy_id: Optional[int] = Body(None, description="策略 ID（strategy 类型必填）"),
-    group_id: Optional[int] = Body(None, description="候选组 ID"),
+    group_id: Optional[int] = Body(None, description="候选组 ID（筛选股票池）"),
     cron_expression: str = Body(..., description="Cron 表达式或自然语言描述"),
     enabled: int = Body(1, description="是否启用"),
     require_trading_day: int = Body(0, description="是否仅交易日执行"),
     full_market: int = Body(0, description="全市场模式（非交易时段全A股扫描）"),
+    signal_action: str = Body("trade", description="信号处理方式: trade=直接交易, watch=继续观察"),
+    target_group_id: Optional[int] = Body(None, description="信号输出目标分组（watch 模式可用，不填则写入源分组）"),
 ):
     """创建调度任务"""
     from services.common.database import get_db_manager
@@ -580,6 +566,13 @@ async def create_strategy_task(
         if not group:
             raise HTTPException(status_code=404, detail="候选组不存在")
 
+    if target_group_id:
+        tg = await db.fetchone("SELECT id FROM candidate_groups WHERE id = ? AND account_id = ?", (target_group_id, account_id))
+        if not tg:
+            raise HTTPException(status_code=404, detail="目标分组不存在")
+        if target_group_id == group_id:
+            raise HTTPException(status_code=400, detail="目标分组不能与源分组相同")
+
     task_id = await db.insert("strategy_tasks", {
         "task_type": task_type,
         "module": module,
@@ -590,6 +583,8 @@ async def create_strategy_task(
         "enabled": enabled,
         "require_trading_day": require_trading_day,
         "full_market": full_market,
+        "signal_action": signal_action,
+        "target_group_id": target_group_id,
     })
 
     from services.common.scheduler_service import get_scheduler
@@ -607,6 +602,8 @@ async def update_strategy_task(
     full_market: Optional[int] = Body(None, description="全市场模式"),
     strategy_id: Optional[int] = Body(None, description="关联策略 ID"),
     group_id: Optional[int] = Body(None, description="候选分组 ID"),
+    signal_action: Optional[str] = Body(None, description="信号处理方式: trade / watch"),
+    target_group_id: Optional[int] = Body(None, description="信号输出目标分组 ID"),
 ):
     """更新策略任务"""
     from services.common.database import get_db_manager
@@ -633,6 +630,10 @@ async def update_strategy_task(
         update_data["strategy_id"] = strategy_id
     if group_id is not None:
         update_data["group_id"] = group_id
+    if signal_action is not None:
+        update_data["signal_action"] = signal_action
+    if target_group_id is not None:
+        update_data["target_group_id"] = target_group_id
 
     if len(update_data) > 1:
         await db.update("strategy_tasks", update_data, "id = ?", (task_id,))

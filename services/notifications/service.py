@@ -18,7 +18,6 @@ EVENT_COLOR_MAP = {
     "task_failed": "red",          # 任务失败
     "trade_failed": "red",         # 交易失败
     "order_rejected": "red",       # 券商拒绝
-    "post_market_analysis": "purple",  # 盘后分析
     "scheduler_down": "red",       # 调度服务异常
     "monitor_interrupted": "red",  # 交易监控中断
 }
@@ -31,7 +30,6 @@ EVENT_TITLE_MAP = {
     "task_failed": "任务失败",
     "trade_failed": "交易失败",
     "order_rejected": "委托被拒",
-    "post_market_analysis": "盘后分析",
     "scheduler_down": "调度服务异常",
     "monitor_interrupted": "交易监控中断",
 }
@@ -91,7 +89,6 @@ class NotificationService:
             "signal_triggered": "notify_on_signal",
             "task_completed": "notify_on_task",
             "task_failed": "notify_on_task",
-            "post_market_analysis": "notify_on_task",
             "scheduler_down": "notify_on_task",
             "monitor_interrupted": "notify_on_task",
         }
@@ -204,21 +201,6 @@ class NotificationService:
                 f"**任务类型：** {payload.get('task_type', '-')}",
                 f"**执行结果：** 失败",
                 f"**错误信息：** {payload.get('error', '-')}",
-            ]
-            return "\n".join(lines)
-
-        elif event_type == "post_market_analysis":
-            sentiment = payload.get('sentiment_label', '-')
-            sentiment_icon = {'看多': '🔴', '看空': '🟢', '中性': '🟡'}.get(sentiment, '⚪')
-            lines = [
-                f"**股票代码：** {payload.get('stock_code', '-')}",
-                f"**股票名称：** {payload.get('stock_name', '-')}",
-                f"**市场情绪：** {sentiment_icon} {sentiment}",
-                f"**分析摘要：** {payload.get('analysis_summary', '-')}",
-                f"**操作建议：** {payload.get('operation_advice', '-')}",
-                f"**理想买入：** {payload.get('ideal_buy', '-')}",
-                f"**止损价：** {payload.get('stop_loss', '-')}",
-                f"**止盈价：** {payload.get('take_profit', '-')}",
             ]
             return "\n".join(lines)
 

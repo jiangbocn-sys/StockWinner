@@ -68,7 +68,8 @@ class TradeExecutionService:
         self,
         stock_code: str,
         price: float,
-        target_quantity: Optional[int] = None
+        target_quantity: Optional[int] = None,
+        strategy_id: Optional[int] = None,
     ) -> Tuple[int, float, Dict]:
         """
         计算买入数量
@@ -77,14 +78,31 @@ class TradeExecutionService:
         1. 按账户 cash_reserve_pct 保留现金 → usable_cash = available * (1 - reserve_pct)
         2. 按 max_single_position_pct 计算单只上限 → risk_limit = usable * max_pct / price
         3. 按可用资金计算资金上限 → fund_limit = available / (price * (1 + fee_rate))
-        4. 如果 target_quantity > 0 → quantity = min(target, risk_limit, fund_limit)
-        5. 如果 target_quantity = 0 → quantity = min(risk_limit, fund_limit)
+        4. 如果有 strategy_id → 使用 strategy_cash 作为可用资金上限
+        5. 如果 target_quantity > 0 → quantity = min(target, risk_limit, fund_limit)
+        6. 如果 target_quantity = 0 → quantity = min(risk_limit, fund_limit)
 
         Returns:
             (可买数量，总金额，费用明细)
         """
         account = await self.get_account_info()
         available_cash = account.get("available_cash", 0.0) if account else 0.0
+
+        # 策略买入时，使用策略现金作为资金上限
+        if strategy_id:
+            strategy = await self.db.fetchone(
+                "SELECT strategy_cash FROM strategies WHERE id = ? AND account_id = ?",
+                (strategy_id, self.account_id)
+            )
+            strategy_cash = strategy.get("strategy_cash", 0.0) if strategy else 0.0
+            # 策略可用资金 = 策略现金（不保留现金储备，策略层面由用户控制）
+            usable_cash = strategy_cash
+            # 策略买入时，资金上限直接用策略现金
+            fund_limit_cash = strategy_cash
+        else:
+            usable_cash = available_cash
+            fund_limit_cash = available_cash
+
         fees_cfg = await self._get_fee_config()
         commission_rate = fees_cfg["commission_rate"]
 
@@ -92,16 +110,13 @@ class TradeExecutionService:
         cash_reserve_pct = account.get("cash_reserve_pct", 0.20) if account else 0.20
         max_single_pct = account.get("max_single_position_pct", 0.15) if account else 0.15
 
-        # 总资产 = 持仓市值 + 可用资金
+        # 总资产 = 持仓市值 + 可用资金（策略买入时仍用账户总资产计算仓位上限）
         positions = await self.db.fetchall(
             "SELECT SUM(market_value) as total_mv FROM stock_positions WHERE account_id = ?",
             (self.account_id,)
         )
         current_mv = positions[0]["total_mv"] if positions and positions[0]["total_mv"] else 0
         total_assets = current_mv + available_cash
-
-        # 可用资金上限（扣除保留现金）
-        usable_cash = available_cash * (1 - cash_reserve_pct)
 
         fee_rate = commission_rate + fees_cfg["transfer_fee"]
 
@@ -113,7 +128,7 @@ class TradeExecutionService:
 
         # 资金上限（考虑手续费）
         if price > 0:
-            max_quantity = int((available_cash - fees_cfg["min_commission"]) / (price * (1 + fee_rate)))
+            max_quantity = int((fund_limit_cash - fees_cfg["min_commission"]) / (price * (1 + fee_rate)))
         else:
             max_quantity = 0
 
@@ -257,7 +272,7 @@ class TradeExecutionService:
 
         # 计算可买数量和费用
         quantity, total_amount, fees = await self.calculate_buy_quantity(
-            stock_code, price, target_quantity
+            stock_code, price, target_quantity, strategy_id=strategy_id
         )
 
         if quantity <= 0:
@@ -309,6 +324,20 @@ class TradeExecutionService:
                     }
         except Exception as e:
             print(f"[RiskService] 风控检查异常: {e}，放行")
+
+        # 策略现金检查（虚拟账户）
+        if strategy_id:
+            from services.trading.strategy_cash_service import get_strategy_cash_service
+            cash_svc = get_strategy_cash_service(self.account_id)
+            passed, reason = await cash_svc.check_strategy_buy(strategy_id, total_amount)
+            if not passed:
+                await order_svc.update_status(db_order_id, "rejected", reject_reason=reason)
+                return {
+                    "success": False,
+                    "message": f"策略现金不足: {reason}",
+                    "quantity": 0,
+                    "fees": fees
+                }
 
         # 更新订单为 submitted
         await order_svc.update_status(db_order_id, "submitted")
@@ -434,6 +463,20 @@ class TradeExecutionService:
                     "UPDATE orders SET status = 'filled', filled_quantity = ?, filled_amount = ?, broker_order_id = ?, updated_at = ? WHERE id = ?",
                     (quantity, total_amount, broker_order_id, format_china_time(), db_order_id)
                 )
+
+                # 6. 策略现金扣减（虚拟账户）
+                if strategy_id:
+                    await conn.execute(
+                        "UPDATE strategies SET strategy_cash = strategy_cash - ?, updated_at = ? WHERE id = ? AND account_id = ?",
+                        (total_amount, format_china_time(), strategy_id, self.account_id)
+                    )
+                    # 记录策略现金变动
+                    await conn.execute(
+                        """INSERT INTO strategy_cash_transactions
+                           (account_id, strategy_id, transaction_type, amount, stock_code, trade_record_id, reason, created_at)
+                           VALUES (?, ?, 'buy_deduct', ?, ?, ?, ?, ?)""",
+                        (self.account_id, strategy_id, -total_amount, stock_code, trade_record_id, f"买入 {stock_code}", format_china_time())
+                    )
 
             return {
                 "success": True,
@@ -631,6 +674,20 @@ class TradeExecutionService:
                     "UPDATE orders SET status = 'filled', filled_quantity = ?, filled_amount = ?, broker_order_id = ?, updated_at = ? WHERE id = ?",
                     (quantity, net_amount + fees["total_fee"], broker_order_id, format_china_time(), db_order_id)
                 )
+
+                # 5. 策略现金增加（虚拟账户）
+                if inherited_strategy_id:
+                    await conn.execute(
+                        "UPDATE strategies SET strategy_cash = strategy_cash + ?, updated_at = ? WHERE id = ? AND account_id = ?",
+                        (net_amount, format_china_time(), inherited_strategy_id, self.account_id)
+                    )
+                    # 记录策略现金变动
+                    await conn.execute(
+                        """INSERT INTO strategy_cash_transactions
+                           (account_id, strategy_id, transaction_type, amount, stock_code, trade_record_id, reason, created_at)
+                           VALUES (?, ?, 'sell_add', ?, ?, ?, ?, ?)""",
+                        (self.account_id, inherited_strategy_id, net_amount, stock_code, trade_record_id, f"卖出 {stock_code}", format_china_time())
+                    )
 
             return {
                 "success": True,

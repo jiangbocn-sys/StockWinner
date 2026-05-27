@@ -157,13 +157,8 @@ class SchedulerService:
             if kline_check['need_download']:
                 logger.info(f"K线数据落后，最新数据: {kline_check['latest_date']}, 应有数据: {expected_date}")
 
-                # Step 2: 在新线程中启动K线增量下载（避免与APScheduler的事件循环冲突）
-                download_result: Dict = {}
-                def _do_download():
-                    download_result.update(self._run_kline_download())
-                thread = threading.Thread(target=_do_download)
-                thread.start()
-                thread.join()
+                # Step 2: K线增量下载（外层 _run_builtin_task_threadsafe 已在独立线程）
+                download_result = self._run_kline_download()
 
                 self._task_status['last_download_time'] = get_china_time().isoformat()
                 self._task_status['kline_status'] = download_result
@@ -178,12 +173,7 @@ class SchedulerService:
 
             # Step 3: 行业指数下载（独立任务，在因子计算之前）
             logger.info("下载申万行业指数数据...")
-            industry_result: Dict = {}
-            def _do_industry():
-                industry_result.update(self._run_industry_indices_download())
-            thread = threading.Thread(target=_do_industry)
-            thread.start()
-            thread.join()
+            industry_result = self._run_industry_indices_download()
             self._task_status['industry_indices_status'] = industry_result
 
             # Step 4: 检查因子覆盖率并补充缺失因子（无论K线是否下载）
@@ -193,17 +183,12 @@ class SchedulerService:
             if factor_check['need_calc']:
                 logger.info(f"因子覆盖率不足: {factor_check['coverage_pct']:.1f}%, 需补充 {factor_check['missing_count']} 只股票")
 
-                # 在新线程中启动因子补充计算
-                factor_result: Dict = {}
-                def _do_factor_calc():
-                    factor_result.update(self._run_daily_factor_calc(
-                        None,  # 让函数自动确定起始日期
-                        expected_date,
-                        force_full=False  # 仅计算缺失日期，不重算已有数据
-                    ))
-                thread = threading.Thread(target=_do_factor_calc)
-                thread.start()
-                thread.join()
+                # 因子补充计算（外层 _run_builtin_task_threadsafe 已在独立线程）
+                factor_result = self._run_daily_factor_calc(
+                    None,  # 让函数自动确定起始日期
+                    expected_date,
+                    force_full=False  # 仅计算缺失日期，不重算已有数据
+                )
 
                 self._task_status['last_factor_calc_time'] = get_china_time().isoformat()
                 self._task_status['factor_status'] = factor_result
@@ -696,13 +681,8 @@ class SchedulerService:
 
             if need_download:
                 logger.info(f"周K线覆盖度不足: {msg}，开始增量下载")
-                # 在新线程中启动周K线下载（避免与APScheduler的事件循环冲突）
-                result: Dict = {}
-                def _do_weekly():
-                    result.update(self._run_weekly_kline_download())
-                thread = threading.Thread(target=_do_weekly)
-                thread.start()
-                thread.join()
+                # 周K线下载（外层 _run_builtin_task_threadsafe 已在独立线程）
+                result = self._run_weekly_kline_download()
                 self._task_status['last_weekly_kline_download'] = get_china_time().isoformat()
                 self._task_status['weekly_kline_status'] = result
 
@@ -792,29 +772,6 @@ class SchedulerService:
             logger.warning(f"申万行业指数下载失败: {result.get('message', '未知错误')}")
 
         return result
-
-    def _post_market_analysis_job(self) -> Dict:
-        """盘后分析任务（DSA 分析已移除，用户通过页面手动触发）"""
-        logger.info("盘后分析任务已禁用 DSA 分析，跳过")
-        from services.common.task_manager import get_task_manager, TaskType
-
-        task_manager = get_task_manager()
-        task_type = TaskType.POST_MARKET_ANALYSIS
-
-        if task_manager.is_running(task_type):
-            return {'success': False, 'message': '分析任务正在运行中'}
-
-        task_manager.update_progress(task_type, 100, "DSA 分析已从盘后任务移除")
-        task_manager.complete_task(task_type, {'success': True, 'message': '已跳过'})
-        self._task_status['last_post_market_analysis'] = get_china_time().isoformat()
-        return {'success': True, 'message': '已跳过'}
-
-    def run_manual_post_market_analysis(self) -> Dict:
-        """手动触发盘后分析"""
-        logger.info("手动触发盘后分析")
-        thread = threading.Thread(target=self._post_market_analysis_job)
-        thread.start()
-        return {'success': True, 'message': '盘后分析任务已启动'}
 
     def get_status(self) -> Dict:
         """获取调度服务状态（含健康检查日志）"""
@@ -1545,18 +1502,71 @@ class SchedulerService:
                 logger.warning(f"T+1 解冻失败 ({row['account_id']}): {e}")
 
     def _execute_strategy_task_job(self, task_id: int):
-        """执行策略任务（在线程中运行）"""
+        """执行策略任务（根据任务类型选择执行方式）"""
         logger.info(f"开始执行策略任务 ID={task_id}")
 
-        # 在新事件循环中运行异步代码
+        # 先获取任务类型，决定执行方式
+        try:
+            from services.common.database import get_sync_connection
+            db_path = Path(__file__).parent.parent.parent / "data" / "stockwinner.db"
+            conn = get_sync_connection(path=db_path)
+            task_row = conn.execute("SELECT task_type, module FROM strategy_tasks WHERE id = ?", (task_id,)).fetchone()
+            conn.close()
+            task_type = task_row["task_type"] if task_row else "strategy"
+            module = task_row["module"] if task_row else None
+        except Exception:
+            task_type = "strategy"
+            module = None
+
+        # 内置任务（K线下载、因子计算等）是阻塞同步函数，在独立线程执行
+        # 使用 threading.RLock 的 SDKProxyClient 无跨循环问题
+        # 使用 sync sqlite3 连接池（不访问 aiosqlite pool）
+        if task_type == "builtin" and module in ("kline_check", "monthly_factors", "weekly_kline", "industry_indices"):
+            logger.info(f"内置阻塞任务 {task_id} ({module})，在独立线程执行")
+            thread = threading.Thread(
+                target=self._run_builtin_task_threadsafe,
+                args=(task_id,),
+                daemon=True
+            )
+            thread.start()
+            return
+
+        # 策略任务：提交到主循环执行（避免跨循环竞争）
+        main_loop = _get_fastapi_loop()
+        if main_loop and main_loop.is_running():
+            future = asyncio.run_coroutine_threadsafe(
+                self._execute_strategy_task(task_id, force=False),
+                main_loop
+            )
+            try:
+                result = future.result(timeout=300)
+                logger.info(f"策略任务 {task_id} 完成: {result}")
+            except TimeoutError:
+                logger.error(f"策略任务 {task_id} 超时（300秒）")
+                future.cancel()
+            except Exception as e:
+                logger.error(f"策略任务 {task_id} 执行异常: {e}", exc_info=True)
+        else:
+            logger.warning(f"FastAPI 主循环不可用，创建临时循环执行任务 {task_id}")
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                loop.run_until_complete(self._execute_strategy_task(task_id))
+            except Exception as e:
+                logger.error(f"策略任务 {task_id} 线程异常: {e}", exc_info=True)
+            finally:
+                loop.close()
+
+    def _run_builtin_task_threadsafe(self, task_id: int):
+        """在独立线程中运行内置阻塞任务"""
+        # 创建临时事件循环执行 async 部分
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
-            loop.run_until_complete(self._execute_strategy_task(task_id))
+            loop.run_until_complete(self._execute_strategy_task(task_id, force=False))
+            logger.info(f"内置任务 {task_id} 完成")
         except Exception as e:
-            # APScheduler daemon 线程中未捕获异常会静默退出，必须捕获
-            logger.error(f"策略任务 {task_id} 线程异常: {e}", exc_info=True)
-            # 尝试更新数据库状态
+            logger.error(f"内置任务 {task_id} 异常: {e}", exc_info=True)
             try:
                 from services.common.database import get_sync_connection
                 import json as _json
@@ -1564,7 +1574,7 @@ class SchedulerService:
                 conn = get_sync_connection(path=db_path)
                 conn.execute(
                     "UPDATE strategy_tasks SET last_status='error', last_output=? WHERE id=?",
-                    (_json.dumps({"error": f"线程异常: {e}"}, ensure_ascii=False), task_id)
+                    (_json.dumps({"error": str(e)}, ensure_ascii=False), task_id)
                 )
                 conn.commit()
                 conn.close()
@@ -1659,12 +1669,15 @@ class SchedulerService:
                     )
                     logger.info(f"交易型策略 '{strategy['name']}'，获取到 {len(stocks)} 只已买入股票")
                 elif task.get("full_market"):
-                    # 全市场模式：从 kline.db 获取所有股票代码
+                    # 全市场模式：从 kline.db 获取所有股票代码 + 名称
                     from services.common.database import get_sync_connection
                     knn = get_sync_connection("kline")
                     knn.row_factory = __import__('sqlite3').Row
-                    codes = knn.execute("SELECT DISTINCT stock_code FROM kline_data WHERE stock_code NOT LIKE '801%.SI'").fetchall()
-                    stocks = [{"stock_code": r["stock_code"], "stock_name": r["stock_code"]} for r in codes]
+                    # 从 stock_base_info 获取代码和名称（避免用代码作为名称）
+                    stocks_rows = knn.execute(
+                        "SELECT stock_code, stock_name FROM stock_base_info WHERE stock_code NOT LIKE '801%.SI'"
+                    ).fetchall()
+                    stocks = [{"stock_code": r["stock_code"], "stock_name": r["stock_name"] or r["stock_code"]} for r in stocks_rows]
                     logger.info(f"全市场策略 '{strategy['name']}'，获取到 {len(stocks)} 只股票")
                 else:
                     # 选股型策略：获取候选组股票
@@ -1851,10 +1864,15 @@ class SchedulerService:
                 signals = engine.execute_strategy(strategy, context)
                 logger.info(f"策略 '{strategy['name']}' 返回 {len(signals)} 个信号")
 
-                # 写入 watchlist
+                # 写入 watchlist（signal_action: trade=直接交易, watch=继续观察）
+                signal_action = task.get("signal_action", "trade") or "trade"
+                output_group_id = task.get("target_group_id") or task["group_id"]
+                source_group_id = task.get("group_id")  # 股票池来源分组
                 result = await engine.write_signals_to_watchlist(
-                    signals, task["account_id"], task["strategy_id"], task["group_id"],
+                    signals, task["account_id"], task["strategy_id"], output_group_id,
                     strategy_name=strategy.get("name", ""),
+                    signal_action=signal_action,
+                    source_group_id=source_group_id,
                 )
             else:
                 raise ValueError(f"不支持的任务类型: {task_type}")

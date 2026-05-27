@@ -19,13 +19,13 @@
       </el-card>
 
       <!-- 按策略分组统计 -->
-      <el-card v-if="strategyStats.length > 0" class="strategy-stats-card">
+      <el-card v-if="filteredStrategyStats.length > 0" class="strategy-stats-card">
         <template #header>
           <div class="card-header">
             <span>策略持仓统计</span>
           </div>
         </template>
-        <el-table :data="strategyStats" stripe size="small">
+        <el-table :data="filteredStrategyStats" stripe size="small">
           <el-table-column prop="strategy_name" label="策略名称" min-width="140" />
           <el-table-column prop="position_count" label="持仓数" width="80" align="center" />
           <el-table-column prop="total_mv" label="持仓市值" width="140" align="right">
@@ -41,10 +41,9 @@
           <el-table-column prop="position_pct" label="仓位占比" width="90" align="center">
             <template #default="{ row }">{{ row.position_pct.toFixed(1) }}%</template>
           </el-table-column>
-          <el-table-column prop="max_position_amount" label="买入上限" width="120" align="right">
+          <el-table-column prop="strategy_cash" label="可用现金" width="120" align="right">
             <template #default="{ row }">
-              <span v-if="row.max_position_amount">¥{{ formatNumber(row.max_position_amount) }}</span>
-              <span v-else class="text-muted">不限</span>
+              <span>¥{{ formatNumber(row.strategy_cash || 0) }}</span>
             </template>
           </el-table-column>
         </el-table>
@@ -112,10 +111,10 @@
           <el-table-column prop="take_profit_price" label="止盈价" width="100" align="right">
             <template #default="{ row }">{{ row.take_profit_price ? '¥' + Number(row.take_profit_price).toFixed(2) : '-' }}</template>
           </el-table-column>
-          <el-table-column label="操作" fixed="right" width="340">
+          <el-table-column label="操作" fixed="right" width="360">
             <template #default="{ row }">
               <el-button type="success" size="small" plain @click="openStrategyDialog(row)">止损止盈</el-button>
-              <el-button type="info" size="small" @click="handleDsaAnalysis(row)" :loading="dsaAnalyzing === row.stock_code">DSA 分析</el-button>
+              <el-button type="info" size="small" @click="handleDsaAnalysis(row)" :loading="dsaAnalyzing === row.stock_code">DSA</el-button>
               <el-button type="primary" size="small" @click="handleAction(row, 'add')">加仓</el-button>
               <el-button type="warning" size="small" @click="handleAction(row, 'reduce')">减仓</el-button>
               <el-button type="danger" size="small" @click="handleAction(row, 'clear')">清仓</el-button>
@@ -396,6 +395,11 @@ const marketValue = computed(() => posStore.marketValue)
 const totalPnl = computed(() => posStore.totalPnl)
 const totalAssets = computed(() => posStore.totalAssets)
 const pnlPercent = computed(() => posStore.pnlPercent)
+
+// 过滤策略持仓统计：只显示有持仓或有可用现金的策略
+const filteredStrategyStats = computed(() => {
+  return strategyStats.value.filter(s => (s.position_count > 0) || (s.strategy_cash > 0))
+})
 
 // 排序
 const posSortProp = ref('profit_loss')

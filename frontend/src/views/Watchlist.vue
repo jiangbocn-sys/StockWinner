@@ -152,7 +152,7 @@
               </div>
             </template>
 
-            <el-table :data="paginatedStocks" stripe style="width: 100%" v-loading="stocksLoading" @selection-change="handleStockSelectionChange" @row-dblclick="showKline" @sort-change="onTableSortChange">
+            <el-table :data="paginatedStocks" stripe style="width: 100%" v-loading="stocksLoading" @selection-change="handleStockSelectionChange" @row-dblclick="showKline" @sort-change="onTableSortChange" :cell-style="tableCellStyle">
               <el-table-column type="selection" width="50" />
               <el-table-column prop="stock_code" label="股票代码" width="120" sortable />
               <el-table-column prop="stock_name" label="股票名称" width="120" sortable />
@@ -162,7 +162,13 @@
               </el-table-column>
               <el-table-column prop="current_price" label="现价" width="90" align="right" sortable>
                 <template #default="{ row }">
-                  <span :style="{ color: row.current_price > row.trigger_price ? '#f56c6c' : row.current_price > 0 && row.current_price < row.trigger_price ? '#67c23a' : '' }">
+                  <span
+                    :class="{
+                      'price-up-bg': priceChangeHighlight.get(row.stock_code) === 'up',
+                      'price-down-bg': priceChangeHighlight.get(row.stock_code) === 'down'
+                    }"
+                    :style="{ color: row.current_price > row.trigger_price ? '#f56c6c' : row.current_price > 0 && row.current_price < row.trigger_price ? '#67c23a' : '' }"
+                  >
                     {{ row.current_price > 0 ? '¥' + row.current_price.toFixed(2) : '-' }}
                   </span>
                 </template>
@@ -605,6 +611,10 @@ const currentStocks = ref([])
 const stocksLoading = ref(false)
 const filterStatus = ref('')
 
+// 上一次价格（用于检测变化高亮）
+const prevPrices = ref(new Map())
+const priceChangeHighlight = ref(new Map()) // stock_code -> 'up' | 'down' | null
+
 // 分页
 const currentPage = ref(1)
 const pageSize = 20
@@ -641,7 +651,10 @@ const sortedCurrentStocks = computed(() => {
 const paginatedStocks = computed(() => {
   const sorted = sortedCurrentStocks.value
   const start = (currentPage.value - 1) * pageSize
-  return sorted.slice(start, start + pageSize)
+  return sorted.slice(start, start + pageSize).map(s => ({
+    ...s,
+    _highlight: s.stock_code === highlightedStockCode.value
+  }))
 })
 
 // K 线图
@@ -743,6 +756,7 @@ const renameForm = reactive({ groupId: null, name: '' })
 const associateForm = reactive({ groupId: null, screeningStrategyId: null })
 const addStockForm = reactive({
   selectedStockCode: '',
+  stockName: '',
   status: 'watching',
   buyPrice: null,
   stopLoss: null,
@@ -980,11 +994,40 @@ const loadCurrentGroupStocks = async () => {
   stocksLoading.value = true
   currentPage.value = 1
   try {
+    // 保存旧价格用于对比
+    const oldPrices = new Map()
+    for (const s of currentStocks.value) {
+      if (s.current_price > 0) {
+        oldPrices.set(s.stock_code, s.current_price)
+      }
+    }
+
     let url = `/api/v1/ui/${currentAccountId.value}/watchlist?group_id=${selectedGroupId.value}`
     if (filterStatus.value) url += `&status=${filterStatus.value}`
     const res = await fetch(url)
     const data = await res.json()
     currentStocks.value = data.watchlist || []
+
+    // 对比新旧价格，标记变化
+    const changes = new Map()
+    for (const s of currentStocks.value) {
+      const oldPrice = oldPrices.get(s.stock_code)
+      const newPrice = s.current_price
+      if (oldPrice && newPrice && oldPrice > 0 && newPrice > 0) {
+        if (newPrice > oldPrice) {
+          changes.set(s.stock_code, 'up')
+        } else if (newPrice < oldPrice) {
+          changes.set(s.stock_code, 'down')
+        }
+      }
+    }
+    priceChangeHighlight.value = changes
+    prevPrices.value = oldPrices
+
+    // 3秒后清除高亮
+    setTimeout(() => {
+      priceChangeHighlight.value = new Map()
+    }, 3000)
   } catch (e) {
     console.error('加载股票失败:', e)
   } finally {
@@ -1056,16 +1099,29 @@ const nextStock = async () => {
 // 搜索股票（智能搜索：代码/拼音/名称）
 // 股票快速定位搜索
 const stockQuickSearch = ref('')
+const highlightedStockCode = ref('')
+let highlightTimer = null
+
+const tableCellStyle = ({ row }) => {
+  return row._highlight ? { backgroundColor: '#ffe4e8' } : {}
+}
+
 const onQuickSearchSelect = (item) => {
-  const found = currentStocks.value.find(s => s.stock_code === item.stock_code)
+  const found = sortedCurrentStocks.value.find(s => s.stock_code === item.stock_code)
   if (found) {
     // 在列表中 → 筛选显示
     filterStatus.value = ''
-    // 将匹配的股票排到当前页第一位
-    const idx = currentStocks.value.findIndex(s => s.stock_code === item.stock_code)
+    // 用排序后的列表计算页码（与表格显示一致）
+    const idx = sortedCurrentStocks.value.findIndex(s => s.stock_code === item.stock_code)
     if (idx >= 0) {
       currentPage.value = Math.floor(idx / pageSize) + 1
     }
+    // 高亮显示该行（_highlight 标记在 paginatedStocks 中驱动）
+    highlightedStockCode.value = item.stock_code
+    if (highlightTimer) clearTimeout(highlightTimer)
+    highlightTimer = setTimeout(() => {
+      highlightedStockCode.value = ''
+    }, 8000)
     ElMessage.success(`${item.stock_code} 已在当前分组中`)
   } else {
     // 不在列表中 → 询问添加
@@ -1076,28 +1132,32 @@ const onQuickSearchSelect = (item) => {
     ).then(() => {
       showAddStockDialog.value = true
       addStockForm.selectedStockCode = item.stock_code
-      addStockForm.stock_name = item.stock_name
+      addStockForm.stockName = item.stock_name
     }).catch(() => {})
   }
   stockQuickSearch.value = ''
 }
 
-const searchStocksForAdd = async (query) => {
+const searchStocksForAdd = async (query, callback) => {
   if (!query || query.length < 1) {
     stockSearchResults.value = []
+    if (callback) callback([])
     return
   }
   searchingStocks.value = true
   try {
     const res = await fetch(`/api/v1/ui/stocks/search?q=${encodeURIComponent(query)}&limit=20`)
     const data = await res.json()
-    if (data.success && data.stocks) {
-      stockSearchResults.value = data.stocks
-    } else {
-      stockSearchResults.value = []
+    const results = (data.success && data.stocks) ? data.stocks : []
+    stockSearchResults.value = results
+    if (callback) {
+      // el-autocomplete fetch-suggestions 回调格式
+      callback(results.map(s => ({ value: s.stock_code, ...s })))
     }
   } catch (e) {
     console.error('搜索股票失败:', e)
+    stockSearchResults.value = []
+    if (callback) callback([])
   } finally {
     searchingStocks.value = false
   }
@@ -1109,14 +1169,33 @@ const submitAddStock = async () => {
     return
   }
 
-  // 从搜索结果中查找完整股票信息
-  const stock = stockSearchResults.value.find(s => s.stock_code === addStockForm.selectedStockCode)
-  if (!stock) {
-    ElMessage.warning('未找到股票信息，请重新选择')
-    return
+  const stockCode = addStockForm.selectedStockCode
+  let stockName = (addStockForm.stockName || '').trim()
+
+  // 如果名称未带入（对话框内直接搜索），从搜索结果中补全
+  if (!stockName) {
+    const found = stockSearchResults.value.find(s => s.stock_code === stockCode)
+    if (found) {
+      stockName = (found.stock_name || '').trim()
+    }
   }
-  const stockCode = stock.stock_code
-  const stockName = (stock.stock_name || '').trim()
+
+  // 仍未获取到名称 → 直接查 API
+  if (!stockName) {
+    try {
+      const infoRes = await fetch(`/api/v1/ui/stocks/search?q=${encodeURIComponent(stockCode)}&limit=1`)
+      const infoData = await infoRes.json()
+      if (infoData.success && infoData.stocks?.length > 0) {
+        stockName = (infoData.stocks[0].stock_name || '').trim()
+      }
+    } catch (e) {
+      // ignore
+    }
+    if (!stockName) {
+      ElMessage.warning('未找到股票信息，请重新选择')
+      return
+    }
+  }
 
   addingStock.value = true
   try {
@@ -1154,6 +1233,7 @@ const submitAddStock = async () => {
 
 const resetAddStockForm = () => {
   addStockForm.selectedStockCode = ''
+  addStockForm.stockName = ''
   addStockForm.status = 'watching'
   addStockForm.triggerPrice = null
   addStockForm.stopLoss = null
@@ -1703,11 +1783,41 @@ const startWatchlistPriceRefresh = () => {
   watchlistPriceTimer = setInterval(async () => {
     try {
       if (!selectedGroupId.value) return
+
+      // 保存旧价格用于对比
+      const oldPrices = new Map()
+      for (const s of currentStocks.value) {
+        if (s.current_price > 0) {
+          oldPrices.set(s.stock_code, s.current_price)
+        }
+      }
+
       let url = `/api/v1/ui/${currentAccountId.value}/watchlist?group_id=${selectedGroupId.value}`
       if (filterStatus.value) url += `&status=${filterStatus.value}`
       const res = await fetch(url)
       const data = await res.json()
       currentStocks.value = data.watchlist || []
+
+      // 对比新旧价格，标记变化
+      const changes = new Map()
+      for (const s of currentStocks.value) {
+        const oldPrice = oldPrices.get(s.stock_code)
+        const newPrice = s.current_price
+        if (oldPrice && newPrice && oldPrice > 0 && newPrice > 0) {
+          if (newPrice > oldPrice) {
+            changes.set(s.stock_code, 'up')
+          } else if (newPrice < oldPrice) {
+            changes.set(s.stock_code, 'down')
+          }
+        }
+      }
+      if (changes.size > 0) {
+        priceChangeHighlight.value = changes
+        // 3秒后清除高亮
+        setTimeout(() => {
+          priceChangeHighlight.value = new Map()
+        }, 3000)
+      }
     } catch (e) {
       // 静默失败
     }
@@ -1740,6 +1850,21 @@ onMounted(async () => {
 .progress-card { margin-bottom: 20px; }
 .progress-details { display: flex; justify-content: space-between; margin-top: 10px; font-size: 13px; color: #606266; }
 .main-row { margin-bottom: 20px; }
+
+/* 价格变化高亮 */
+.price-up-bg {
+  background-color: #ffe4e4;  /* 淡粉 - 价格上涨 */
+  padding: 2px 6px;
+  border-radius: 3px;
+  display: inline-block;
+}
+.price-down-bg {
+  background-color: #e4ffe4;  /* 淡绿 - 价格下跌 */
+  padding: 2px 6px;
+  border-radius: 3px;
+  display: inline-block;
+}
+
 .main-row.resizable-split { display: flex; gap: 0; align-items: stretch; }
 .main-row.resizable-split .left-panel { min-width: 180px; max-width: 500px; }
 .main-row.resizable-split .right-panel { flex: 1; min-width: 400px; }
@@ -1803,4 +1928,5 @@ onMounted(async () => {
   text-align: center;
   font-family: monospace;
 }
+
 </style>

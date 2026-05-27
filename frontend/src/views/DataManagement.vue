@@ -224,6 +224,19 @@
                     <el-switch v-model="newTaskForm.fullMarket" :active-value="1" :inactive-value="0" />
                     <span class="hint" style="margin-left: 8px; color: #E6A23C">遍历全部A股（非交易时段使用），无需选分组</span>
                   </el-form-item>
+                  <el-form-item label="信号处理">
+                    <el-radio-group v-model="newTaskForm.signalAction">
+                      <el-radio value="trade">直接交易</el-radio>
+                      <el-radio value="watch">继续观察</el-radio>
+                    </el-radio-group>
+                    <div class="hint" style="color: #909399">"直接交易"写入pending待监控执行，"继续观察"写入watching仅跟踪</div>
+                  </el-form-item>
+                  <el-form-item v-if="newTaskForm.signalAction === 'watch'" label="目标分组">
+                    <el-select v-model="newTaskForm.targetGroupId" placeholder="选择信号输出分组（不选则写入源分组）" style="width: 100%" clearable>
+                      <el-option v-for="g in targetGroupOptions" :key="g.id" :label="g.name" :value="g.id" :disabled="g.id === newTaskForm.groupId" />
+                    </el-select>
+                    <div class="hint" style="color: #E6A23C">二次筛选结果写入此分组，不可与源分组相同</div>
+                  </el-form-item>
                   <el-form-item>
                     <el-button type="primary" @click="createTask" :loading="creatingTask">
                       {{ editingTaskId ? '更新任务' : '创建任务' }}
@@ -421,12 +434,18 @@ const newTaskForm = reactive({
   cronText: '',
   enabled: 1,
   requireTradingDay: 0,
-  fullMarket: 0
+  fullMarket: 0,
+  signalAction: 'trade',
+  targetGroupId: null
 })
 
 const filteredStrategyTasks = computed(() => {
   if (!taskFilterGroup.value) return strategyTasks.value
   return strategyTasks.value.filter(t => t.group_id === taskFilterGroup.value)
+})
+
+const targetGroupOptions = computed(() => {
+  return candidateGroups.value.filter(g => g.id !== newTaskForm.groupId)
 })
 
 const taskCategoryGroups = computed(() => {
@@ -752,6 +771,7 @@ const createTask = async () => {
       enabled: newTaskForm.enabled,
       require_trading_day: newTaskForm.requireTradingDay,
       full_market: newTaskForm.fullMarket,
+      signal_action: newTaskForm.signalAction,
     }
     if (newTaskForm.taskType === 'builtin') {
       body.module = newTaskForm.module
@@ -759,6 +779,9 @@ const createTask = async () => {
     } else {
       body.strategy_id = newTaskForm.strategyId
       body.group_id = newTaskForm.fullMarket ? null : newTaskForm.groupId
+      if (newTaskForm.signalAction === 'watch' && newTaskForm.targetGroupId) {
+        body.target_group_id = newTaskForm.targetGroupId
+      }
     }
 
     let res
@@ -800,6 +823,9 @@ const cancelEditTask = () => {
   newTaskForm.cronText = ''
   newTaskForm.enabled = 1
   newTaskForm.requireTradingDay = 0
+  newTaskForm.fullMarket = 0
+  newTaskForm.signalAction = 'trade'
+  newTaskForm.targetGroupId = null
   cronDescription.value = ''
 }
 
@@ -879,6 +905,9 @@ const editTask = (task) => {
   newTaskForm.cronText = ''
   newTaskForm.enabled = task.enabled
   newTaskForm.requireTradingDay = task.require_trading_day || 0
+  newTaskForm.fullMarket = task.full_market || 0
+  newTaskForm.signalAction = task.signal_action || 'trade'
+  newTaskForm.targetGroupId = task.target_group_id || null
   cronDescription.value = ''
   showCreateTaskForm.value = true
   activeTaskForm.value = 'form'

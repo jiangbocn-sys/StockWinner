@@ -119,9 +119,12 @@ class DatabaseManager:
                     pass
             self._initialized = False
 
-    def _acquire(self):
-        """从池中获取一个连接（非阻塞，用于上下文）"""
-        return self._pool.get()
+    async def _acquire(self):
+        """从池中获取一个连接（自动处理事件循环切换和初始化）"""
+        self._ensure_loop_resources()
+        if self._pool is None or not self._initialized:
+            await self.connect()
+        return await self._pool.get()
 
     async def _release(self, conn):
         """将连接释放回池中"""
@@ -334,9 +337,14 @@ def reset_db_manager():
 # 同步连接池 — 供后台任务、定时任务、工具脚本使用
 # ================================================================
 
-# 每个线程独立的连接缓存：thread_id → (db_name → connection)
-_thread_connections: Dict[int, Dict[str, sqlite3.Connection]] = {}
+# 连接老化配置
+_CONNECTION_MAX_AGE_SECONDS = 3600  # 1小时未使用则清理
+_CONNECTION_MAX_IDLE_COUNT = 50     # 最多缓存50个连接
+
+# 每个线程独立的连接缓存：thread_id → {cache_key: (connection, last_used_time)}
+_thread_connections: Dict[int, Dict[str, Tuple[sqlite3.Connection, float]]] = {}
 _connections_lock = threading.Lock()
+_last_cleanup_time: float = 0.0  # 上次清理时间
 
 # 已知数据库路径
 DATABASE_PATHS = {
@@ -368,7 +376,7 @@ def configure_kline_connection(conn: sqlite3.Connection):
 def get_sync_connection(db_name: str = "stockwinner",
                         path: Optional[Path] = None) -> sqlite3.Connection:
     """
-    获取预配置的 sqlite3 连接（线程缓存，自动复用）
+    获取预配置的 sqlite3 连接（线程缓存，自动复用，老化清理）
 
     Args:
         db_name: 预定义数据库名称 ("stockwinner" | "kline")
@@ -381,7 +389,14 @@ def get_sync_connection(db_name: str = "stockwinner",
         conn = get_sync_connection("kline")
         cursor = conn.execute("SELECT ...")
         # 连接自动缓存，无需手动 close
+
+    资源管理:
+        - 连接缓存带 last_used_time 时间戳
+        - 每次获取连接时检查老化，清理超过1小时未用的连接
+        - 总缓存数超过50时，清理最旧的连接
     """
+    global _last_cleanup_time
+
     db_path = path or DATABASE_PATHS.get(db_name)
     if db_path is None:
         raise ValueError(f"未知数据库: {db_name}，可选: {list(DATABASE_PATHS.keys())}")
@@ -390,31 +405,90 @@ def get_sync_connection(db_name: str = "stockwinner",
 
     thread_id = threading.current_thread().ident
     cache_key = f"{thread_id}:{db_path}"
+    now = time.monotonic()
 
     with _connections_lock:
+        # 定期清理老化连接（每次调用检查，但只每5分钟执行一次清理）
+        if now - _last_cleanup_time > 300:
+            _cleanup_stale_connections(now)
+            _last_cleanup_time = now
+
         thread_conns = _thread_connections.get(thread_id)
         if thread_conns is None:
             thread_conns = {}
             _thread_connections[thread_id] = thread_conns
 
-        conn = thread_conns.get(cache_key)
-        if conn is None:
+        entry = thread_conns.get(cache_key)
+        if entry is None:
             conn = sqlite3.connect(str(db_path))
             conn.row_factory = sqlite3.Row
             _configure_connection(conn)
-            thread_conns[cache_key] = conn
+            thread_conns[cache_key] = (conn, now)
         else:
+            conn, last_used = entry
             # 验证连接是否仍然有效
             try:
                 conn.execute("SELECT 1")
+                # 更新使用时间
+                thread_conns[cache_key] = (conn, now)
             except Exception:
-                conn.close()
+                try:
+                    conn.close()
+                except Exception:
+                    pass
                 conn = sqlite3.connect(str(db_path))
                 conn.row_factory = sqlite3.Row
                 _configure_connection(conn)
-                thread_conns[cache_key] = conn
+                thread_conns[cache_key] = (conn, now)
 
     return conn
+
+
+def _cleanup_stale_connections(now: float):
+    """清理老化连接：超过1小时未用或总缓存超过限制"""
+    total_count = 0
+    stale_keys = []
+
+    # 统计并收集老化连接
+    for thread_id, thread_conns in list(_thread_connections.items()):
+        for cache_key, entry in list(thread_conns.items()):
+            conn, last_used = entry
+            total_count += 1
+            age = now - last_used
+            if age > _CONNECTION_MAX_AGE_SECONDS:
+                stale_keys.append((thread_id, cache_key, conn, age))
+
+    # 清理老化连接
+    for thread_id, cache_key, conn, age in stale_keys:
+        try:
+            conn.close()
+            logger.debug(f"关闭老化连接: {cache_key} (age={age:.0f}s)")
+        except Exception:
+            pass
+        if thread_id in _thread_connections:
+            _thread_connections[thread_id].pop(cache_key, None)
+
+    # 如果总缓存数超过限制，清理最旧的
+    if total_count > _CONNECTION_MAX_IDLE_COUNT:
+        # 按使用时间排序，清理最旧的
+        all_entries = []
+        for thread_id, thread_conns in _thread_connections.items():
+            for cache_key, entry in thread_conns.items():
+                conn, last_used = entry
+                all_entries.append((thread_id, cache_key, conn, last_used))
+
+        all_entries.sort(key=lambda x: x[3])  # 按使用时间升序
+        excess_count = total_count - _CONNECTION_MAX_IDLE_COUNT
+
+        for i in range(min(excess_count, len(all_entries))):
+            thread_id, cache_key, conn, _ = all_entries[i]
+            try:
+                conn.close()
+                logger.debug(f"关闭超限连接: {cache_key}")
+            except Exception:
+                pass
+            if thread_id in _thread_connections:
+                _thread_connections[thread_id].pop(cache_key, None)
 
 
 @contextmanager
@@ -474,21 +548,25 @@ def close_all_sync_connections():
     thread_id = threading.current_thread().ident
     with _connections_lock:
         thread_conns = _thread_connections.get(thread_id, {})
-        for conn in thread_conns.values():
+        for cache_key, entry in list(thread_conns.items()):
+            conn, _ = entry
             try:
                 conn.close()
             except Exception:
                 pass
-        thread_conns.clear()
+        if thread_id in _thread_connections:
+            _thread_connections[thread_id].clear()
 
 
 def close_all_sync_connections_all_threads():
     """关闭所有线程的所有同步连接（用于服务停止时清理）"""
     with _connections_lock:
-        for thread_conns in _thread_connections.values():
-            for conn in thread_conns.values():
+        for thread_id, thread_conns in list(_thread_connections.items()):
+            for cache_key, entry in list(thread_conns.items()):
+                conn, _ = entry
                 try:
                     conn.close()
                 except Exception:
                     pass
+            thread_conns.clear()
         _thread_connections.clear()
