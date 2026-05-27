@@ -96,7 +96,7 @@ class SignalExecutor:
             price=current_price,
             target_quantity=target_quantity,
             trigger_source=trigger_source,
-            strategy_id=stock.get('strategy_id'),
+            strategy_id=stock.get('strategy_id') or 0,  # 手动买入时 strategy_id=0
         )
 
         if result["success"]:

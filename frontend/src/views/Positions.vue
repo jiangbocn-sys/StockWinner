@@ -23,9 +23,10 @@
         <template #header>
           <div class="card-header">
             <span>策略持仓统计</span>
+            <span v-if="selectedStrategyId != null" class="filter-hint">（已筛选）</span>
           </div>
         </template>
-        <el-table :data="filteredStrategyStats" stripe size="small">
+        <el-table :data="filteredStrategyStats" stripe size="small" @row-click="onStrategyRowClick" :row-class-name="strategyRowClass">
           <el-table-column prop="strategy_name" label="策略名称" min-width="140" />
           <el-table-column prop="position_count" label="持仓数" width="80" align="center" />
           <el-table-column prop="total_mv" label="持仓市值" width="140" align="right">
@@ -401,6 +402,29 @@ const filteredStrategyStats = computed(() => {
   return strategyStats.value.filter(s => (s.position_count > 0) || (s.strategy_cash > 0))
 })
 
+// 策略筛选状态
+const selectedStrategyId = ref(null)
+
+// 点击策略行：切换筛选
+const onStrategyRowClick = (row) => {
+  if (selectedStrategyId.value === row.strategy_id) {
+    // 再次点击同一策略 → 取消筛选
+    selectedStrategyId.value = null
+  } else {
+    // 点击其他策略 → 筛选该策略
+    selectedStrategyId.value = row.strategy_id
+  }
+  posCurrentPage.value = 1 // 重置分页
+}
+
+// 策略表格行样式
+const strategyRowClass = ({ row }) => {
+  if (row.strategy_id === selectedStrategyId.value) {
+    return 'strategy-row-selected'
+  }
+  return ''
+}
+
 // 排序
 const posSortProp = ref('profit_loss')
 const posSortOrder = ref('descending')
@@ -410,9 +434,15 @@ const onPosSortChange = ({ prop, order }) => {
   posCurrentPage.value = 1
 }
 
-// 分页（先全量排序再分页）
+// 分页（先筛选再全量排序再分页）
 const sortedPositions = computed(() => {
-  const arr = [...positions.value]
+  // 先按策略筛选
+  let arr = positions.value
+  if (selectedStrategyId.value != null) {
+    arr = arr.filter(p => p.strategy_id === selectedStrategyId.value)
+  }
+  // 再排序
+  arr = [...arr]
   const prop = posSortProp.value
   const desc = posSortOrder.value === 'descending'
   arr.sort((a, b) => {
@@ -964,6 +994,12 @@ h2 {
   align-items: center;
 }
 
+.filter-hint {
+  color: #409eff;
+  font-size: 12px;
+  margin-left: 8px;
+}
+
 .detail-tabs {
   flex: 1;
 }
@@ -984,6 +1020,16 @@ h2 {
 .profit-negative {
   color: #67c23a;
   font-weight: bold;
+}
+
+/* 策略表格行选中高亮（覆盖 stripe 灰度） */
+:deep(.strategy-row-selected td),
+:deep(.strategy-row-selected.el-table__row--striped td) {
+  background-color: #d9ecff !important;
+}
+
+:deep(.el-table__row) {
+  cursor: pointer;
 }
 
 .dsa-loading {
