@@ -39,6 +39,7 @@ PERMISSIONS = [
     "strategy:delete",
     "strategy:execute",
     "screening:create",
+    "watchlist:manage",  # 候选组管理（添加/删除股票、创建/删除组）
     "scheduler:start",
     "scheduler:stop",
     "monitoring:start",
@@ -62,6 +63,7 @@ ROLE_PERMISSIONS: Dict[str, List[str]] = {
         "strategy:update",
         "screening:create",
         "strategy:execute",
+        "watchlist:manage",
     ],
     AgentRole.OPERATOR: [
         "query:*",
@@ -70,6 +72,7 @@ ROLE_PERMISSIONS: Dict[str, List[str]] = {
         "strategy:delete",
         "strategy:execute",
         "screening:create",
+        "watchlist:manage",
         "scheduler:start",
         "scheduler:stop",
         "monitoring:start",
@@ -83,6 +86,7 @@ ROLE_PERMISSIONS: Dict[str, List[str]] = {
         "strategy:delete",
         "strategy:execute",
         "screening:create",
+        "watchlist:manage",
         "scheduler:start",
         "scheduler:stop",
         "monitoring:start",

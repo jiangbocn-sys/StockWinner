@@ -259,6 +259,21 @@ async def get_agent_spec():
                     {"method": "DELETE", "path": "/api/v1/agent/strategy/{id}?account_id=xxx", "desc": "删除策略（需 strategist 角色，清理关联数据）"},
                 ],
             },
+            "watchlist_endpoints": {
+                "description": "候选组管理，viewer 及以上角色可用（写操作需 watchlist:manage 权限）",
+                "endpoints": [
+                    {"method": "GET", "path": "/api/v1/ui/{account_id}/candidate-groups", "desc": "获取候选组列表"},
+                    {"method": "POST", "path": "/api/v1/ui/{account_id}/candidate-groups", "desc": "创建候选组", "body": '{"name":"组名","group_type":"manual"}'},
+                    {"method": "PUT", "path": "/api/v1/ui/{account_id}/candidate-groups/{group_id}", "desc": "修改候选组名称", "body": '{"name":"新名称"}'},
+                    {"method": "DELETE", "path": "/api/v1/ui/{account_id}/candidate-groups/{group_id}", "desc": "删除候选组（连带组内股票）"},
+                    {"method": "POST", "path": "/api/v1/ui/{account_id}/watchlist", "desc": "添加股票到候选组", "body": '{"stock_code":"600000.SH","group_id":1,"stock_name":"浦发银行","status":"watching"}'},
+                    {"method": "POST", "path": "/api/v1/ui/{account_id}/watchlist/batch-add", "desc": "批量添加股票", "body": '{"group_id":1,"stocks":[{"stock_code":"600000.SH","stock_name":"浦发银行"}]}'},
+                    {"method": "DELETE", "path": "/api/v1/ui/{account_id}/watchlist/{stock_code}?group_id=1", "desc": "从候选组移除股票"},
+                    {"method": "PUT", "path": "/api/v1/ui/{account_id}/watchlist/{stock_code}/status", "desc": "修改股票状态", "body": '{"status":"pending"}'},
+                    {"method": "POST", "path": "/api/v1/ui/{account_id}/watchlist/batch-status", "desc": "批量修改状态", "body": '{"stock_codes":["600000.SH"],"status":"watching"}'},
+                ],
+                "note": "Agent 通过 X-Agent-Key header 访问 UI 端点。group_id 查询参数可选，不指定时删除账户内所有该股票记录。",
+            },
             "admin_endpoints": {
                 "description": "管理员功能，admin 角色",
                 "endpoints": [
