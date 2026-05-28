@@ -19,7 +19,7 @@
               </el-dropdown-menu>
             </template>
           </el-dropdown>
-          <el-button @click="loadSignals">
+          <el-button @click="loadSignals" :loading="loading">
             <el-icon><Refresh /></el-icon>
             刷新
           </el-button>
@@ -222,9 +222,11 @@ const handleExportSignals = (format) => {
 const loadSignals = async () => {
   loading.value = true
   try {
+    // 添加时间戳防止浏览器缓存
+    const ts = Date.now()
     const url = filterType.value
-      ? `/api/v1/ui/${currentAccountId.value}/signals?signal_type=${filterType.value}`
-      : `/api/v1/ui/${currentAccountId.value}/signals`
+      ? `/api/v1/ui/${currentAccountId.value}/signals?signal_type=${filterType.value}&_t=${ts}`
+      : `/api/v1/ui/${currentAccountId.value}/signals?_t=${ts}`
 
     const response = await fetch(url)
     const data = await response.json()

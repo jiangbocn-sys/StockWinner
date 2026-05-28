@@ -53,7 +53,7 @@
                         size="small"
                         @change="loadTrades"
                       />
-                      <el-button type="primary" size="small" @click="loadTrades">
+                      <el-button type="primary" size="small" @click="loadTrades" :loading="tradesLoading">
                         <el-icon><Refresh /></el-icon>
                         刷新
                       </el-button>
@@ -210,6 +210,7 @@ function startDrag(e) {
 // ============================================================
 const dateRange = ref([])
 const trades = ref([])
+const tradesLoading = ref(false)
 const stats = reactive({
   totalCount: 0,
   buyCount: 0,
@@ -235,18 +236,21 @@ const handleExportTrades = (format) => {
 }
 
 const loadTrades = async () => {
+  tradesLoading.value = true
   try {
+    // 添加时间戳防止浏览器缓存
+    const ts = Date.now()
     let response
     if (dateRange.value && dateRange.value.length === 2) {
       // 有日期范围 → 调用历史交易接口
       const startDate = dateRange.value[0].toISOString().slice(0, 10)
       const endDate = dateRange.value[1].toISOString().slice(0, 10)
       response = await fetch(
-        `/api/v1/ui/${currentAccountId.value}/trades?start_date=${startDate}&end_date=${endDate}&limit=200`
+        `/api/v1/ui/${currentAccountId.value}/trades?start_date=${startDate}&end_date=${endDate}&limit=200&_t=${ts}`
       )
     } else {
       // 无日期范围 → 默认今日
-      response = await fetch(`/api/v1/ui/${currentAccountId.value}/trades/today`)
+      response = await fetch(`/api/v1/ui/${currentAccountId.value}/trades/today?_t=${ts}`)
     }
     const data = await response.json()
     trades.value = data.trades || []
@@ -255,6 +259,9 @@ const loadTrades = async () => {
     stats.sellCount = data.stats?.sell_count || 0
   } catch (error) {
     console.error('加载交易数据失败:', error)
+    ElMessage.error('加载交易数据失败')
+  } finally {
+    tradesLoading.value = false
   }
 }
 

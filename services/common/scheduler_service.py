@@ -15,7 +15,7 @@ import threading
 import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional, Dict, Tuple
+from typing import Optional, Dict, Tuple, Any
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -65,6 +65,33 @@ class SchedulerService:
             'kline_status': None,
             'factor_status': None
         }
+
+    def _run_in_main_loop(self, coro, timeout: float = 30.0) -> Optional[Any]:
+        """在主事件循环中安全执行协程（用于 APScheduler daemon 线程）
+
+        使用 run_coroutine_threadsafe 提交到 FastAPI 主循环，避免临时循环导致 aiosqlite 连接失效。
+
+        Args:
+            coro: 协程对象
+            timeout: 等待超时时间（秒）
+
+        Returns:
+            协程执行结果，或超时/异常时返回 None
+        """
+        main_loop = _get_fastapi_loop()
+        if main_loop is None or main_loop.is_closed():
+            logger.warning("主事件循环不可用，无法执行协程")
+            return None
+
+        try:
+            future = asyncio.run_coroutine_threadsafe(coro, main_loop)
+            return future.result(timeout=timeout)
+        except TimeoutError:
+            logger.warning(f"协程执行超时 ({timeout}s)")
+            return None
+        except Exception as e:
+            logger.error(f"协程执行异常: {e}")
+            return None
 
     def start(self):
         """启动调度服务"""
@@ -968,12 +995,7 @@ class SchedulerService:
                     logger.warning(f"price_cache 心跳: monitor 订阅不存在，触发兜底")
 
                 if "monitor" in status.get("subscriptions", {}):
-                    import asyncio
-                    loop = asyncio.new_event_loop()
-                    try:
-                        loop.run_until_complete(dispatcher.refresh_now("monitor"))
-                    finally:
-                        loop.close()
+                    self._run_in_main_loop(dispatcher.refresh_now("monitor"), timeout=60.0)
             else:
                 # 非交易时段：数据过期时触发一次刷新（SDK query_kline 可获取当日收盘价）
                 if not status.get("data_stale") and status.get("sdk_healthy"):
@@ -981,12 +1003,7 @@ class SchedulerService:
 
                 logger.info(f"price_cache 心跳: 非交易时段数据过期，触发 SDK kline 兜底")
                 if "monitor" in status.get("subscriptions", {}):
-                    import asyncio
-                    loop = asyncio.new_event_loop()
-                    try:
-                        loop.run_until_complete(dispatcher.refresh_now("monitor"))
-                    finally:
-                        loop.close()
+                    self._run_in_main_loop(dispatcher.refresh_now("monitor"), timeout=60.0)
 
             # --- 持仓 + watchlist 股缓存新鲜度检查（交易/非交易时段均执行） ---
             self._check_and_refresh_user_cache(cache, dispatcher)
@@ -1042,11 +1059,7 @@ class SchedulerService:
             sub_id = "_user_cache_fallback"
             dispatcher.subscribe(sub_id, stale_codes, interval=0, priority=3)
 
-            loop = asyncio.new_event_loop()
-            try:
-                loop.run_until_complete(dispatcher.refresh_now(sub_id))
-            finally:
-                loop.close()
+            self._run_in_main_loop(dispatcher.refresh_now(sub_id), timeout=60.0)
             dispatcher.unsubscribe(sub_id)
 
             refreshed = sum(
@@ -1141,22 +1154,8 @@ class SchedulerService:
                         ).fetchall()
                         positions_conn.close()
 
-                        # 先尝试自动重启（用 run_async_safe 确保数据库连接池正常初始化）
-                        import asyncio
-                        from services.common.async_helper import run_async_safe
-
-                        result: dict = {}
-                        def _restart_monitor():
-                            loop = asyncio.new_event_loop()
-                            asyncio.set_event_loop(loop)
-                            try:
-                                result.update(loop.run_until_complete(
-                                    monitor.start_monitoring(interval=60)
-                                ))
-                            finally:
-                                loop.close()
-
-                        run_async_safe(_restart_monitor)
+                        # 使用主事件循环重启监控
+                        result = self._run_in_main_loop(monitor.start_monitoring(interval=60), timeout=30.0) or {}
                         if result.get("success"):
                             logger.info(f"交易监控已自动重启: {result.get('message')}")
                         else:
@@ -1232,15 +1231,24 @@ class SchedulerService:
                 logger.error(f"检查交易监控状态失败: {e}")
 
     def _monitor_auto_start_job(self):
-        """9:15 定时任务 — 自动启动交易监控"""
+        """9:15 定时任务 — 自动启动交易监控
+
+        使用 run_coroutine_threadsafe 提交到主事件循环，避免临时循环导致 aiosqlite 连接失效。
+        """
         logger.info("执行交易监控自动启动任务")
 
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
         try:
-            loop.run_until_complete(self._do_monitor_auto_start())
-        finally:
-            loop.close()
+            main_loop = asyncio.get_event_loop()
+            if main_loop.is_closed():
+                logger.warning("主事件循环已关闭，无法启动监控")
+                return
+
+            future = asyncio.run_coroutine_threadsafe(self._do_monitor_auto_start(), main_loop)
+            future.result(timeout=30.0)  # 等待完成，最多 30 秒
+        except RuntimeError as e:
+            logger.warning(f"无法获取事件循环: {e}")
+        except Exception as e:
+            logger.error(f"监控自动启动异常: {e}")
 
     async def _do_monitor_auto_start(self):
         """检查并自动启动交易监控"""
@@ -1564,41 +1572,15 @@ class SchedulerService:
             except Exception as e:
                 logger.error(f"策略任务 {task_id} 执行异常: {e}", exc_info=True)
         else:
-            logger.warning(f"FastAPI 主循环不可用，创建临时循环执行任务 {task_id}")
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                loop.run_until_complete(self._execute_strategy_task(task_id))
-            except Exception as e:
-                logger.error(f"策略任务 {task_id} 线程异常: {e}", exc_info=True)
-            finally:
-                loop.close()
+            logger.warning(f"FastAPI 主循环不可用，跳过策略任务 {task_id}（避免 aiosqlite 事件循环冲突）")
 
     def _run_builtin_task_threadsafe(self, task_id: int):
-        """在独立线程中运行内置阻塞任务"""
-        # 创建临时事件循环执行 async 部分
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            loop.run_until_complete(self._execute_strategy_task(task_id, force=False))
-            logger.info(f"内置任务 {task_id} 完成")
-        except Exception as e:
-            logger.error(f"内置任务 {task_id} 异常: {e}", exc_info=True)
-            try:
-                from services.common.database import get_sync_connection
-                import json as _json
-                db_path = Path(__file__).parent.parent.parent / "data" / "stockwinner.db"
-                conn = get_sync_connection(path=db_path)
-                conn.execute(
-                    "UPDATE strategy_tasks SET last_status='error', last_output=? WHERE id=?",
-                    (_json.dumps({"error": str(e)}, ensure_ascii=False), task_id)
-                )
-                conn.commit()
-                conn.close()
-            except Exception:
-                pass
-        finally:
-            loop.close()
+        """在主事件循环中运行内置任务（避免临时循环导致 aiosqlite 问题）"""
+        result = self._run_in_main_loop(self._execute_strategy_task(task_id, force=False), timeout=300.0)
+        if result:
+            logger.info(f"内置任务 {task_id} 完成: {result}")
+        else:
+            logger.warning(f"内置任务 {task_id} 未执行（主循环不可用或超时）")
 
     async def _execute_strategy_task(self, task_id: int, force: bool = False):
         """异步执行任务（支持 builtin 和 strategy 两种类型）
@@ -1961,23 +1943,12 @@ class SchedulerService:
                         ))
 
             from services.common.async_helper import run_async_safe
-            result = {}
-            def _do_reload():
-                loop = asyncio.new_event_loop()
-                try:
-                    loop.run_until_complete(_reload())
-                    result['success'] = True
-                except Exception as e:
-                    result['success'] = False
-                    result['error'] = str(e)
-                finally:
-                    loop.close()
-
-            run_async_safe(_do_reload)
-            if result.get('success'):
+            # 使用主事件循环执行重新加载
+            result = self._run_in_main_loop(_reload(), timeout=60.0)
+            if result:
                 logger.info("ChannelRouter 配置已重新加载")
             else:
-                logger.warning(f"ChannelRouter 重新加载失败: {result.get('error')}")
+                logger.warning("ChannelRouter 重新加载失败（主循环不可用或超时）")
         except Exception as e:
             logger.error(f"_reload_channel_router 失败: {e}")
 

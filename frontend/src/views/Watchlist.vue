@@ -17,7 +17,7 @@
             <el-icon><Upload /></el-icon>
             导入文件
           </el-button>
-          <el-button @click="loadAll">
+          <el-button @click="loadAll" :loading="wlStore.loaded === false">
             <el-icon><Refresh /></el-icon>
             刷新
           </el-button>
