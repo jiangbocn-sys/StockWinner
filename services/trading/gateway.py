@@ -81,68 +81,103 @@ class TradingGateway(TradingGatewayInterface):
 
     async def get_kline_data(
         self, stock_code: str, period: str = "day",
-        start_date: Optional[str] = None, end_date: Optional[str] = None, limit: int = 100
+        start_date: Optional[str] = None, end_date: Optional[str] = None,
+        limit: int = 100, priority: int = 1
     ) -> List[Dict[str, Any]]:
+        """获取 K 线数据（用户查询，默认 high priority）"""
         return await self._kline_data.get_kline_data(
-            stock_code, period, start_date, end_date, limit, connected=self.connected
+            stock_code, period, start_date, end_date, limit,
+            task_type="query", priority=priority, connected=self.connected
         )
 
     async def get_batch_kline_data(
         self, stock_codes: List[str], period: str = "day",
         start_date: Optional[str] = None, end_date: Optional[str] = None,
-        limit: int = 100, task_type: str = "query"
+        limit: int = 100, task_type: str = "query", priority: int = 1
     ) -> Dict[str, Any]:
+        """批量获取 K 线数据
+
+        Args:
+            priority: 默认 high (1)，后台下载用 low (3)
+        """
         return await self._kline_data.get_batch_kline_data(
             stock_codes, period, start_date, end_date, limit,
-            task_type=task_type, connected=self.connected
+            task_type=task_type, priority=priority, connected=self.connected
         )
 
     # ── 外部数据 ──
 
-    async def get_code_info(self, security_type: str = 'EXTRA_STOCK_A') -> List[Dict[str, Any]]:
-        return await self._external_data.get_code_info(security_type, connected=self.connected)
+    async def get_code_info(self, security_type: str = 'EXTRA_STOCK_A', priority: int = 2) -> List[Dict[str, Any]]:
+        """获取代码信息（用户查询，默认 medium priority）"""
+        return await self._external_data.get_code_info(security_type, priority=priority, connected=self.connected)
 
-    async def get_industry_list(self, level: int = 1) -> List[Dict[str, Any]]:
-        return await self._external_data.get_industry_list(level, connected=self.connected)
+    async def get_index_list(self, priority: int = 2) -> List[Dict[str, Any]]:
+        """获取指数列表（用户查询，默认 medium priority）"""
+        if not self.connected:
+            raise Exception("网关未连接")
+        try:
+            import asyncio
+            from services.common.sdk_manager import get_sdk_manager
+            return await asyncio.to_thread(lambda: get_sdk_manager().get_index_list(priority=priority))
+        except Exception as e:
+            logger.error(f"获取指数列表失败: {e}")
+            return []
 
-    async def get_industry_kline(self, index_code: str) -> List[Dict[str, Any]]:
-        return await self._external_data.get_industry_kline(index_code, connected=self.connected)
+    async def get_industry_list(self, level: int = 1, priority: int = 2) -> List[Dict[str, Any]]:
+        """获取行业列表（用户查询，默认 medium priority）"""
+        return await self._external_data.get_industry_list(level, priority=priority, connected=self.connected)
 
-    async def get_industry_constituent(self, index_code: str) -> List[Dict[str, Any]]:
-        return await self._external_data.get_industry_constituent(index_code, connected=self.connected)
+    async def get_industry_kline(self, index_code: str, priority: int = 2) -> List[Dict[str, Any]]:
+        """获取行业行情（用户查询，默认 medium priority）"""
+        return await self._external_data.get_industry_kline(index_code, priority=priority, connected=self.connected)
 
-    async def get_index_constituent(self, index_code: str) -> List[Dict[str, Any]]:
-        return await self._external_data.get_index_constituent(index_code, connected=self.connected)
+    async def get_industry_constituent(self, index_code: str, priority: int = 2) -> List[Dict[str, Any]]:
+        """获取行业成分股（用户查询，默认 medium priority）"""
+        return await self._external_data.get_industry_constituent(index_code, priority=priority, connected=self.connected)
 
-    async def get_income_statement(self, stock_code: str) -> List[Dict[str, Any]]:
-        return await self._external_data.get_income_statement(stock_code, connected=self.connected)
+    async def get_index_constituent(self, index_code: str, priority: int = 2) -> List[Dict[str, Any]]:
+        """获取指数成分股（用户查询，默认 medium priority）"""
+        return await self._external_data.get_index_constituent(index_code, priority=priority, connected=self.connected)
 
-    async def get_balance_sheet(self, stock_code: str) -> List[Dict[str, Any]]:
-        return await self._external_data.get_balance_sheet(stock_code, connected=self.connected)
+    async def get_income_statement(self, stock_code: str, priority: int = 2) -> List[Dict[str, Any]]:
+        """获取利润表（用户查询，默认 medium priority）"""
+        return await self._external_data.get_income_statement(stock_code, priority=priority, connected=self.connected)
 
-    async def get_cash_flow_statement(self, stock_code: str) -> List[Dict[str, Any]]:
-        return await self._external_data.get_cash_flow_statement(stock_code, connected=self.connected)
+    async def get_balance_sheet(self, stock_code: str, priority: int = 2) -> List[Dict[str, Any]]:
+        """获取资产负债表（用户查询，默认 medium priority）"""
+        return await self._external_data.get_balance_sheet(stock_code, priority=priority, connected=self.connected)
 
-    async def get_profit_notice(self, stock_code: str) -> List[Dict[str, Any]]:
-        return await self._external_data.get_profit_notice(stock_code, connected=self.connected)
+    async def get_cash_flow_statement(self, stock_code: str, priority: int = 2) -> List[Dict[str, Any]]:
+        """获取现金流量表（用户查询，默认 medium priority）"""
+        return await self._external_data.get_cash_flow_statement(stock_code, priority=priority, connected=self.connected)
 
-    async def get_profit_express(self, stock_code: str) -> List[Dict[str, Any]]:
-        return await self._external_data.get_profit_express(stock_code, connected=self.connected)
+    async def get_profit_notice(self, stock_code: str, priority: int = 2) -> List[Dict[str, Any]]:
+        """获取业绩预告（用户查询，默认 medium priority）"""
+        return await self._external_data.get_profit_notice(stock_code, priority=priority, connected=self.connected)
 
-    async def get_long_hu_bang(self, stock_code: str, begin_date: int, end_date: int) -> List[Dict[str, Any]]:
-        return await self._external_data.get_long_hu_bang(stock_code, begin_date, end_date, connected=self.connected)
+    async def get_profit_express(self, stock_code: str, priority: int = 2) -> List[Dict[str, Any]]:
+        """获取业绩快报（用户查询，默认 medium priority）"""
+        return await self._external_data.get_profit_express(stock_code, priority=priority, connected=self.connected)
 
-    async def get_margin_summary(self, begin_date: int, end_date: int) -> List[Dict[str, Any]]:
-        return await self._external_data.get_margin_summary(begin_date, end_date, connected=self.connected)
+    async def get_long_hu_bang(self, stock_code: str, begin_date: int, end_date: int, priority: int = 2) -> List[Dict[str, Any]]:
+        """获取龙虎榜（用户查询，默认 medium priority）"""
+        return await self._external_data.get_long_hu_bang(stock_code, begin_date, end_date, priority=priority, connected=self.connected)
 
-    async def get_margin_detail(self, stock_code: str, begin_date: int, end_date: int) -> List[Dict[str, Any]]:
-        return await self._external_data.get_margin_detail(stock_code, begin_date, end_date, connected=self.connected)
+    async def get_margin_summary(self, begin_date: int, end_date: int, priority: int = 2) -> List[Dict[str, Any]]:
+        """获取融资融券汇总（用户查询，默认 medium priority）"""
+        return await self._external_data.get_margin_summary(begin_date, end_date, priority=priority, connected=self.connected)
 
-    async def get_block_trading(self, stock_code: str, begin_date: int, end_date: int) -> List[Dict[str, Any]]:
-        return await self._external_data.get_block_trading(stock_code, begin_date, end_date, connected=self.connected)
+    async def get_margin_detail(self, stock_code: str, begin_date: int, end_date: int, priority: int = 2) -> List[Dict[str, Any]]:
+        """获取融资融券明细（用户查询，默认 medium priority）"""
+        return await self._external_data.get_margin_detail(stock_code, begin_date, end_date, priority=priority, connected=self.connected)
 
-    async def get_treasury_yield(self) -> List[Dict[str, Any]]:
-        return await self._external_data.get_treasury_yield(connected=self.connected)
+    async def get_block_trading(self, stock_code: str, begin_date: int, end_date: int, priority: int = 2) -> List[Dict[str, Any]]:
+        """获取大宗交易（用户查询，默认 medium priority）"""
+        return await self._external_data.get_block_trading(stock_code, begin_date, end_date, priority=priority, connected=self.connected)
+
+    async def get_treasury_yield(self, priority: int = 2) -> List[Dict[str, Any]]:
+        """获取国债收益率（用户查询，默认 medium priority）"""
+        return await self._external_data.get_treasury_yield(priority=priority, connected=self.connected)
 
     # ── 交易执行 ──
 

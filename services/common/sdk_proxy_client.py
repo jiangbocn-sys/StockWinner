@@ -73,14 +73,25 @@ class SDKProxyClient:
             self._socket = None
             self._connected = False
 
-    def _call_ipc(self, method: str, kwargs: dict, timeout: float = 30.0) -> any:
-        """通过 IPC 调用 SDK 子进程（自动重连）"""
+    def _call_ipc(self, method: str, kwargs: dict, priority: int = 1, timeout: float = 30.0) -> any:
+        """通过 IPC 调用 SDK 子进程（支持优先级）
+
+        Args:
+            method: SDK 方法名
+            kwargs: 方法参数
+            priority: 优先级 (0=highest, 1=high, 2=medium, 3=low)
+            timeout: IPC 超时时间
+
+        Returns:
+            SDK 调用结果
+        """
         logger = get_logger("sdk_proxy")
         request_id = f"{time.monotonic()}_{os.getpid()}"
         request = {
             "method": method,
             "args": kwargs,
             "request_id": request_id,
+            "priority": priority,  # 传递优先级
         }
 
         with self._lock:
@@ -160,159 +171,182 @@ class SDKProxyClient:
         return _IPCMarketData(self)
 
     # 直接调用方法（不通过实例缓存）
-    def get_equity_structure(self, stock_codes: list) -> pd.DataFrame:
+    def get_equity_structure(self, stock_codes: list, priority: int = 3) -> pd.DataFrame:
+        """股权结构（后台任务，默认 low priority）"""
         try:
-            result = self._call_ipc("get_equity_structure", {"stock_codes": stock_codes}, timeout=60.0)
+            result = self._call_ipc("get_equity_structure", {"stock_codes": stock_codes}, priority=priority, timeout=60.0)
             return _to_dataframe(result) if result is not None else pd.DataFrame()
         except Exception:
             return pd.DataFrame()
 
-    def get_income_statement(self, stock_codes: list) -> pd.DataFrame:
+    def get_income_statement(self, stock_codes: list, priority: int = 3) -> pd.DataFrame:
+        """利润表（后台任务，默认 low priority）"""
         try:
-            result = self._call_ipc("get_income_statement", {"stock_codes": stock_codes}, timeout=60.0)
+            result = self._call_ipc("get_income_statement", {"stock_codes": stock_codes}, priority=priority, timeout=60.0)
             return _to_dataframe(result) if result is not None else pd.DataFrame()
         except Exception:
             return pd.DataFrame()
 
-    def get_balance_sheet(self, stock_codes: list) -> pd.DataFrame:
+    def get_balance_sheet(self, stock_codes: list, priority: int = 3) -> pd.DataFrame:
+        """资产负债表（后台任务，默认 low priority）"""
         try:
-            result = self._call_ipc("get_balance_sheet", {"stock_codes": stock_codes}, timeout=60.0)
+            result = self._call_ipc("get_balance_sheet", {"stock_codes": stock_codes}, priority=priority, timeout=60.0)
             return _to_dataframe(result) if result is not None else pd.DataFrame()
         except Exception:
             return pd.DataFrame()
 
-    def get_cash_flow_statement(self, stock_codes: list) -> pd.DataFrame:
+    def get_cash_flow_statement(self, stock_codes: list, priority: int = 3) -> pd.DataFrame:
+        """现金流量表（后台任务，默认 low priority）"""
         try:
-            result = self._call_ipc("get_cash_flow_statement", {"stock_codes": stock_codes}, timeout=60.0)
+            result = self._call_ipc("get_cash_flow_statement", {"stock_codes": stock_codes}, priority=priority, timeout=60.0)
             return _to_dataframe(result) if result is not None else pd.DataFrame()
         except Exception:
             return pd.DataFrame()
 
-    def get_industry_base_info(self) -> pd.DataFrame:
+    def get_industry_base_info(self, priority: int = 3) -> pd.DataFrame:
+        """行业基本信息（后台任务，默认 low priority）"""
         try:
-            result = self._call_ipc("get_industry_base_info", {}, timeout=60.0)
+            result = self._call_ipc("get_industry_base_info", {}, priority=priority, timeout=60.0)
             return _to_dataframe(result) if result is not None else pd.DataFrame()
         except Exception:
             return pd.DataFrame()
 
-    def get_code_info(self, security_type: str = 'EXTRA_STOCK_A') -> pd.DataFrame:
+    def get_code_info(self, security_type: str = 'EXTRA_STOCK_A', priority: int = 3) -> pd.DataFrame:
+        """股票基本信息（后台任务，默认 low priority）"""
         try:
-            result = self._call_ipc("get_code_info", {"security_type": security_type}, timeout=30.0)
+            result = self._call_ipc("get_code_info", {"security_type": security_type}, priority=priority, timeout=30.0)
             return _to_dataframe(result) if result is not None else pd.DataFrame()
         except Exception:
             return pd.DataFrame()
 
-    def get_code_list(self, security_type: str = 'EXTRA_STOCK_A') -> list:
+    def get_code_list(self, security_type: str = 'EXTRA_STOCK_A', priority: int = 3) -> list:
+        """股票列表（后台任务，默认 low priority）"""
         try:
-            return self._call_ipc("get_code_list", {"security_type": security_type}, timeout=30.0) or []
+            return self._call_ipc("get_code_list", {"security_type": security_type}, priority=priority, timeout=30.0) or []
         except Exception:
             return []
 
     def query_kline(self, code_list: list, begin_date: int, end_date: int,
-                    period: int, task_type: str = "query") -> dict:
+                    period: int, task_type: str = "query", priority: int = 1) -> dict:
+        """K线查询
+
+        Args:
+            priority: 默认 high (1)，后台下载用 low (3)
+        """
         try:
             result = self._call_ipc("query_kline", {
                 "code_list": code_list,
                 "begin_date": begin_date,
                 "end_date": end_date,
                 "period": period,
-            }, timeout=120.0)
+            }, priority=priority, timeout=120.0)
             return result if isinstance(result, dict) else {}
         except Exception:
             return {}
 
-    def query_snapshot(self, code_list: list, begin_date: int, end_date: int) -> dict:
+    def query_snapshot(self, code_list: list, begin_date: int, end_date: int, priority: int = 1) -> dict:
+        """快照查询（默认 high priority）"""
         try:
             result = self._call_ipc("query_snapshot", {
                 "code_list": code_list,
                 "begin_date": begin_date,
                 "end_date": end_date,
-            }, timeout=30.0)
+            }, priority=priority, timeout=30.0)
             return result if isinstance(result, dict) else {}
         except Exception:
             return {}
 
-    def get_industry_daily(self, code_list: list) -> Dict[str, pd.DataFrame]:
+    def get_industry_daily(self, code_list: list, priority: int = 3) -> Dict[str, pd.DataFrame]:
+        """行业日线（后台任务，默认 low priority）"""
         try:
-            result = self._call_ipc("get_industry_daily", {"code_list": code_list}, timeout=60.0)
+            result = self._call_ipc("get_industry_daily", {"code_list": code_list}, priority=priority, timeout=60.0)
             return result if isinstance(result, dict) else {}
         except Exception:
             return {}
 
-    def get_profit_notice(self, stock_codes: list) -> pd.DataFrame:
+    def get_profit_notice(self, stock_codes: list, priority: int = 3) -> pd.DataFrame:
+        """业绩预告（后台任务，默认 low priority）"""
         try:
-            result = self._call_ipc("get_profit_notice", {"stock_codes": stock_codes}, timeout=60.0)
+            result = self._call_ipc("get_profit_notice", {"stock_codes": stock_codes}, priority=priority, timeout=60.0)
             return _to_dataframe(result) if result is not None else pd.DataFrame()
         except Exception:
             return pd.DataFrame()
 
-    def get_profit_express(self, stock_codes: list) -> pd.DataFrame:
+    def get_profit_express(self, stock_codes: list, priority: int = 3) -> pd.DataFrame:
+        """业绩快报（后台任务，默认 low priority）"""
         try:
-            result = self._call_ipc("get_profit_express", {"stock_codes": stock_codes}, timeout=60.0)
+            result = self._call_ipc("get_profit_express", {"stock_codes": stock_codes}, priority=priority, timeout=60.0)
             return _to_dataframe(result) if result is not None else pd.DataFrame()
         except Exception:
             return pd.DataFrame()
 
-    def get_long_hu_bang(self, stock_codes: list, begin_date: int, end_date: int) -> pd.DataFrame:
+    def get_long_hu_bang(self, stock_codes: list, begin_date: int, end_date: int, priority: int = 3) -> pd.DataFrame:
+        """龙虎榜（后台任务，默认 low priority）"""
         try:
             result = self._call_ipc("get_long_hu_bang", {
                 "stock_codes": stock_codes,
                 "begin_date": begin_date,
                 "end_date": end_date,
-            }, timeout=60.0)
+            }, priority=priority, timeout=60.0)
             return _to_dataframe(result) if result is not None else pd.DataFrame()
         except Exception:
             return pd.DataFrame()
 
-    def get_margin_summary(self, begin_date: int, end_date: int) -> pd.DataFrame:
+    def get_margin_summary(self, begin_date: int, end_date: int, priority: int = 3) -> pd.DataFrame:
+        """融资融券汇总（后台任务，默认 low priority）"""
         try:
             result = self._call_ipc("get_margin_summary", {
                 "begin_date": begin_date,
                 "end_date": end_date,
-            }, timeout=60.0)
+            }, priority=priority, timeout=60.0)
             return _to_dataframe(result) if result is not None else pd.DataFrame()
         except Exception:
             return pd.DataFrame()
 
-    def get_margin_detail(self, stock_codes: list, begin_date: int, end_date: int) -> pd.DataFrame:
+    def get_margin_detail(self, stock_codes: list, begin_date: int, end_date: int, priority: int = 3) -> pd.DataFrame:
+        """融资融券明细（后台任务，默认 low priority）"""
         try:
             result = self._call_ipc("get_margin_detail", {
                 "stock_codes": stock_codes,
                 "begin_date": begin_date,
                 "end_date": end_date,
-            }, timeout=60.0)
+            }, priority=priority, timeout=60.0)
             return _to_dataframe(result) if result is not None else pd.DataFrame()
         except Exception:
             return pd.DataFrame()
 
-    def get_block_trading(self, stock_codes: list, begin_date: int, end_date: int) -> pd.DataFrame:
+    def get_block_trading(self, stock_codes: list, begin_date: int, end_date: int, priority: int = 3) -> pd.DataFrame:
+        """大宗交易（后台任务，默认 low priority）"""
         try:
             result = self._call_ipc("get_block_trading", {
                 "stock_codes": stock_codes,
                 "begin_date": begin_date,
                 "end_date": end_date,
-            }, timeout=60.0)
+            }, priority=priority, timeout=60.0)
             return _to_dataframe(result) if result is not None else pd.DataFrame()
         except Exception:
             return pd.DataFrame()
 
-    def get_treasury_yield(self) -> pd.DataFrame:
+    def get_treasury_yield(self, priority: int = 3) -> pd.DataFrame:
+        """国债收益率（后台任务，默认 low priority）"""
         try:
-            result = self._call_ipc("get_treasury_yield", {}, timeout=60.0)
+            result = self._call_ipc("get_treasury_yield", {}, priority=priority, timeout=60.0)
             return _to_dataframe(result) if result is not None else pd.DataFrame()
         except Exception:
             return pd.DataFrame()
 
-    def get_industry_constituent(self, index_codes: list) -> pd.DataFrame:
+    def get_industry_constituent(self, index_codes: list, priority: int = 3) -> pd.DataFrame:
+        """行业成分（后台任务，默认 low priority）"""
         try:
-            result = self._call_ipc("get_industry_constituent", {"index_codes": index_codes}, timeout=60.0)
+            result = self._call_ipc("get_industry_constituent", {"index_codes": index_codes}, priority=priority, timeout=60.0)
             return _to_dataframe(result) if result is not None else pd.DataFrame()
         except Exception:
             return pd.DataFrame()
 
-    def get_index_constituent(self, index_codes: list) -> pd.DataFrame:
+    def get_index_constituent(self, index_codes: list, priority: int = 3) -> pd.DataFrame:
+        """指数成分（后台任务，默认 low priority）"""
         try:
-            result = self._call_ipc("get_index_constituent", {"index_codes": index_codes}, timeout=60.0)
+            result = self._call_ipc("get_index_constituent", {"index_codes": index_codes}, priority=priority, timeout=60.0)
             return _to_dataframe(result) if result is not None else pd.DataFrame()
         except Exception:
             return pd.DataFrame()
@@ -330,78 +364,81 @@ def _to_dataframe(obj) -> pd.DataFrame:
 # ================================================================
 
 class _IPCInfoData:
-    def __init__(self, client: SDKProxyClient):
+    def __init__(self, client: SDKProxyClient, default_priority: int = 3):
         self._client = client
+        self._default_priority = default_priority
 
-    def get_equity_structure(self, stock_codes, **kw):
-        return self._client.get_equity_structure(stock_codes)
+    def get_equity_structure(self, stock_codes, priority=None, **kw):
+        return self._client.get_equity_structure(stock_codes, priority=priority or self._default_priority)
 
-    def get_income(self, stock_codes, **kw):
-        return self._client.get_income_statement(stock_codes)
+    def get_income(self, stock_codes, priority=None, **kw):
+        return self._client.get_income_statement(stock_codes, priority=priority or self._default_priority)
 
-    def get_balance_sheet(self, stock_codes, **kw):
-        return self._client.get_balance_sheet(stock_codes)
+    def get_balance_sheet(self, stock_codes, priority=None, **kw):
+        return self._client.get_balance_sheet(stock_codes, priority=priority or self._default_priority)
 
-    def get_cash_flow(self, stock_codes, **kw):
-        return self._client.get_cash_flow_statement(stock_codes)
+    def get_cash_flow(self, stock_codes, priority=None, **kw):
+        return self._client.get_cash_flow_statement(stock_codes, priority=priority or self._default_priority)
 
-    def get_industry_base_info(self, **kw):
-        return self._client.get_industry_base_info()
+    def get_industry_base_info(self, priority=None, **kw):
+        return self._client.get_industry_base_info(priority=priority or self._default_priority)
 
-    def get_profit_notice(self, code_list, **kw):
-        return self._client.get_profit_notice(code_list)
+    def get_profit_notice(self, code_list, priority=None, **kw):
+        return self._client.get_profit_notice(code_list, priority=priority or self._default_priority)
 
-    def get_profit_express(self, code_list, **kw):
-        return self._client.get_profit_express(code_list)
+    def get_profit_express(self, code_list, priority=None, **kw):
+        return self._client.get_profit_express(code_list, priority=priority or self._default_priority)
 
-    def get_long_hu_bang(self, code_list, begin_date=None, end_date=None, **kw):
-        return self._client.get_long_hu_bang(code_list, begin_date or 0, end_date or 0)
+    def get_long_hu_bang(self, code_list, begin_date=None, end_date=None, priority=None, **kw):
+        return self._client.get_long_hu_bang(code_list, begin_date or 0, end_date or 0, priority=priority or self._default_priority)
 
-    def get_margin_summary(self, begin_date=None, end_date=None, **kw):
-        return self._client.get_margin_summary(begin_date or 0, end_date or 0)
+    def get_margin_summary(self, begin_date=None, end_date=None, priority=None, **kw):
+        return self._client.get_margin_summary(begin_date or 0, end_date or 0, priority=priority or self._default_priority)
 
-    def get_margin_detail(self, code_list, begin_date=None, end_date=None, **kw):
-        return self._client.get_margin_detail(code_list, begin_date or 0, end_date or 0)
+    def get_margin_detail(self, code_list, begin_date=None, end_date=None, priority=None, **kw):
+        return self._client.get_margin_detail(code_list, begin_date or 0, end_date or 0, priority=priority or self._default_priority)
 
-    def get_block_trading(self, code_list, begin_date=None, end_date=None, **kw):
-        return self._client.get_block_trading(code_list, begin_date or 0, end_date or 0)
+    def get_block_trading(self, code_list, begin_date=None, end_date=None, priority=None, **kw):
+        return self._client.get_block_trading(code_list, begin_date or 0, end_date or 0, priority=priority or self._default_priority)
 
-    def get_treasury_yield(self, **kw):
-        return self._client.get_treasury_yield()
+    def get_treasury_yield(self, priority=None, **kw):
+        return self._client.get_treasury_yield(priority=priority or self._default_priority)
 
-    def get_industry_constituent(self, code_list, **kw):
-        return self._client.get_industry_constituent(code_list)
+    def get_industry_constituent(self, code_list, priority=None, **kw):
+        return self._client.get_industry_constituent(code_list, priority=priority or self._default_priority)
 
-    def get_index_constituent(self, code_list, **kw):
-        return self._client.get_index_constituent(code_list)
+    def get_index_constituent(self, code_list, priority=None, **kw):
+        return self._client.get_index_constituent(code_list, priority=priority or self._default_priority)
 
-    def get_industry_daily(self, code_list, **kw):
-        return self._client.get_industry_daily(code_list)
+    def get_industry_daily(self, code_list, priority=None, **kw):
+        return self._client.get_industry_daily(code_list, priority=priority or self._default_priority)
 
 
 class _IPCBaseData:
-    def __init__(self, client: SDKProxyClient):
+    def __init__(self, client: SDKProxyClient, default_priority: int = 3):
         self._client = client
+        self._default_priority = default_priority
 
-    def get_code_info(self, security_type='EXTRA_STOCK_A', **kw):
-        return self._client.get_code_info(security_type)
+    def get_code_info(self, security_type='EXTRA_STOCK_A', priority=None, **kw):
+        return self._client.get_code_info(security_type, priority=priority or self._default_priority)
 
-    def get_code_list(self, security_type='EXTRA_STOCK_A', **kw):
-        return self._client.get_code_list(security_type)
+    def get_code_list(self, security_type='EXTRA_STOCK_A', priority=None, **kw):
+        return self._client.get_code_list(security_type, priority=priority or self._default_priority)
 
     def get_calendar(self, **kw):
         return self._client.get_calendar()
 
 
 class _IPCMarketData:
-    def __init__(self, client: SDKProxyClient):
+    def __init__(self, client: SDKProxyClient, default_priority: int = 1):
         self._client = client
+        self._default_priority = default_priority
 
-    def query_kline(self, code_list, begin_date, end_date, period, **kw):
-        return self._client.query_kline(code_list, begin_date, end_date, period)
+    def query_kline(self, code_list, begin_date, end_date, period, priority=None, **kw):
+        return self._client.query_kline(code_list, begin_date, end_date, period, priority=priority or self._default_priority)
 
-    def query_snapshot(self, code_list, begin_date, end_date, **kw):
-        return self._client.query_snapshot(code_list, begin_date, end_date)
+    def query_snapshot(self, code_list, begin_date, end_date, priority=None, **kw):
+        return self._client.query_snapshot(code_list, begin_date, end_date, priority=priority or self._default_priority)
 
 
 # ================================================================

@@ -160,16 +160,28 @@ class SDKManager:
     # ================================================================
 
     def _call_ipc(self, method_name: str, kwargs: dict, task_type: str = "query",
-                  timeout: float = 30.0, logger=None, **log_context):
-        """通过 IPC 代理调用 SDK 子进程，记录日志和统计"""
+                  priority: int = 1, timeout: float = 30.0, logger=None, **log_context):
+        """通过 IPC 代理调用 SDK 子进程，记录日志和统计
+
+        Args:
+            method_name: SDK 方法名
+            kwargs: 方法参数
+            task_type: 任务类型（用于日志）
+            priority: 优先级 (0=highest, 1=high, 2=medium, 3=low)
+            timeout: IPC 超时时间
+        """
         if logger is None:
             logger = get_logger("sdk_manager")
+
+        # 添加 priority 到 kwargs
+        kwargs_with_priority = kwargs.copy()
+        kwargs_with_priority["priority"] = priority
 
         start = time.monotonic()
         try:
             proxy = self._get_proxy()
             proxy_method = getattr(proxy, method_name)
-            result = proxy_method(**kwargs)
+            result = proxy_method(**kwargs_with_priority)
             duration_ms = (time.monotonic() - start) * 1000
             logger.log_sdk_call(method_name, duration_ms, task_type, "success", **log_context)
             self._record_sdk_call(method_name, self._count_result_rows(result), True)
@@ -195,10 +207,11 @@ class SDKManager:
             logger.log_sdk_call(method_name, duration_ms, task_type, "error", error=str(e), **log_context)
             raise
 
-    def get_equity_structure(self, stock_codes: list) -> pd.DataFrame:
+    def get_equity_structure(self, stock_codes: list, priority: int = 3) -> pd.DataFrame:
+        """股权结构（后台任务，默认 low priority）"""
         try:
             result = self._call_ipc("get_equity_structure", {"stock_codes": stock_codes},
-                                    "download", 60.0, stock_count=len(stock_codes) if stock_codes else 0)
+                                    "download", priority, 60.0, stock_count=len(stock_codes) if stock_codes else 0)
             if isinstance(result, dict):
                 dfs = [df for df in result.values() if isinstance(df, pd.DataFrame)]
                 return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
@@ -206,10 +219,11 @@ class SDKManager:
         except Exception:
             return pd.DataFrame()
 
-    def get_income_statement(self, stock_codes: list) -> pd.DataFrame:
+    def get_income_statement(self, stock_codes: list, priority: int = 3) -> pd.DataFrame:
+        """利润表（后台任务，默认 low priority）"""
         try:
             result = self._call_ipc("get_income_statement", {"stock_codes": stock_codes},
-                                    "download", 60.0, stock_count=len(stock_codes) if stock_codes else 0)
+                                    "download", priority, 60.0, stock_count=len(stock_codes) if stock_codes else 0)
             if isinstance(result, dict):
                 dfs = [df for df in result.values() if isinstance(df, pd.DataFrame)]
                 return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
@@ -217,10 +231,11 @@ class SDKManager:
         except Exception:
             return pd.DataFrame()
 
-    def get_balance_sheet(self, stock_codes: list) -> pd.DataFrame:
+    def get_balance_sheet(self, stock_codes: list, priority: int = 3) -> pd.DataFrame:
+        """资产负债表（后台任务，默认 low priority）"""
         try:
             result = self._call_ipc("get_balance_sheet", {"stock_codes": stock_codes},
-                                    "download", 60.0, stock_count=len(stock_codes) if stock_codes else 0)
+                                    "download", priority, 60.0, stock_count=len(stock_codes) if stock_codes else 0)
             if isinstance(result, dict):
                 dfs = [df for df in result.values() if isinstance(df, pd.DataFrame)]
                 return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
@@ -228,10 +243,11 @@ class SDKManager:
         except Exception:
             return pd.DataFrame()
 
-    def get_cash_flow_statement(self, stock_codes: list) -> pd.DataFrame:
+    def get_cash_flow_statement(self, stock_codes: list, priority: int = 3) -> pd.DataFrame:
+        """现金流量表（后台任务，默认 low priority）"""
         try:
             result = self._call_ipc("get_cash_flow_statement", {"stock_codes": stock_codes},
-                                    "download", 60.0, stock_count=len(stock_codes) if stock_codes else 0)
+                                    "download", priority, 60.0, stock_count=len(stock_codes) if stock_codes else 0)
             if isinstance(result, dict):
                 dfs = [df for df in result.values() if isinstance(df, pd.DataFrame)]
                 return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
@@ -239,9 +255,10 @@ class SDKManager:
         except Exception:
             return pd.DataFrame()
 
-    def get_industry_base_info(self) -> pd.DataFrame:
+    def get_industry_base_info(self, priority: int = 3) -> pd.DataFrame:
+        """行业基本信息（后台任务，默认 low priority）"""
         try:
-            result = self._call_ipc("get_industry_base_info", {}, "download", 60.0)
+            result = self._call_ipc("get_industry_base_info", {}, "download", priority, 60.0)
             if isinstance(result, dict):
                 dfs = [df for df in result.values() if isinstance(df, pd.DataFrame)]
                 return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
@@ -249,21 +266,24 @@ class SDKManager:
         except Exception:
             return pd.DataFrame()
 
-    def get_code_info(self, security_type: str = 'EXTRA_STOCK_A') -> pd.DataFrame:
+    def get_code_info(self, security_type: str = 'EXTRA_STOCK_A', priority: int = 3) -> pd.DataFrame:
+        """股票基本信息（后台任务，默认 low priority）"""
         try:
-            result = self._call_ipc("get_code_info", {"security_type": security_type}, "query", 30.0)
+            result = self._call_ipc("get_code_info", {"security_type": security_type}, "query", priority, 30.0)
             return result if isinstance(result, pd.DataFrame) else pd.DataFrame()
         except Exception:
             return pd.DataFrame()
 
-    def get_code_list(self, security_type: str = 'EXTRA_STOCK_A') -> list:
+    def get_code_list(self, security_type: str = 'EXTRA_STOCK_A', priority: int = 3) -> list:
+        """股票列表（后台任务，默认 low priority）"""
         try:
-            return self._call_ipc("get_code_list", {"security_type": security_type}, "query", 30.0) or []
+            return self._call_ipc("get_code_list", {"security_type": security_type}, "query", priority, 30.0) or []
         except Exception:
             return []
 
     def query_kline(self, code_list: list, begin_date: int, end_date: int,
-                    period: int, task_type: str = "query") -> dict:
+                    period: int, task_type: str = "query", priority: int = 1) -> dict:
+        """K线查询（默认 high priority，后台下载用 low）"""
         stock_count = len(code_list) if isinstance(code_list, list) else 1
         if task_type == "query":
             timeout = 10.0 if stock_count <= 5 else (20.0 if stock_count <= 20 else (60.0 if stock_count <= 100 else 120.0))
@@ -273,33 +293,36 @@ class SDKManager:
             result = self._call_ipc("query_kline", {
                 "code_list": code_list, "begin_date": begin_date,
                 "end_date": end_date, "period": period,
-            }, task_type, timeout, stock_count=stock_count)
+            }, task_type, priority, timeout, stock_count=stock_count)
             return result if isinstance(result, dict) else {}
         except Exception:
             return {}
 
-    def query_snapshot(self, code_list: list, begin_date: int, end_date: int) -> dict:
+    def query_snapshot(self, code_list: list, begin_date: int, end_date: int, priority: int = 1) -> dict:
+        """快照查询（默认 high priority）"""
         stock_count = len(code_list) if isinstance(code_list, list) else 1
         try:
             result = self._call_ipc("query_snapshot", {
                 "code_list": code_list, "begin_date": begin_date, "end_date": end_date,
-            }, "query", 30.0, stock_count=stock_count)
+            }, "query", priority, 30.0, stock_count=stock_count)
             return result if isinstance(result, dict) else {}
         except Exception:
             return {}
 
-    def get_industry_daily(self, code_list: list) -> Dict[str, pd.DataFrame]:
+    def get_industry_daily(self, code_list: list, priority: int = 3) -> Dict[str, pd.DataFrame]:
+        """行业日线（后台任务，默认 low priority）"""
         try:
             result = self._call_ipc("get_industry_daily", {"code_list": code_list},
-                                    "download", 60.0, stock_count=len(code_list) if code_list else 0)
+                                    "download", priority, 60.0, stock_count=len(code_list) if code_list else 0)
             return result if isinstance(result, dict) else {}
         except Exception:
             return {}
 
-    def get_profit_notice(self, stock_codes: list) -> pd.DataFrame:
+    def get_profit_notice(self, stock_codes: list, priority: int = 3) -> pd.DataFrame:
+        """业绩预告（后台任务，默认 low priority）"""
         try:
             result = self._call_ipc("get_profit_notice", {"stock_codes": stock_codes},
-                                    "download", 60.0, stock_count=len(stock_codes) if stock_codes else 0)
+                                    "download", priority, 60.0, stock_count=len(stock_codes) if stock_codes else 0)
             if isinstance(result, dict):
                 dfs = [df for df in result.values() if isinstance(df, pd.DataFrame)]
                 return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
@@ -307,10 +330,11 @@ class SDKManager:
         except Exception:
             return pd.DataFrame()
 
-    def get_profit_express(self, stock_codes: list) -> pd.DataFrame:
+    def get_profit_express(self, stock_codes: list, priority: int = 3) -> pd.DataFrame:
+        """业绩快报（后台任务，默认 low priority）"""
         try:
             result = self._call_ipc("get_profit_express", {"stock_codes": stock_codes},
-                                    "download", 60.0, stock_count=len(stock_codes) if stock_codes else 0)
+                                    "download", priority, 60.0, stock_count=len(stock_codes) if stock_codes else 0)
             if isinstance(result, dict):
                 dfs = [df for df in result.values() if isinstance(df, pd.DataFrame)]
                 return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
@@ -318,29 +342,32 @@ class SDKManager:
         except Exception:
             return pd.DataFrame()
 
-    def get_long_hu_bang(self, stock_codes: list, begin_date: int, end_date: int) -> pd.DataFrame:
+    def get_long_hu_bang(self, stock_codes: list, begin_date: int, end_date: int, priority: int = 3) -> pd.DataFrame:
+        """龙虎榜（后台任务，默认 low priority）"""
         try:
             result = self._call_ipc("get_long_hu_bang", {
                 "stock_codes": stock_codes, "begin_date": begin_date, "end_date": end_date,
-            }, "download", 60.0, stock_count=len(stock_codes) if stock_codes else 0)
+            }, "download", priority, 60.0, stock_count=len(stock_codes) if stock_codes else 0)
             return result if isinstance(result, pd.DataFrame) else pd.DataFrame()
         except Exception:
             return pd.DataFrame()
 
-    def get_margin_summary(self, begin_date: int, end_date: int) -> pd.DataFrame:
+    def get_margin_summary(self, begin_date: int, end_date: int, priority: int = 3) -> pd.DataFrame:
+        """融资融券汇总（后台任务，默认 low priority）"""
         try:
             result = self._call_ipc("get_margin_summary", {
                 "begin_date": begin_date, "end_date": end_date,
-            }, "download", 60.0)
+            }, "download", priority, 60.0)
             return result if isinstance(result, pd.DataFrame) else pd.DataFrame()
         except Exception:
             return pd.DataFrame()
 
-    def get_margin_detail(self, stock_codes: list, begin_date: int, end_date: int) -> pd.DataFrame:
+    def get_margin_detail(self, stock_codes: list, begin_date: int, end_date: int, priority: int = 3) -> pd.DataFrame:
+        """融资融券明细（后台任务，默认 low priority）"""
         try:
             result = self._call_ipc("get_margin_detail", {
                 "stock_codes": stock_codes, "begin_date": begin_date, "end_date": end_date,
-            }, "download", 60.0, stock_count=len(stock_codes) if stock_codes else 0)
+            }, "download", priority, 60.0, stock_count=len(stock_codes) if stock_codes else 0)
             if isinstance(result, dict):
                 dfs = [df for df in result.values() if isinstance(df, pd.DataFrame)]
                 return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
@@ -348,18 +375,20 @@ class SDKManager:
         except Exception:
             return pd.DataFrame()
 
-    def get_block_trading(self, stock_codes: list, begin_date: int, end_date: int) -> pd.DataFrame:
+    def get_block_trading(self, stock_codes: list, begin_date: int, end_date: int, priority: int = 3) -> pd.DataFrame:
+        """大宗交易（后台任务，默认 low priority）"""
         try:
             result = self._call_ipc("get_block_trading", {
                 "stock_codes": stock_codes, "begin_date": begin_date, "end_date": end_date,
-            }, "download", 60.0, stock_count=len(stock_codes) if stock_codes else 0)
+            }, "download", priority, 60.0, stock_count=len(stock_codes) if stock_codes else 0)
             return result if isinstance(result, pd.DataFrame) else pd.DataFrame()
         except Exception:
             return pd.DataFrame()
 
-    def get_treasury_yield(self) -> pd.DataFrame:
+    def get_treasury_yield(self, priority: int = 3) -> pd.DataFrame:
+        """国债收益率（后台任务，默认 low priority）"""
         try:
-            result = self._call_ipc("get_treasury_yield", {}, "download", 60.0)
+            result = self._call_ipc("get_treasury_yield", {}, "download", priority, 60.0)
             if isinstance(result, dict):
                 dfs = [df for df in result.values() if isinstance(df, pd.DataFrame)]
                 return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
@@ -367,10 +396,11 @@ class SDKManager:
         except Exception:
             return pd.DataFrame()
 
-    def get_industry_constituent(self, index_codes: list) -> pd.DataFrame:
+    def get_industry_constituent(self, index_codes: list, priority: int = 3) -> pd.DataFrame:
+        """行业成分（后台任务，默认 low priority）"""
         try:
             result = self._call_ipc("get_industry_constituent", {"index_codes": index_codes},
-                                    "download", 60.0, stock_count=len(index_codes) if index_codes else 0)
+                                    "download", priority, 60.0, stock_count=len(index_codes) if index_codes else 0)
             if isinstance(result, dict):
                 dfs = [df for df in result.values() if isinstance(df, pd.DataFrame)]
                 return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
@@ -378,10 +408,11 @@ class SDKManager:
         except Exception:
             return pd.DataFrame()
 
-    def get_index_constituent(self, index_codes: list) -> pd.DataFrame:
+    def get_index_constituent(self, index_codes: list, priority: int = 3) -> pd.DataFrame:
+        """指数成分（后台任务，默认 low priority）"""
         try:
             result = self._call_ipc("get_index_constituent", {"index_codes": index_codes},
-                                    "download", 60.0, stock_count=len(index_codes) if index_codes else 0)
+                                    "download", priority, 60.0, stock_count=len(index_codes) if index_codes else 0)
             if isinstance(result, dict):
                 dfs = [df for df in result.values() if isinstance(df, pd.DataFrame)]
                 return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()

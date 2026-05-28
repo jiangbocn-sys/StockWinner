@@ -604,6 +604,11 @@ class TradeExecutionService:
                         "DELETE FROM stock_positions WHERE account_id = ? AND stock_code = ?",
                         (self.account_id, stock_code)
                     )
+                    # 清仓时删除止盈止损策略，防止后续建仓误判
+                    await conn.execute(
+                        "DELETE FROM trading_strategies WHERE account_id = ? AND stock_code = ?",
+                        (self.account_id, stock_code)
+                    )
                 else:
                     # 盈亏摊薄成本法：卖出盈亏摊入剩余持仓
                     # 新 avg_cost = (原总成本 - 卖出净收入) / 剩余数量

@@ -6,6 +6,7 @@ FastAPI 依赖注入模式：
 - require_permission: 检查 agent 是否有指定权限
 - require_role: 检查 agent 角色等级
 - check_rate_limit: 内存 token bucket 限速
+- get_priority_for_role: 根据 agent role 返回 SDK 调用优先级
 """
 
 import time
@@ -19,6 +20,28 @@ from services.agent.models import (
     AgentRole, has_role_level, get_effective_permissions, has_permission,
     ROLE_RATE_LIMITS,
 )
+
+
+# ============================================================
+# SDK 调用优先级映射（根据 Agent Role）
+# ============================================================
+
+def get_priority_for_role(role: str) -> int:
+    """根据 Agent Role 返回 SDK 调用优先级
+
+    Args:
+        role: Agent 角色（viewer/strategist/operator/admin）
+
+    Returns:
+        priority: 0=highest, 1=high, 2=medium, 3=low
+    """
+    role_priority_map = {
+        'viewer': 2,     # medium - 只读查看
+        'strategist': 2, # medium - 策略配置
+        'operator': 1,   # high - 执行交易
+        'admin': 1,      # high - 系统管理
+    }
+    return role_priority_map.get(role, 2)  # 默认 medium
 
 
 # ============================================================

@@ -332,8 +332,132 @@ def execute_sdk_method(method: str, kwargs: dict):
 _sdk_lock = threading.Lock()
 
 
+class PriorityRequestQueue:
+    """优先级请求队列
+
+    四级优先级：
+    - HIGHEST (0): 立即执行 - pending信号、止损触发
+    - HIGH (1): 优先执行 - 用户查询、持仓刷新
+    - MEDIUM (2): 常规执行 - 策略评估、批量查询
+    - LOW (3): 空闲执行 - Watchlist刷新、后台下载
+    """
+
+    HIGHEST = 0
+    HIGH = 1
+    MEDIUM = 2
+    LOW = 3
+
+    def __init__(self):
+        self._queues = {
+            self.HIGHEST: [],
+            self.HIGH: [],
+            self.MEDIUM: [],
+            self.LOW: [],
+        }
+        self._lock = threading.Lock()
+        self._condition = threading.Condition(self._lock)
+
+    def enqueue(self, request: dict, conn: socket.socket, priority: int):
+        """按优先级入队"""
+        priority = max(self.HIGHEST, min(self.LOW, priority))  # 确保范围有效
+        with self._lock:
+            self._queues[priority].append({
+                "request": request,
+                "conn": conn,
+                "priority": priority,
+            })
+            self._condition.notify()  # 通知工作线程
+
+    def dequeue(self, timeout: float = 0.5) -> Optional[dict]:
+        """按优先级出队（高优先级优先）"""
+        with self._condition:
+            # 等待队列非空
+            while not self._has_any():
+                if not self._condition.wait(timeout):
+                    return None  # 超时返回 None
+
+            # 按优先级顺序取出
+            for priority in [self.HIGHEST, self.HIGH, self.MEDIUM, self.LOW]:
+                if self._queues[priority]:
+                    return self._queues[priority].pop(0)
+            return None
+
+    def _has_any(self) -> bool:
+        """检查是否有任何请求"""
+        return any(len(q) > 0 for q in self._queues.values())
+
+    def size(self) -> dict:
+        """返回各队列大小"""
+        with self._lock:
+            return {
+                "highest": len(self._queues[self.HIGHEST]),
+                "high": len(self._queues[self.HIGH]),
+                "medium": len(self._queues[self.MEDIUM]),
+                "low": len(self._queues[self.LOW]),
+            }
+
+
+# 全局优先级队列
+_priority_queue: Optional[PriorityRequestQueue] = None
+_queue_worker_running = False
+
+
+def _process_request(item: dict):
+    """处理单个请求（SDK 调用）"""
+    request = item["request"]
+    conn = item["conn"]
+    method = request.get("method")
+    kwargs = request.get("args", {})
+    request_id = request.get("request_id")
+    priority = item.get("priority", PriorityRequestQueue.HIGH)
+
+    logger = get_logger("sdk_subprocess")
+
+    # 串行化 SDK 调用
+    with _sdk_lock:
+        try:
+            result = execute_sdk_method(method, kwargs)
+            response = {
+                "request_id": request_id,
+                "success": True,
+                "result": encode_response(result),
+            }
+        except Exception as e:
+            response = {
+                "request_id": request_id,
+                "success": False,
+                "error": f"{type(e).__name__}: {e}",
+                "result": encode_response(None),
+            }
+
+        try:
+            send_message(conn, response)
+        except (ConnectionError, OSError):
+            # 客户端已断开，忽略
+            pass
+
+
+def _queue_worker():
+    """优先级队列工作线程"""
+    global _queue_worker_running
+    logger = get_logger("sdk_subprocess")
+    logger.log_event("sdk_queue_worker_started", "优先级队列工作线程启动")
+
+    while _queue_worker_running:
+        item = _priority_queue.dequeue(timeout=0.5)
+        if item is None:
+            continue  # 超时，继续循环检查
+
+        try:
+            _process_request(item)
+        except Exception as e:
+            logger.error("sdk_queue_process_error", f"处理请求异常: {e}")
+
+    logger.log_event("sdk_queue_worker_stopped", "优先级队列工作线程停止")
+
+
 def handle_client(conn: socket.socket):
-    """处理一个客户端连接（每个客户端在独立线程中处理，SDK 调用通过 _sdk_lock 串行化）"""
+    """处理一个客户端连接（接收请求并入队）"""
     logger = get_logger("sdk_subprocess")
     logger.log_event("sdk_ipc_client_connected", "IPC 客户端已连接")
 
@@ -344,31 +468,11 @@ def handle_client(conn: socket.socket):
             except (ConnectionError, OSError):
                 break  # 客户端断开
 
-            method = request.get("method")
-            kwargs = request.get("args", {})
-            request_id = request.get("request_id")
+            # 获取优先级（默认 high）
+            priority = request.get("priority", PriorityRequestQueue.HIGH)
 
-            # 串行化 SDK 调用：避免多个客户端并发访问 TGW 连接
-            with _sdk_lock:
-                try:
-                    result = execute_sdk_method(method, kwargs)
-                    response = {
-                        "request_id": request_id,
-                        "success": True,
-                        "result": encode_response(result),
-                    }
-                except Exception as e:
-                    response = {
-                        "request_id": request_id,
-                        "success": False,
-                        "error": f"{type(e).__name__}: {e}",
-                        "result": encode_response(None),
-                    }
-
-                try:
-                    send_message(conn, response)
-                except (ConnectionError, OSError):
-                    break
+            # 入队等待处理
+            _priority_queue.enqueue(request, conn, priority)
 
     except Exception as e:
         logger.error("sdk_ipc_error", f"IPC 处理异常: {e}")
@@ -382,7 +486,16 @@ def handle_client(conn: socket.socket):
 
 def start_server():
     """启动 IPC 服务端"""
+    global _priority_queue, _queue_worker_running
     logger = get_logger("sdk_subprocess")
+
+    # 初始化优先级队列
+    _priority_queue = PriorityRequestQueue()
+    _queue_worker_running = True
+
+    # 启动工作线程
+    worker_thread = threading.Thread(target=_queue_worker, daemon=True)
+    worker_thread.start()
 
     # 清理旧 socket
     if os.path.exists(SOCKET_PATH):
@@ -390,7 +503,7 @@ def start_server():
 
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     server.bind(SOCKET_PATH)
-    server.listen(8)  # 最多 8 个排队客户端（内部通过 _sdk_lock 串行化 SDK 调用）
+    server.listen(8)  # 最多 8 个排队客户端
     server.settimeout(1.0)  # 允许定期检查信号
 
     logger.log_event("sdk_ipc_server_started", f"IPC 服务端监听: {SOCKET_PATH}")
@@ -404,6 +517,7 @@ def start_server():
     def _shutdown(signum, frame):
         nonlocal running
         running = False
+        _queue_worker_running = False
         logger.log_event("sdk_subprocess_shutdown", f"收到信号 {signum}，准备退出")
 
     signal.signal(signal.SIGTERM, _shutdown)
@@ -414,7 +528,7 @@ def start_server():
     while running:
         try:
             conn, _ = server.accept()
-            # 多客户端模式：每个客户端在独立线程中处理，SDK 调用通过 _sdk_lock 串行化
+            # 每个客户端在独立线程中接收请求并入队
             t = threading.Thread(target=handle_client, args=(conn,), daemon=True)
             t.start()
             active_clients.append(t)
@@ -423,6 +537,12 @@ def start_server():
         except Exception as e:
             if running:
                 logger.error("sdk_ipc_accept_error", f"accept 异常: {e}")
+
+    # 停止工作线程
+    _queue_worker_running = False
+    if _priority_queue:
+        with _priority_queue._condition:
+            _priority_queue._condition.notify_all()
 
     # 清理
     try:

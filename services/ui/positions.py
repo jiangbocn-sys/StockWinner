@@ -39,7 +39,8 @@ def _get_latest_price(stock_code: str) -> Optional[float]:
             begin_date=begin_date,
             end_date=end_date,
             period=10008,  # Period.day
-            task_type="query"
+            task_type="query",
+            priority=1  # 用户请求，high priority
         )
 
         if kline_data and code in kline_data:
@@ -195,7 +196,9 @@ async def get_positions(
 
     if stock_code:
         positions = await db.fetchall(
-            """SELECT p.*, w.stop_loss_price, w.take_profit_price
+            """SELECT p.*, w.stop_loss_price, w.take_profit_price,
+                      (SELECT MIN(trade_time) FROM trade_records
+                       WHERE account_id = p.account_id AND stock_code = p.stock_code AND trade_type = 'buy') as first_buy_date
                FROM stock_positions p
                LEFT JOIN (SELECT account_id, stock_code, stop_loss_price, take_profit_price
                           FROM watchlist WHERE status IN ('pending', 'watching', 'bought')
@@ -206,7 +209,9 @@ async def get_positions(
         )
     else:
         positions = await db.fetchall(
-            """SELECT p.*, w.stop_loss_price, w.take_profit_price
+            """SELECT p.*, w.stop_loss_price, w.take_profit_price,
+                      (SELECT MIN(trade_time) FROM trade_records
+                       WHERE account_id = p.account_id AND stock_code = p.stock_code AND trade_type = 'buy') as first_buy_date
                FROM stock_positions p
                LEFT JOIN (SELECT account_id, stock_code, stop_loss_price, take_profit_price
                           FROM watchlist WHERE status IN ('pending', 'watching', 'bought')

@@ -1,8 +1,8 @@
 """
-选股和 Watchlist 管理 API
+选股和 Watchlist 管理 API - 包含 Agent 权限检查
 """
 
-from fastapi import APIRouter, HTTPException, Path, Body, Query
+from fastapi import APIRouter, HTTPException, Path, Body, Query, Depends, Request
 from typing import List, Optional, Dict, Any
 from fastapi.background import BackgroundTasks
 import os
@@ -11,6 +11,38 @@ from services.screening.service import get_screening_service
 from services.common.timezone import get_china_time, format_china_time
 
 router = APIRouter()
+
+
+# ============== Agent 权限检查（可选）===============
+
+async def check_agent_watchlist_permission(request: Request):
+    """检查 Agent 权限：如果请求携带 X-Agent-Key 则验证 watchlist:manage 权限"""
+    agent_key = request.headers.get("X-Agent-Key")
+    if not agent_key:
+        return  # 非 Agent 请求，跳过检查
+
+    from services.agent.middleware import verify_agent_key, has_permission
+    from services.agent.models import hash_api_key
+
+    key_hash = hash_api_key(agent_key)
+    db = get_db_manager()
+    agent = await db.fetchone(
+        "SELECT * FROM agent_accounts WHERE api_key_hash = ? AND enabled = 1",
+        (key_hash,)
+    )
+
+    if not agent:
+        raise HTTPException(status_code=401, detail="无效的 Agent API Key")
+
+    # 检查权限
+    from services.agent.models import get_effective_permissions
+    import json
+    allowed_perms = json.loads(agent.get("allowed_permissions") or "[]")
+    denied_perms = json.loads(agent.get("denied_permissions") or "[]")
+    effective_perms = get_effective_permissions(agent["role"], allowed_perms, denied_perms)
+
+    if not has_permission(effective_perms, "watchlist:manage"):
+        raise HTTPException(status_code=403, detail="权限不足：需要 watchlist:manage")
 
 
 # ============== 本地数据下载 ==============
@@ -494,9 +526,11 @@ async def get_temp_candidates(
 
 @router.post("/api/v1/ui/{account_id}/candidates/confirm")
 async def confirm_candidates(
+    request: Request,
     account_id: str = Path(..., description="账户 ID"),
     stock_codes: Optional[List[str]] = Body(None, description="要确认的股票代码列表，None 表示全部"),
-    confirm: bool = Body(True, description="True=确认加入，False=拒绝")
+    confirm: bool = Body(True, description="True=确认加入，False=拒绝"),
+    _: None = Depends(check_agent_watchlist_permission),
 ):
     """确认或拒绝临时候选股票"""
     db = get_db_manager()
@@ -722,9 +756,11 @@ async def unsubscribe_watchlist_group(
 
 @router.delete("/api/v1/ui/{account_id}/watchlist/{stock_code}")
 async def remove_from_watchlist(
+    request: Request,
     account_id: str = Path(..., description="账户 ID"),
     stock_code: str = Path(..., description="股票代码"),
     group_id: Optional[int] = Query(None, description="候选组 ID，指定时只删除组内记录"),
+    _: None = Depends(check_agent_watchlist_permission),
 ):
     """从 watchlist 移除股票。指定 group_id 时只删除组内记录"""
     db = get_db_manager()
@@ -760,9 +796,11 @@ async def remove_from_watchlist(
 
 @router.put("/api/v1/ui/{account_id}/watchlist/{stock_code}/status")
 async def update_watchlist_status(
+    request: Request,
     account_id: str = Path(..., description="账户 ID"),
     stock_code: str = Path(..., description="股票代码"),
-    status: str = Body(..., description="新状态：pending/watching/bought/sold/ignored")
+    status: str = Body(..., description="新状态：pending/watching/bought/sold/ignored"),
+    _: None = Depends(check_agent_watchlist_permission),
 ):
     """更新 watchlist 股票状态"""
     db = get_db_manager()
@@ -794,10 +832,12 @@ async def update_watchlist_status(
 
 @router.put("/api/v1/ui/{account_id}/candidate-groups/{group_id}/batch-status")
 async def batch_update_watchlist_status(
+    request: Request,
     account_id: str = Path(..., description="账户 ID"),
     group_id: int = Path(..., description="候选组 ID"),
     status: str = Body(..., description="新状态：pending/watching/bought/sold/ignored"),
     stock_codes: Optional[List[str]] = Body(None, description="要更新的股票代码列表，为空则更新组内全部"),
+    _: None = Depends(check_agent_watchlist_permission),
 ):
     """批量更新候选组内股票状态
 
@@ -845,12 +885,14 @@ async def batch_update_watchlist_status(
 
 @router.put("/api/v1/ui/{account_id}/watchlist/{stock_code}/prices")
 async def update_watchlist_prices(
+    request: Request,
     account_id: str = Path(..., description="账户 ID"),
     stock_code: str = Path(..., description="股票代码"),
     trigger_price: Optional[float] = Body(None, description="触发价格"),
     stop_loss_price: Optional[float] = Body(None, description="止损价格"),
     take_profit_price: Optional[float] = Body(None, description="止盈价格"),
-    target_quantity: Optional[int] = Body(None, description="目标数量")
+    target_quantity: Optional[int] = Body(None, description="目标数量"),
+    _: None = Depends(check_agent_watchlist_permission),
 ):
     """更新 watchlist 股票的价格参数"""
     db = get_db_manager()
@@ -888,6 +930,7 @@ async def update_watchlist_prices(
 
 @router.put("/api/v1/ui/{account_id}/watchlist/{stock_code}")
 async def update_watchlist_stock(
+    request: Request,
     account_id: str = Path(..., description="账户 ID"),
     stock_code: str = Path(..., description="股票代码"),
     group_id: int = Body(..., description="候选组 ID"),
@@ -898,6 +941,7 @@ async def update_watchlist_stock(
     target_quantity: Optional[int] = Body(None, description="目标数量"),
     status: Optional[str] = Body(None, description="状态"),
     reason: Optional[str] = Body(None, description="入选原因"),
+    _: None = Depends(check_agent_watchlist_permission),
 ):
     """更新候选组内指定股票的参数（组级别编辑）"""
     db = get_db_manager()
@@ -935,9 +979,11 @@ async def update_watchlist_stock(
 
 @router.post("/api/v1/ui/{account_id}/watchlist/clear")
 async def clear_watchlist(
+    request: Request,
     account_id: str = Path(..., description="账户 ID"),
     status: Optional[str] = Body(None, description="可选，只清除指定状态的记录"),
     confirm: str = Body(..., description="必须传入 'CONFIRM' 才执行删除"),
+    _: None = Depends(check_agent_watchlist_permission),
 ):
     """清空 watchlist（需要确认参数）"""
     if confirm != "CONFIRM":
@@ -997,9 +1043,11 @@ async def get_candidate_groups(
 
 @router.post("/api/v1/ui/{account_id}/candidate-groups")
 async def create_candidate_group(
+    request: Request,
     account_id: str = Path(..., description="账户 ID"),
     name: str = Body(..., description="候选组名称"),
     screening_strategy_id: Optional[int] = Body(None, description="关联的选股策略 ID"),
+    _: None = Depends(check_agent_watchlist_permission),
 ):
     """创建手动候选组"""
     db = get_db_manager()
@@ -1036,10 +1084,12 @@ async def create_candidate_group(
 
 @router.put("/api/v1/ui/{account_id}/candidate-groups/{group_id}")
 async def update_candidate_group(
+    request: Request,
     account_id: str = Path(...),
     group_id: int = Path(...),
     name: Optional[str] = Body(None, description="新组名"),
     screening_strategy_id: Optional[int] = Body(None, description="关联的选股策略 ID，None 表示取消关联"),
+    _: None = Depends(check_agent_watchlist_permission),
 ):
     """更新候选组（重命名 / 关联策略）"""
     db = get_db_manager()
@@ -1078,9 +1128,11 @@ async def update_candidate_group(
 
 @router.delete("/api/v1/ui/{account_id}/candidate-groups/{group_id}")
 async def delete_candidate_group(
+    request: Request,
     account_id: str = Path(...),
     group_id: int = Path(...),
     force: bool = Query(False, description="强制删除，忽略监控中警告"),
+    _: None = Depends(check_agent_watchlist_permission),
 ):
     """删除候选组（默认提示监控中股票，force=true 时直接删除）"""
     db = get_db_manager()
@@ -1120,6 +1172,7 @@ async def delete_candidate_group(
 
 @router.post("/api/v1/ui/{account_id}/watchlist")
 async def add_to_watchlist_manual(
+    request: Request,
     account_id: str = Path(..., description="账户 ID"),
     stock_code: str = Body(..., description="股票代码"),
     group_id: int = Body(..., description="候选组 ID"),
@@ -1130,6 +1183,7 @@ async def add_to_watchlist_manual(
     take_profit_price: Optional[float] = Body(None, description="止盈价格"),
     target_quantity: Optional[int] = Body(None, description="目标数量"),
     reason: Optional[str] = Body("手动添加", description="入选原因"),
+    _: None = Depends(check_agent_watchlist_permission),
 ):
     """手动添加候选股票到指定候选组"""
     db = get_db_manager()
@@ -1183,9 +1237,11 @@ async def add_to_watchlist_manual(
 
 @router.post("/api/v1/ui/{account_id}/watchlist/import-preview")
 async def preview_watchlist_import(
+    request: Request,
     account_id: str = Path(..., description="账户 ID"),
     group_id: int = Body(..., description="候选组 ID"),
     items: List[Dict[str, Any]] = Body(..., description="待导入项列表 [{code, name}]"),
+    _: None = Depends(check_agent_watchlist_permission),
 ):
     """预览文件导入结果：规范化代码、查名称、检测组内重复"""
     from services.common.stock_code import normalize_stock_code
@@ -1288,9 +1344,11 @@ async def preview_watchlist_import(
 
 @router.post("/api/v1/ui/{account_id}/watchlist/batch-add")
 async def batch_add_to_watchlist(
+    request: Request,
     account_id: str = Path(..., description="账户 ID"),
     group_id: int = Body(..., description="候选组 ID"),
     items: List[Dict[str, Any]] = Body(..., description="确认导入项 [{stock_code, stock_name}]"),
+    _: None = Depends(check_agent_watchlist_permission),
 ):
     """批量添加股票到候选组，只检查组内重复"""
     db = get_db_manager()

@@ -14,6 +14,7 @@ from services.common.database import get_db_manager
 from services.common.timezone import get_china_time
 from services.agent.middleware import (
     verify_agent_key, require_permission, require_role, validate_account_scope,
+    get_priority_for_role,
 )
 from services.agent.models import (
     AgentInfo, AgentCreateRequest, AgentUpdateRequest, AgentRole,
@@ -79,7 +80,7 @@ async def get_agent_spec():
         "system": {
             "name": "StockWinner",
             "description": "多账户智能股票交易系统。支持选股、策略管理、交易执行、持仓监控、信号推送。",
-            "version": "v7.1.6",
+            "version": "v7.8.9",
             "architecture": "FastAPI 后端 + Vue 3 前端 + SQLite 双库（stockwinner.db 业务 / kline.db 行情）",
         },
         "capabilities": {
@@ -257,6 +258,58 @@ async def get_agent_spec():
                     {"method": "POST", "path": "/api/v1/agent/submit/trading-strategy?account_id=xxx", "desc": "创建交易策略（code_scope=trading）", "body": '{"name":"策略名","code":"def run(context):\\n    ...","function_name":"run","buy_strategy_id":38,"sell_strategy_id":39}'},
                     {"method": "PUT", "path": "/api/v1/agent/strategy/{id}?account_id=xxx", "desc": "修改策略（代码变更时重新 AST 校验）", "body": '{"name":"新名称","code":"..."}'},
                     {"method": "DELETE", "path": "/api/v1/agent/strategy/{id}?account_id=xxx", "desc": "删除策略（需 strategist 角色，清理关联数据）"},
+                    {"method": "POST", "path": "/api/v1/agent/submit/strategy/{id}/restore?account_id=xxx", "desc": "恢复策略历史版本（strategy:version 权限）", "body": '{"version_id":123}'},
+                ],
+            },
+            "trading_strategy_endpoints": {
+                "description": "个股止盈止损策略，viewer 可查询，operator 可管理",
+                "endpoints": [
+                    {"method": "GET", "path": "/api/v1/agent/query/trading-strategy/stock/{stock_code}?account_id=xxx", "desc": "获取个股止盈止损配置"},
+                    {"method": "GET", "path": "/api/v1/agent/query/trading-strategy/stock-list?account_id=xxx", "desc": "获取账户下所有止盈止损配置"},
+                    {"method": "POST", "path": "/api/v1/agent/submit/trading-strategy/stock?account_id=xxx", "desc": "设置个股止盈止损", "body": '{"stock_code":"600000.SH","strategy_type":"trailing_stop","take_profit_pct":0.15,"stop_loss_pct":0.05,"trailing_stop_pct":0.03}', "permission": "trading_strategy:manage"},
+                    {"method": "DELETE", "path": "/api/v1/agent/submit/trading-strategy/stock/{stock_code}?account_id=xxx", "desc": "删除个股止盈止损", "permission": "trading_strategy:manage"},
+                ],
+            },
+            "strategy_version_endpoints": {
+                "description": "策略版本管理，viewer 可查看历史，strategist 可恢复版本",
+                "endpoints": [
+                    {"method": "GET", "path": "/api/v1/agent/query/strategy/{id}/versions?account_id=xxx", "desc": "策略版本历史"},
+                    {"method": "POST", "path": "/api/v1/agent/submit/strategy/{id}/restore?account_id=xxx", "desc": "恢复指定版本", "body": '{"version_id":123}', "permission": "strategy:version"},
+                ],
+            },
+            "performance_endpoints": {
+                "description": "策略绩效分析，viewer 可查询",
+                "endpoints": [
+                    {"method": "GET", "path": "/api/v1/agent/query/performance/summary?account_id=xxx", "desc": "策略绩效概览"},
+                    {"method": "GET", "path": "/api/v1/agent/query/performance/{strategy_id}/selections?account_id=xxx", "desc": "选股记录"},
+                    {"method": "GET", "path": "/api/v1/agent/query/performance/{strategy_id}/trades?account_id=xxx", "desc": "策略交易明细"},
+                    {"method": "GET", "path": "/api/v1/agent/query/performance/equity-curve?account_id=xxx&strategy_id=", "desc": "净值曲线"},
+                ],
+            },
+            "capital_endpoints": {
+                "description": "资金管理，viewer 可查询，operator 可调整",
+                "endpoints": [
+                    {"method": "GET", "path": "/api/v1/agent/query/capital/overview?account_id=xxx", "desc": "资金概览"},
+                    {"method": "GET", "path": "/api/v1/agent/query/capital/strategies/{strategy_id}?account_id=xxx", "desc": "策略资金详情"},
+                    {"method": "POST", "path": "/api/v1/agent/submit/capital/strategies/{strategy_id}/adjust-cash?account_id=xxx", "desc": "调整策略现金", "body": '{"adjustment":10000}', "permission": "capital:manage"},
+                ],
+            },
+            "health_endpoints": {
+                "description": "健康检查，viewer 可查询",
+                "endpoints": [
+                    {"method": "GET", "path": "/api/v1/agent/query/health?account_id=xxx", "desc": "账户健康状态（SDK连接、数据完整性、持仓异常）"},
+                ],
+            },
+            "manage_endpoints": {
+                "description": "系统管理操作，operator 及以上角色可用",
+                "endpoints": [
+                    {"method": "POST", "path": "/api/v1/agent/manage/scheduler/run-now?account_id=xxx", "desc": "立即执行调度任务", "body": '{"task_id":1}', "permission": "scheduler:start"},
+                    {"method": "POST", "path": "/api/v1/agent/manage/scheduler/toggle?account_id=xxx", "desc": "启停调度任务", "body": '{"task_id":1,"enabled":true}', "permission": "scheduler:start/stop"},
+                    {"method": "POST", "path": "/api/v1/agent/manage/monitoring/start?account_id=xxx", "desc": "启动交易监控", "permission": "monitoring:start"},
+                    {"method": "POST", "path": "/api/v1/agent/manage/monitoring/stop?account_id=xxx", "desc": "停止交易监控", "permission": "monitoring:stop"},
+                    {"method": "POST", "path": "/api/v1/agent/manage/screening/start?account_id=xxx", "desc": "启动选股扫描", "body": '{"strategy_id":1,"interval":60}', "permission": "screening:create"},
+                    {"method": "POST", "path": "/api/v1/agent/manage/screening/stop?account_id=xxx", "desc": "停止选股扫描", "permission": "screening:create"},
+                    {"method": "POST", "path": "/api/v1/agent/manage/strategy/execute?account_id=xxx", "desc": "执行策略（买入/卖出）", "body": '{"strategy_id":1,"stock_code":"600000.SH","action":"buy"}', "permission": "strategy:execute"},
                 ],
             },
             "watchlist_endpoints": {
@@ -660,6 +713,7 @@ async def query_market(
     try:
         from services.trading.gateway import get_gateway
         gateway = await get_gateway()
+        priority = get_priority_for_role(agent["role"])
 
         code = stock_code
         if '.' not in code:
@@ -752,6 +806,7 @@ async def query_kline(
     try:
         from services.trading.gateway import get_gateway
         gateway = await get_gateway()
+        priority = get_priority_for_role(agent["role"])
         # gateway 的 start_date/end_date 为 YYYYMMDD
         end_dt = get_china_time()
         start_dt = end_dt - datetime.timedelta(days=limit)  # 按天数估算
@@ -760,7 +815,8 @@ async def query_kline(
             period=period,
             start_date=start_dt.strftime("%Y%m%d"),
             end_date=(end_dt + datetime.timedelta(days=1)).strftime("%Y%m%d"),
-            limit=limit
+            limit=limit,
+            priority=priority
         )
         return {"stock_code": code, "period": period, "source": "sdk", "data": kline_data}
     except Exception as e:
@@ -969,7 +1025,8 @@ async def query_stock_code(
             try:
                 from services.trading.gateway import get_gateway
                 gateway = await get_gateway()
-                code_info = await gateway.get_code_info()
+                priority = get_priority_for_role(agent["role"])
+                code_info = await gateway.get_code_info(priority=priority)
                 match = [c for c in code_info if c.get("code") == code or c.get("code") == stock_code]
                 if match:
                     results.append({"stock_code": match[0]["code"], "stock_name": match[0]["name"]})
@@ -997,7 +1054,8 @@ async def query_stock_code(
             try:
                 from services.trading.gateway import get_gateway
                 gateway = await get_gateway()
-                code_info = await gateway.get_code_info()
+                priority = get_priority_for_role(agent["role"])
+                code_info = await gateway.get_code_info(priority=priority)
                 results = [
                     {"stock_code": c["code"], "stock_name": c["name"]}
                     for c in code_info
@@ -1029,7 +1087,8 @@ async def query_data_index_list(
     try:
         from services.trading.gateway import get_gateway
         gateway = await get_gateway()
-        indices = await gateway.get_index_list()
+        priority = get_priority_for_role(agent["role"])
+        indices = await gateway.get_index_list(priority=priority)
         return {"success": True, "data": indices, "count": len(indices)}
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -1051,8 +1110,9 @@ async def query_data_index_kline(
     try:
         from services.trading.gateway import get_gateway
         gateway = await get_gateway()
+        priority = get_priority_for_role(agent["role"])
         kline_data = await gateway.get_kline_data(
-            stock_code=index_code, period=period, limit=limit
+            stock_code=index_code, period=period, limit=limit, priority=priority
         )
         return {"success": True, "data": {"index_code": index_code, "period": period, "kline": kline_data}}
     except Exception as e:
@@ -1073,7 +1133,8 @@ async def query_data_industry_list(
     try:
         from services.trading.gateway import get_gateway
         gateway = await get_gateway()
-        records = await gateway.get_industry_list(level=level)
+        priority = get_priority_for_role(agent["role"])
+        records = await gateway.get_industry_list(level=level, priority=priority)
         return {"success": True, "data": records, "count": len(records)}
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -1093,7 +1154,8 @@ async def query_data_industry_kline(
     try:
         from services.trading.gateway import get_gateway
         gateway = await get_gateway()
-        records = await gateway.get_industry_kline(index_code)
+        priority = get_priority_for_role(agent["role"])
+        records = await gateway.get_industry_kline(index_code, priority=priority)
         return {"success": True, "data": {"index_code": index_code, "kline": records, "count": len(records)}}
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -1113,7 +1175,8 @@ async def query_data_industry_constituent(
     try:
         from services.trading.gateway import get_gateway
         gateway = await get_gateway()
-        records = await gateway.get_industry_constituent(index_code)
+        priority = get_priority_for_role(agent["role"])
+        records = await gateway.get_industry_constituent(index_code, priority=priority)
         return {"success": True, "data": {"index_code": index_code, "constituents": records, "count": len(records)}}
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -1133,7 +1196,8 @@ async def query_data_index_constituent(
     try:
         from services.trading.gateway import get_gateway
         gateway = await get_gateway()
-        records = await gateway.get_index_constituent(index_code)
+        priority = get_priority_for_role(agent["role"])
+        records = await gateway.get_index_constituent(index_code, priority=priority)
         return {"success": True, "data": {"index_code": index_code, "constituents": records, "count": len(records)}}
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -1157,7 +1221,8 @@ async def query_data_financial_income(
     try:
         from services.trading.gateway import get_gateway
         gateway = await get_gateway()
-        records = await gateway.get_income_statement(stock_code)
+        priority = get_priority_for_role(agent["role"])
+        records = await gateway.get_income_statement(stock_code, priority=priority)
         return {"success": True, "data": {"stock_code": stock_code, "records": records, "count": len(records)}}
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -1177,7 +1242,8 @@ async def query_data_financial_balance(
     try:
         from services.trading.gateway import get_gateway
         gateway = await get_gateway()
-        records = await gateway.get_balance_sheet(stock_code)
+        priority = get_priority_for_role(agent["role"])
+        records = await gateway.get_balance_sheet(stock_code, priority=priority)
         return {"success": True, "data": {"stock_code": stock_code, "records": records, "count": len(records)}}
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -1197,7 +1263,8 @@ async def query_data_financial_cashflow(
     try:
         from services.trading.gateway import get_gateway
         gateway = await get_gateway()
-        records = await gateway.get_cash_flow_statement(stock_code)
+        priority = get_priority_for_role(agent["role"])
+        records = await gateway.get_cash_flow_statement(stock_code, priority=priority)
         return {"success": True, "data": {"stock_code": stock_code, "records": records, "count": len(records)}}
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -1217,7 +1284,8 @@ async def query_data_financial_profit_notice(
     try:
         from services.trading.gateway import get_gateway
         gateway = await get_gateway()
-        records = await gateway.get_profit_notice(stock_code)
+        priority = get_priority_for_role(agent["role"])
+        records = await gateway.get_profit_notice(stock_code, priority=priority)
         return {"success": True, "data": {"stock_code": stock_code, "records": records, "count": len(records)}}
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -1237,7 +1305,8 @@ async def query_data_financial_profit_express(
     try:
         from services.trading.gateway import get_gateway
         gateway = await get_gateway()
-        records = await gateway.get_profit_express(stock_code)
+        priority = get_priority_for_role(agent["role"])
+        records = await gateway.get_profit_express(stock_code, priority=priority)
         return {"success": True, "data": {"stock_code": stock_code, "records": records, "count": len(records)}}
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -1259,7 +1328,8 @@ async def query_data_dragon_tiger(
     try:
         from services.trading.gateway import get_gateway
         gateway = await get_gateway()
-        records = await gateway.get_long_hu_bang(stock_code, start_date, end_date)
+        priority = get_priority_for_role(agent["role"])
+        records = await gateway.get_long_hu_bang(stock_code, start_date, end_date, priority=priority)
         return {"success": True, "data": {"stock_code": stock_code, "records": records, "count": len(records)}}
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -1280,7 +1350,8 @@ async def query_data_margin_summary(
     try:
         from services.trading.gateway import get_gateway
         gateway = await get_gateway()
-        records = await gateway.get_margin_summary(start_date, end_date)
+        priority = get_priority_for_role(agent["role"])
+        records = await gateway.get_margin_summary(start_date, end_date, priority=priority)
         return {"success": True, "data": {"records": records, "count": len(records)}}
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -1302,7 +1373,8 @@ async def query_data_margin_detail(
     try:
         from services.trading.gateway import get_gateway
         gateway = await get_gateway()
-        records = await gateway.get_margin_detail(stock_code, start_date, end_date)
+        priority = get_priority_for_role(agent["role"])
+        records = await gateway.get_margin_detail(stock_code, start_date, end_date, priority=priority)
         return {"success": True, "data": {"stock_code": stock_code, "records": records, "count": len(records)}}
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -1324,7 +1396,8 @@ async def query_data_block_trading(
     try:
         from services.trading.gateway import get_gateway
         gateway = await get_gateway()
-        records = await gateway.get_block_trading(stock_code, start_date, end_date)
+        priority = get_priority_for_role(agent["role"])
+        records = await gateway.get_block_trading(stock_code, start_date, end_date, priority=priority)
         return {"success": True, "data": {"stock_code": stock_code, "records": records, "count": len(records)}}
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -1343,7 +1416,8 @@ async def query_data_treasury_yield(
     try:
         from services.trading.gateway import get_gateway
         gateway = await get_gateway()
-        records = await gateway.get_treasury_yield()
+        priority = get_priority_for_role(agent["role"])
+        records = await gateway.get_treasury_yield(priority=priority)
         return {"success": True, "data": {"records": records, "count": len(records)}}
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -2385,4 +2459,611 @@ async def admin_rotate_key(
         "agent_id": agent_id,
         "api_key": new_key,
         "warning": "请妥善保存新 api_key，旧 key 立即失效",
+    }
+
+
+# ================================================================
+# 止盈止损策略端点（operator 权限）
+# ================================================================
+
+@router.get("/query/trading-strategy/stock/{stock_code}")
+async def get_trading_strategy_stock(
+    request: Request,
+    account_id: str = Query(..., description="账户 ID"),
+    stock_code: str = Path(..., description="股票代码"),
+    agent: dict = Depends(verify_agent_key),
+):
+    """获取个股止盈止损策略配置"""
+    validate_account_scope(request, account_id)
+    db = get_db_manager()
+
+    strategy = await db.fetchone(
+        "SELECT * FROM trading_strategies WHERE account_id = ? AND stock_code = ?",
+        (account_id, stock_code)
+    )
+
+    await log_action(
+        agent_id=agent["agent_id"], action="query.trading_strategy_stock", risk_level="low",
+        account_id=account_id, ip_address=request.client.host if request.client else None,
+    )
+
+    if strategy:
+        return {"success": True, "strategy": strategy, "exists": True}
+    return {"success": True, "strategy": None, "exists": False}
+
+
+@router.get("/query/trading-strategy/stock-list")
+async def list_trading_strategy_stock(
+    request: Request,
+    account_id: str = Query(..., description="账户 ID"),
+    agent: dict = Depends(verify_agent_key),
+):
+    """列出账户所有止盈止损策略"""
+    validate_account_scope(request, account_id)
+    db = get_db_manager()
+
+    strategies = await db.fetchall(
+        "SELECT * FROM trading_strategies WHERE account_id = ? ORDER BY updated_at DESC",
+        (account_id,)
+    )
+
+    await log_action(
+        agent_id=agent["agent_id"], action="query.trading_strategy_list", risk_level="low",
+        account_id=account_id, ip_address=request.client.host if request.client else None,
+    )
+
+    return {"success": True, "strategies": strategies, "count": len(strategies)}
+
+
+@router.post("/submit/trading-strategy/stock")
+async def upsert_trading_strategy_stock(
+    request: Request,
+    account_id: str = Query(..., description="账户 ID"),
+    stock_code: str = Body(..., description="股票代码"),
+    stock_name: str = Body("", description="股票名称"),
+    strategy_type: str = Body("fixed", description="策略类型：fixed/trailing_stop"),
+    entry_price: Optional[float] = Body(None, description="建仓价"),
+    stop_loss_price: Optional[float] = Body(None, description="止损价"),
+    take_profit_price: Optional[float] = Body(None, description="止盈价"),
+    stop_loss_pct: Optional[float] = Body(None, description="止损比例"),
+    take_profit_pct: Optional[float] = Body(None, description="止盈比例"),
+    max_trade_quantity: Optional[int] = Body(None, description="单次买卖最大数量"),
+    agent: dict = Depends(verify_agent_key),
+    _: None = Depends(require_permission("trading_strategy:manage")),
+):
+    """创建或更新个股止盈止损策略"""
+    validate_account_scope(request, account_id)
+    db = get_db_manager()
+
+    # 参数校验
+    if stop_loss_pct is not None and not (0.0 <= stop_loss_pct <= 1.0):
+        raise HTTPException(status_code=400, detail="止损比例必须在0-1之间")
+    if take_profit_pct is not None and not (0.0 <= take_profit_pct <= 1.0):
+        raise HTTPException(status_code=400, detail="止盈比例必须在0-1之间")
+
+    from services.common.timezone import format_china_time
+
+    existing = await db.fetchone(
+        "SELECT id FROM trading_strategies WHERE account_id = ? AND stock_code = ?",
+        (account_id, stock_code)
+    )
+
+    if existing:
+        # 更新
+        update_fields = ["updated_at = ?"]
+        params = [format_china_time()]
+
+        if entry_price is not None:
+            update_fields.append("entry_price = ?")
+            params.append(entry_price)
+        if stop_loss_price is not None:
+            update_fields.append("stop_loss_price = ?")
+            params.append(stop_loss_price)
+        if take_profit_price is not None:
+            update_fields.append("take_profit_price = ?")
+            params.append(take_profit_price)
+        if stop_loss_pct is not None:
+            update_fields.append("stop_loss_pct = ?")
+            params.append(stop_loss_pct)
+        if take_profit_pct is not None:
+            update_fields.append("take_profit_pct = ?")
+            params.append(take_profit_pct)
+        if max_trade_quantity is not None:
+            update_fields.append("max_trade_quantity = ?")
+            params.append(max_trade_quantity)
+        if stock_name:
+            update_fields.append("stock_name = ?")
+            params.append(stock_name)
+        if strategy_type:
+            update_fields.append("strategy_type = ?")
+            params.append(strategy_type)
+
+        params.append(existing["id"])
+        await db.execute(
+            f"UPDATE trading_strategies SET {', '.join(update_fields)} WHERE id = ?",
+            params
+        )
+        strategy_id = existing["id"]
+        message = "止盈止损策略更新成功"
+    else:
+        # 创建
+        strategy_id = await db.insert(
+            "trading_strategies",
+            {
+                "account_id": account_id,
+                "stock_code": stock_code,
+                "stock_name": stock_name or stock_code,
+                "strategy_type": strategy_type or "fixed",
+                "entry_price": entry_price or 0,
+                "stop_loss_price": stop_loss_price or 0,
+                "take_profit_price": take_profit_price or 0,
+                "stop_loss_pct": stop_loss_pct or 0,
+                "take_profit_pct": take_profit_pct or 0,
+                "max_trade_quantity": max_trade_quantity or 0,
+                "updated_at": format_china_time()
+            }
+        )
+        message = "止盈止损策略创建成功"
+
+    # 同步到 watchlist
+    try:
+        pos = await db.fetchone(
+            "SELECT avg_cost FROM stock_positions WHERE account_id = ? AND stock_code = ? AND quantity > 0",
+            (account_id, stock_code)
+        )
+        avg_cost = float(pos["avg_cost"]) if pos and pos.get("avg_cost", 0) > 0 else 0
+
+        sl = stop_loss_price if (stop_loss_price and stop_loss_price > 0) else (
+            round(avg_cost * (1 - (stop_loss_pct or 0)), 2) if avg_cost > 0 and (stop_loss_pct or 0) > 0 else 0
+        )
+        tp = take_profit_price if (take_profit_price and take_profit_price > 0) else (
+            round(avg_cost * (1 + (take_profit_pct or 0)), 2) if avg_cost > 0 and (take_profit_pct or 0) > 0 else 0
+        )
+
+        wl = await db.fetchone(
+            "SELECT id FROM watchlist WHERE account_id = ? AND stock_code = ? AND status IN ('pending', 'watching', 'bought')",
+            (account_id, stock_code)
+        )
+        if wl and (sl > 0 or tp > 0):
+            await db.execute(
+                "UPDATE watchlist SET stop_loss_price = ?, take_profit_price = ?, updated_at = ? WHERE id = ?",
+                (sl, tp, format_china_time(), wl["id"])
+            )
+    except Exception:
+        pass
+
+    await log_action(
+        agent_id=agent["agent_id"], action="submit.trading_strategy_stock", risk_level="medium",
+        account_id=account_id, resource_type="trading_strategy", resource_id=str(strategy_id),
+        request_payload={"stock_code": stock_code, "stop_loss_pct": stop_loss_pct, "take_profit_pct": take_profit_pct},
+        ip_address=request.client.host if request.client else None,
+    )
+
+    return {"success": True, "message": message, "strategy_id": strategy_id}
+
+
+@router.delete("/submit/trading-strategy/stock/{stock_code}")
+async def delete_trading_strategy_stock(
+    request: Request,
+    account_id: str = Query(..., description="账户 ID"),
+    stock_code: str = Path(..., description="股票代码"),
+    agent: dict = Depends(verify_agent_key),
+    _: None = Depends(require_permission("trading_strategy:manage")),
+):
+    """删除个股止盈止损策略"""
+    validate_account_scope(request, account_id)
+    db = get_db_manager()
+
+    existing = await db.fetchone(
+        "SELECT id FROM trading_strategies WHERE account_id = ? AND stock_code = ?",
+        (account_id, stock_code)
+    )
+
+    if not existing:
+        raise HTTPException(status_code=404, detail="止盈止损策略不存在")
+
+    await db.execute(
+        "DELETE FROM trading_strategies WHERE account_id = ? AND stock_code = ?",
+        (account_id, stock_code)
+    )
+
+    await log_action(
+        agent_id=agent["agent_id"], action="delete.trading_strategy_stock", risk_level="medium",
+        account_id=account_id, resource_type="trading_strategy", resource_id=str(existing["id"]),
+        ip_address=request.client.host if request.client else None,
+    )
+
+    return {"success": True, "message": f"已删除 {stock_code} 的止盈止损策略"}
+
+
+# ================================================================
+# 策略版本管理端点（strategist 权限）
+# ================================================================
+
+@router.get("/query/strategy/{strategy_id}/versions")
+async def get_strategy_versions(
+    request: Request,
+    strategy_id: int = Path(..., description="策略 ID"),
+    agent: dict = Depends(verify_agent_key),
+):
+    """获取策略版本历史"""
+    db = get_db_manager()
+
+    versions = await db.fetchall(
+        "SELECT * FROM strategy_versions WHERE strategy_id = ? ORDER BY created_at DESC",
+        (strategy_id,)
+    )
+
+    await log_action(
+        agent_id=agent["agent_id"], action="query.strategy_versions", risk_level="low",
+        resource_type="strategy", resource_id=str(strategy_id),
+        ip_address=request.client.host if request.client else None,
+    )
+
+    return {"success": True, "versions": versions, "count": len(versions)}
+
+
+@router.post("/submit/strategy/{strategy_id}/restore")
+async def restore_strategy_version(
+    request: Request,
+    strategy_id: int = Path(..., description="策略 ID"),
+    version_id: int = Body(..., description="版本 ID"),
+    agent: dict = Depends(verify_agent_key),
+    _: None = Depends(require_permission("strategy:version")),
+):
+    """恢复策略到指定版本（strategist 权限）"""
+    db = get_db_manager()
+
+    version = await db.fetchone(
+        "SELECT * FROM strategy_versions WHERE id = ? AND strategy_id = ?",
+        (version_id, strategy_id)
+    )
+    if not version:
+        raise HTTPException(status_code=404, detail="版本不存在")
+
+    # 更新策略
+    await db.execute(
+        "UPDATE strategies SET code = ?, updated_at = ? WHERE id = ?",
+        (version["code"], get_china_time().strftime("%Y-%m-%d %H:%M:%S"), strategy_id)
+    )
+
+    await log_action(
+        agent_id=agent["agent_id"], action="submit.strategy_restore", risk_level="medium",
+        resource_type="strategy", resource_id=str(strategy_id),
+        request_payload={"version_id": version_id},
+        ip_address=request.client.host if request.client else None,
+    )
+
+    return {"success": True, "message": f"已恢复策略到版本 {version_id}"}
+
+
+# ================================================================
+# 绩效分析端点（viewer 权限）
+# ================================================================
+
+@router.get("/query/performance/summary")
+async def get_performance_summary(
+    request: Request,
+    account_id: str = Query(..., description="账户 ID"),
+    agent: dict = Depends(verify_agent_key),
+):
+    """获取策略绩效概览"""
+    validate_account_scope(request, account_id)
+    db = get_db_manager()
+
+    # 策略统计
+    strategies = await db.fetchall(
+        """SELECT s.id, s.name,
+               COUNT(DISTINCT tr.id) as trade_count,
+               COALESCE(SUM(CASE WHEN tr.trade_type='sell' THEN tr.profit_loss ELSE 0 END), 0) as total_pnl
+           FROM strategies s
+           LEFT JOIN trade_records tr ON tr.strategy_id = s.id AND tr.account_id = ?
+           WHERE s.account_id = ?
+           GROUP BY s.id""",
+        (account_id, account_id)
+    )
+
+    await log_action(
+        agent_id=agent["agent_id"], action="query.performance_summary", risk_level="low",
+        account_id=account_id, ip_address=request.client.host if request.client else None,
+    )
+
+    return {"success": True, "strategies": strategies}
+
+
+@router.get("/query/performance/{strategy_id}/selections")
+async def get_strategy_selections(
+    request: Request,
+    strategy_id: int = Path(..., description="策略 ID"),
+    account_id: str = Query(..., description="账户 ID"),
+    limit: int = Query(100, description="返回数量"),
+    agent: dict = Depends(verify_agent_key),
+):
+    """获取策略选股记录"""
+    validate_account_scope(request, account_id)
+    db = get_db_manager()
+
+    selections = await db.fetchall(
+        """SELECT * FROM temp_candidates
+           WHERE strategy_id = ? AND account_id = ?
+           ORDER BY created_at DESC LIMIT ?""",
+        (strategy_id, account_id, limit)
+    )
+
+    await log_action(
+        agent_id=agent["agent_id"], action="query.strategy_selections", risk_level="low",
+        account_id=account_id, resource_type="strategy", resource_id=str(strategy_id),
+        ip_address=request.client.host if request.client else None,
+    )
+
+    return {"success": True, "selections": selections, "count": len(selections)}
+
+
+@router.get("/query/performance/{strategy_id}/trades")
+async def get_strategy_trades(
+    request: Request,
+    strategy_id: int = Path(..., description="策略 ID"),
+    account_id: str = Query(..., description="账户 ID"),
+    limit: int = Query(100, description="返回数量"),
+    agent: dict = Depends(verify_agent_key),
+):
+    """获取策略交易明细"""
+    validate_account_scope(request, account_id)
+    db = get_db_manager()
+
+    trades = await db.fetchall(
+        """SELECT * FROM trade_records
+           WHERE strategy_id = ? AND account_id = ?
+           ORDER BY trade_time DESC LIMIT ?""",
+        (strategy_id, account_id, limit)
+    )
+
+    await log_action(
+        agent_id=agent["agent_id"], action="query.strategy_trades", risk_level="low",
+        account_id=account_id, resource_type="strategy", resource_id=str(strategy_id),
+        ip_address=request.client.host if request.client else None,
+    )
+
+    return {"success": True, "trades": trades, "count": len(trades)}
+
+
+@router.get("/query/performance/equity-curve")
+async def get_equity_curve(
+    request: Request,
+    account_id: str = Query(..., description="账户 ID"),
+    strategy_id: Optional[int] = Query(None, description="策略 ID（可选）"),
+    start_date: Optional[str] = Query(None, description="开始日期"),
+    end_date: Optional[str] = Query(None, description="结束日期"),
+    agent: dict = Depends(verify_agent_key),
+):
+    """获取净值曲线"""
+    validate_account_scope(request, account_id)
+    db = get_db_manager()
+
+    conditions = ["account_id = ?"]
+    params = [account_id]
+
+    if strategy_id:
+        conditions.append("strategy_id = ?")
+        params.append(strategy_id)
+    if start_date:
+        conditions.append("DATE(created_at) >= ?")
+        params.append(start_date)
+    if end_date:
+        conditions.append("DATE(created_at) <= ?")
+        params.append(end_date)
+
+    curve = await db.fetchall(
+        f"""SELECT DATE(created_at) as date,
+               SUM(CASE WHEN trade_type='buy' THEN -amount ELSE amount END) as daily_flow,
+               SUM(CASE WHEN trade_type='sell' THEN profit_loss ELSE 0 END) as daily_pnl
+           FROM trade_records
+           WHERE {' AND '.join(conditions)}
+           GROUP BY DATE(created_at)
+           ORDER BY date""",
+        params
+    )
+
+    await log_action(
+        agent_id=agent["agent_id"], action="query.equity_curve", risk_level="low",
+        account_id=account_id, ip_address=request.client.host if request.client else None,
+    )
+
+    return {"success": True, "curve": curve, "count": len(curve)}
+
+
+# ================================================================
+# 资金管理端点（operator 权限）
+# ================================================================
+
+@router.get("/query/capital/overview")
+async def get_capital_overview(
+    request: Request,
+    account_id: str = Query(..., description="账户 ID"),
+    agent: dict = Depends(verify_agent_key),
+):
+    """获取资金概览"""
+    validate_account_scope(request, account_id)
+    db = get_db_manager()
+
+    account = await db.fetchone(
+        "SELECT available_cash FROM accounts WHERE account_id = ?",
+        (account_id,)
+    )
+
+    pos_sum = await db.fetchone(
+        "SELECT SUM(market_value) as total_mv, SUM(profit_loss) as total_pnl FROM stock_positions WHERE account_id = ? AND quantity > 0",
+        (account_id,)
+    )
+
+    strategies_cash = await db.fetchall(
+        "SELECT id, name, strategy_cash FROM strategies WHERE account_id = ? AND strategy_cash > 0",
+        (account_id,)
+    )
+
+    await log_action(
+        agent_id=agent["agent_id"], action="query.capital_overview", risk_level="low",
+        account_id=account_id, ip_address=request.client.host if request.client else None,
+    )
+
+    return {
+        "success": True,
+        "available_cash": float(account.get("available_cash", 0) if account else 0),
+        "positions_value": float(pos_sum.get("total_mv", 0) if pos_sum else 0),
+        "total_pnl": float(pos_sum.get("total_pnl", 0) if pos_sum else 0),
+        "strategies_cash": strategies_cash,
+    }
+
+
+@router.get("/query/capital/strategies/{strategy_id}")
+async def get_strategy_capital(
+    request: Request,
+    strategy_id: int = Path(..., description="策略 ID"),
+    account_id: str = Query(..., description="账户 ID"),
+    agent: dict = Depends(verify_agent_key),
+):
+    """获取策略资金详情"""
+    validate_account_scope(request, account_id)
+    db = get_db_manager()
+
+    strategy = await db.fetchone(
+        "SELECT id, name, strategy_cash FROM strategies WHERE id = ? AND account_id = ?",
+        (strategy_id, account_id)
+    )
+    if not strategy:
+        raise HTTPException(status_code=404, detail="策略不存在")
+
+    # 策略持仓市值
+    pos_sum = await db.fetchone(
+        """SELECT SUM(market_value) as mv, SUM(profit_loss) as pnl
+           FROM stock_positions WHERE account_id = ? AND strategy_id = ? AND quantity > 0""",
+        (account_id, strategy_id)
+    )
+
+    # 策略现金变动记录
+    transactions = await db.fetchall(
+        """SELECT * FROM strategy_cash_transactions
+           WHERE account_id = ? AND strategy_id = ?
+           ORDER BY created_at DESC LIMIT 50""",
+        (account_id, strategy_id)
+    )
+
+    await log_action(
+        agent_id=agent["agent_id"], action="query.strategy_capital", risk_level="low",
+        account_id=account_id, resource_type="strategy", resource_id=str(strategy_id),
+        ip_address=request.client.host if request.client else None,
+    )
+
+    return {
+        "success": True,
+        "strategy": strategy,
+        "positions_value": float(pos_sum.get("mv", 0) if pos_sum else 0),
+        "positions_pnl": float(pos_sum.get("pnl", 0) if pos_sum else 0),
+        "transactions": transactions,
+    }
+
+
+@router.post("/submit/capital/strategies/{strategy_id}/adjust-cash")
+async def adjust_strategy_cash(
+    request: Request,
+    strategy_id: int = Path(..., description="策略 ID"),
+    account_id: str = Query(..., description="账户 ID"),
+    amount: float = Body(..., description="调整金额（正数为增加，负数为减少）"),
+    reason: str = Body("", description="调整原因"),
+    agent: dict = Depends(verify_agent_key),
+    _: None = Depends(require_permission("capital:manage")),
+):
+    """调整策略现金"""
+    validate_account_scope(request, account_id)
+    db = get_db_manager()
+
+    strategy = await db.fetchone(
+        "SELECT id, name, strategy_cash FROM strategies WHERE id = ? AND account_id = ?",
+        (strategy_id, account_id)
+    )
+    if not strategy:
+        raise HTTPException(status_code=404, detail="策略不存在")
+
+    new_cash = float(strategy.get("strategy_cash", 0)) + amount
+    if new_cash < 0:
+        raise HTTPException(status_code=400, detail="策略现金不能为负数")
+
+    from services.common.timezone import format_china_time
+
+    await db.execute(
+        "UPDATE strategies SET strategy_cash = ?, updated_at = ? WHERE id = ?",
+        (new_cash, format_china_time(), strategy_id)
+    )
+
+    # 记录变动
+    await db.insert(
+        "strategy_cash_transactions",
+        {
+            "account_id": account_id,
+            "strategy_id": strategy_id,
+            "transaction_type": "manual_adjust",
+            "amount": abs(amount),
+            "reason": reason or f"手动调整 {'增加' if amount > 0 else '减少'}",
+            "created_at": format_china_time()
+        }
+    )
+
+    await log_action(
+        agent_id=agent["agent_id"], action="submit.adjust_strategy_cash", risk_level="high",
+        account_id=account_id, resource_type="strategy", resource_id=str(strategy_id),
+        request_payload={"amount": amount, "reason": reason},
+        ip_address=request.client.host if request.client else None,
+    )
+
+    return {"success": True, "message": f"策略现金已调整为 {new_cash}"}
+
+
+# ================================================================
+# 健康检查端点（viewer 权限）
+# ================================================================
+
+@router.get("/query/health")
+async def get_health_status(
+    request: Request,
+    account_id: str = Query(..., description="账户 ID"),
+    agent: dict = Depends(verify_agent_key),
+):
+    """获取账户健康状态"""
+    validate_account_scope(request, account_id)
+    db = get_db_manager()
+
+    # 检查账户状态
+    account = await db.fetchone(
+        "SELECT * FROM accounts WHERE account_id = ?",
+        (account_id,)
+    )
+
+    # 检查持仓数量
+    pos_count = await db.fetchone(
+        "SELECT COUNT(*) as cnt FROM stock_positions WHERE account_id = ? AND quantity > 0",
+        (account_id,)
+    )
+
+    # 检查待处理信号
+    pending_signals = await db.fetchone(
+        "SELECT COUNT(*) as cnt FROM trading_signals WHERE account_id = ? AND status = 'pending'",
+        (account_id,)
+    )
+
+    # 检查 SDK 连接状态
+    from services.common.sdk_manager import get_sdk_manager
+    sdk_connected = get_sdk_manager().is_connected()
+
+    await log_action(
+        agent_id=agent["agent_id"], action="query.health", risk_level="low",
+        account_id=account_id, ip_address=request.client.host if request.client else None,
+    )
+
+    return {
+        "success": True,
+        "account_active": account.get("is_active", 0) == 1 if account else False,
+        "position_count": pos_count.get("cnt", 0) if pos_count else 0,
+        "pending_signals": pending_signals.get("cnt", 0) if pending_signals else 0,
+        "sdk_connected": sdk_connected,
+        "available_cash": float(account.get("available_cash", 0) if account else 0),
     }

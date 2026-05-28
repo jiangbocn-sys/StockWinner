@@ -38,8 +38,11 @@ PERMISSIONS = [
     "strategy:update",
     "strategy:delete",
     "strategy:execute",
+    "strategy:version",  # 策略版本管理（查看历史、恢复版本）
     "screening:create",
     "watchlist:manage",  # 候选组管理（添加/删除股票、创建/删除组）
+    "trading_strategy:manage",  # 止盈止损策略管理
+    "capital:manage",    # 资金管理（调整策略现金）
     "scheduler:start",
     "scheduler:stop",
     "monitoring:start",
@@ -61,6 +64,7 @@ ROLE_PERMISSIONS: Dict[str, List[str]] = {
         "query:*",
         "strategy:create",
         "strategy:update",
+        "strategy:version",  # 策略版本管理
         "screening:create",
         "strategy:execute",
         "watchlist:manage",
@@ -71,8 +75,11 @@ ROLE_PERMISSIONS: Dict[str, List[str]] = {
         "strategy:update",
         "strategy:delete",
         "strategy:execute",
+        "strategy:version",  # 策略版本管理
         "screening:create",
         "watchlist:manage",
+        "trading_strategy:manage",  # 止盈止损策略管理
+        "capital:manage",    # 资金管理
         "scheduler:start",
         "scheduler:stop",
         "monitoring:start",
@@ -85,8 +92,11 @@ ROLE_PERMISSIONS: Dict[str, List[str]] = {
         "strategy:update",
         "strategy:delete",
         "strategy:execute",
+        "strategy:version",
         "screening:create",
         "watchlist:manage",
+        "trading_strategy:manage",
+        "capital:manage",
         "scheduler:start",
         "scheduler:stop",
         "monitoring:start",

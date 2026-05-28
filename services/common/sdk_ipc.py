@@ -5,7 +5,13 @@ SDK 子进程 IPC 协议定义
   [4 bytes: 消息长度, big-endian] [N bytes: JSON 数据]
 
 请求格式：
-  {"method": "query_kline", "args": {...}, "request_id": "uuid"}
+  {"method": "query_kline", "args": {...}, "request_id": "uuid", "priority": 1}
+
+  priority 字段（可选，默认 1=high）：
+    0 = highest  - 立即执行（pending信号、止损触发）
+    1 = high     - 优先执行（用户查询、持仓刷新）
+    2 = medium   - 常规执行（策略评估、批量查询）
+    3 = low      - 空闲执行（Watchlist刷新、后台下载）
 
 响应格式：
   {"request_id": "uuid", "success": true/false, "result": <base64-encoded-pickle>, "error": "msg"}
