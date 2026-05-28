@@ -152,7 +152,7 @@ async def upsert_stock_trading_strategy(
         )
 
         existing_wl = await db.fetchone(
-            "SELECT id FROM watchlist WHERE account_id = ? AND stock_code = ? AND is_active = 1",
+            "SELECT id FROM watchlist WHERE account_id = ? AND stock_code = ? AND status IN ('pending', 'watching', 'bought')",
             (account_id, stock_code)
         )
         if existing_wl and (sl > 0 or tp > 0):

@@ -67,7 +67,10 @@ class HealthTracker:
         }
 
     def _notify_sdk_event(self, issue_type: str, detail: str):
-        """发送 SDK 异常飞书通知（带防抖，5 分钟内不重复）"""
+        """发送 SDK 异常飞书通知（带防抖，5 分钟内不重复）
+
+        使用 run_coroutine_threadsafe 提交到主事件循环，避免临时循环导致 aiosqlite 连接失效。
+        """
         import time
         import asyncio
 
@@ -78,11 +81,22 @@ class HealthTracker:
         try:
             from services.notifications import get_notification_service
             notification = get_notification_service()
+
+            # 获取主事件循环（FastAPI/uvicorn 的循环）
+            try:
+                main_loop = asyncio.get_event_loop()
+                if main_loop.is_closed():
+                    get_logger("monitor").log_event("notify_loop_closed", "主事件循环已关闭，跳过通知")
+                    return
+            except RuntimeError:
+                # 没有运行中的循环（可能在线程中调用）
+                get_logger("monitor").log_event("notify_no_loop", "无法获取事件循环，跳过通知")
+                return
+
             for acct_id in self._account_ids:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                try:
-                    loop.run_until_complete(notification.emit(
+                # 提交到主循环执行，不创建临时循环
+                future = asyncio.run_coroutine_threadsafe(
+                    notification.emit(
                         event_type="sdk_connection_error",
                         account_id=acct_id,
                         payload={
@@ -90,10 +104,16 @@ class HealthTracker:
                             "issue": issue_type,
                             "detail": detail,
                         },
-                    ))
-                finally:
-                    loop.close()
+                    ),
+                    main_loop
+                )
+                # 等待完成（最多 5 秒）
+                try:
+                    future.result(timeout=5.0)
+                except Exception as e:
+                    get_logger("monitor").log_event("notify_failed", f"通知发送失败: {e}")
+
             self._last_notify_time = now
             get_logger("monitor").log_event("sdk_notify_sent", f"已发送飞书通知: {issue_type}")
-        except Exception:
-            pass
+        except Exception as e:
+            get_logger("monitor").log_event("notify_error", f"通知发送异常: {e}")

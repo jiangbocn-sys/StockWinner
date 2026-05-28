@@ -782,7 +782,7 @@ async def _preload_price_cache(log, db_manager):
 
         # 2. 活跃 watchlist
         wl = await db_manager.fetchall(
-            "SELECT DISTINCT stock_code FROM watchlist WHERE is_active = 1"
+            "SELECT DISTINCT stock_code FROM watchlist WHERE status IN ('pending', 'watching', 'bought')"
         )
         for w in wl:
             if w.get("stock_code"):

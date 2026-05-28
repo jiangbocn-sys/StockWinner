@@ -1014,7 +1014,7 @@ class SchedulerService:
                 stock_codes.add(normalize_stock_code(r[0]))
 
             rows = conn.execute(
-                "SELECT DISTINCT stock_code FROM watchlist WHERE status IN ('pending', 'watching', 'bought') AND is_active = 1"
+                "SELECT DISTINCT stock_code FROM watchlist WHERE status IN ('pending', 'watching', 'bought')"
             ).fetchall()
             for r in rows:
                 stock_codes.add(normalize_stock_code(r[0]))
@@ -1087,22 +1087,28 @@ class SchedulerService:
                 ).fetchall()]
                 conn.close()
 
-                for acct_id in account_ids:
-                    import asyncio
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                    try:
-                        loop.run_until_complete(notification.emit(
-                            event_type="scheduler_down",
-                            account_id=acct_id,
-                            payload={
-                                "detected_at": now_str,
-                                "detail": "Scheduler daemon 线程已死亡，需重启后端",
-                            },
-                        ))
-                    finally:
-                        loop.close()
-                logger.warning("已发送 Scheduler 异常飞书通知")
+                # 使用主事件循环发送通知，避免临时循环导致 aiosqlite 连接失效
+                main_loop = _get_fastapi_loop()
+                if main_loop and not main_loop.is_closed():
+                    for acct_id in account_ids:
+                        future = asyncio.run_coroutine_threadsafe(
+                            notification.emit(
+                                event_type="scheduler_down",
+                                account_id=acct_id,
+                                payload={
+                                    "detected_at": now_str,
+                                    "detail": "Scheduler daemon 线程已死亡，需重启后端",
+                                },
+                            ),
+                            main_loop
+                        )
+                        try:
+                            future.result(timeout=5.0)
+                        except Exception:
+                            pass
+                    logger.warning("已发送 Scheduler 异常飞书通知")
+                else:
+                    logger.warning("主事件循环不可用，跳过 Scheduler 异常通知")
             except Exception as e:
                 logger.error(f"发送 Scheduler 通知失败: {e}")
 
@@ -1158,24 +1164,29 @@ class SchedulerService:
                             # 重启失败才发通知
                             if position_count > 0:
                                 notification = get_notification_service()
-                                for acct_id in [r["account_id"] for r in acct_rows]:
-                                    import asyncio as _asyncio
-                                    nloop = _asyncio.new_event_loop()
-                                    _asyncio.set_event_loop(nloop)
-                                    try:
-                                        nloop.run_until_complete(notification.emit(
-                                            event_type="monitor_interrupted",
-                                            account_id=acct_id,
-                                            payload={
-                                                "detected_at": now_str,
-                                                "account_id": acct_id,
-                                                "position_count": position_count,
-                                                "restart_result": result.get("message"),
-                                            },
-                                        ))
-                                    finally:
-                                        nloop.close()
-                                logger.warning(f"已发送交易监控中断飞书通知（{position_count} 只持仓，重启失败）")
+                                main_loop = _get_fastapi_loop()
+                                if main_loop and not main_loop.is_closed():
+                                    for acct_id in [r["account_id"] for r in acct_rows]:
+                                        future = asyncio.run_coroutine_threadsafe(
+                                            notification.emit(
+                                                event_type="monitor_interrupted",
+                                                account_id=acct_id,
+                                                payload={
+                                                    "detected_at": now_str,
+                                                    "account_id": acct_id,
+                                                    "position_count": position_count,
+                                                    "restart_result": result.get("message"),
+                                                },
+                                            ),
+                                            main_loop
+                                        )
+                                        try:
+                                            future.result(timeout=5.0)
+                                        except Exception:
+                                            pass
+                                    logger.warning(f"已发送交易监控中断飞书通知（{position_count} 只持仓，重启失败）")
+                                else:
+                                    logger.warning("主事件循环不可用，跳过监控中断通知")
                             else:
                                 logger.info("交易监控未运行，但无持仓，不发通知")
 
@@ -1193,24 +1204,30 @@ class SchedulerService:
                         ).fetchall()
                         positions_conn.close()
                         if position_count > 0:
-                            for acct_id in [r["account_id"] for r in acct_rows]:
-                                notification = get_notification_service()
-                                loop = asyncio.new_event_loop()
-                                asyncio.set_event_loop(loop)
-                                try:
-                                    loop.run_until_complete(notification.emit(
-                                        event_type="monitor_data_stale",
-                                        account_id=acct_id,
-                                        payload={
-                                            "detected_at": now_str,
-                                            "account_id": acct_id,
-                                            "last_data_time": monitor._last_data_time or "无",
-                                            "sdk_error_msg": monitor._sdk_error_msg or "",
-                                        },
-                                    ))
-                                finally:
-                                    loop.close()
-                            logger.warning("已发送行情数据过期飞书通知")
+                            notification = get_notification_service()
+                            main_loop = _get_fastapi_loop()
+                            if main_loop and not main_loop.is_closed():
+                                for acct_id in [r["account_id"] for r in acct_rows]:
+                                    future = asyncio.run_coroutine_threadsafe(
+                                        notification.emit(
+                                            event_type="monitor_data_stale",
+                                            account_id=acct_id,
+                                            payload={
+                                                "detected_at": now_str,
+                                                "account_id": acct_id,
+                                                "last_data_time": monitor._last_data_time or "无",
+                                                "sdk_error_msg": monitor._sdk_error_msg or "",
+                                            },
+                                        ),
+                                        main_loop
+                                    )
+                                    try:
+                                        future.result(timeout=5.0)
+                                    except Exception:
+                                        pass
+                                logger.warning("已发送行情数据过期飞书通知")
+                            else:
+                                logger.warning("主事件循环不可用，跳过数据过期通知")
             except Exception as e:
                 logger.error(f"检查交易监控状态失败: {e}")
 

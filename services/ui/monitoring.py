@@ -210,9 +210,15 @@ async def execute_signal(
                 (account_id, stock_code)
             )
         else:
+            # 卖出时检查是否有剩余持仓
+            remaining = await db.fetchone(
+                "SELECT quantity FROM stock_positions WHERE account_id = ? AND stock_code = ?",
+                (account_id, stock_code)
+            )
+            new_status = 'sold' if not remaining or remaining.get("quantity", 0) == 0 else 'bought'
             await db.update(
                 "watchlist",
-                {"status": "sold", "updated_at": format_china_time()},
+                {"status": new_status, "updated_at": format_china_time()},
                 "account_id = ? AND stock_code = ?",
                 (account_id, stock_code)
             )
@@ -568,11 +574,33 @@ async def submit_manual_order(
     if trade_type == "buy":
         total_amount = price * quantity
         account_available_cash = account.get("available_cash", 0)
-        if total_amount > account_available_cash:
-            return {
-                "success": False,
-                "message": f"买入金额 {total_amount:.2f} 元超过账户可用资金 {account_available_cash:.2f} 元，请减少数量或降低价格",
-            }
+
+        # 计算所有策略现金之和（手动买入不能挪用策略资金）
+        strategies = await db.fetchall(
+            "SELECT id, name, strategy_cash FROM strategies WHERE account_id = ? AND is_active = 1",
+            (account_id,)
+        )
+        total_strategy_cash = sum(s.get("strategy_cash", 0) or 0 for s in strategies)
+
+        # 手动买入可用现金 = 账户可用资金 - 策略现金之和
+        manual_available_cash = account_available_cash - total_strategy_cash
+
+        if manual_available_cash < total_amount:
+            if manual_available_cash <= 0:
+                return {
+                    "success": False,
+                    "message": f"账户可用资金已被策略分配占用，无可用资金进行手动买入。请从策略中转出资金后再试。",
+                    "total_strategy_cash": total_strategy_cash,
+                    "strategies": [{"id": s["id"], "name": s["name"], "cash": s.get("strategy_cash", 0)} for s in strategies if s.get("strategy_cash", 0) > 0],
+                }
+            else:
+                return {
+                    "success": False,
+                    "message": f"手动买入可用资金 {manual_available_cash:.2f} 元不足（账户可用 {account_available_cash:.2f} 元，策略占用 {total_strategy_cash:.2f} 元），本次需 {total_amount:.2f} 元。请从策略中转出资金或减少买入数量。",
+                    "manual_available_cash": round(manual_available_cash, 2),
+                    "total_strategy_cash": round(total_strategy_cash, 2),
+                }
+
         # 单只仓位限制：不超过总资产的 max_single_position_pct（默认 15%）
         # 获取持仓市值计算总资产
         positions = await db.fetchall(

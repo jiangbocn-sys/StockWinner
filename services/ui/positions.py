@@ -198,7 +198,7 @@ async def get_positions(
             """SELECT p.*, w.stop_loss_price, w.take_profit_price
                FROM stock_positions p
                LEFT JOIN (SELECT account_id, stock_code, stop_loss_price, take_profit_price
-                          FROM watchlist WHERE is_active = 1
+                          FROM watchlist WHERE status IN ('pending', 'watching', 'bought')
                           GROUP BY account_id, stock_code) w
                  ON p.account_id = w.account_id AND p.stock_code = w.stock_code
                WHERE p.account_id = ? AND p.stock_code = ? AND p.quantity > 0""",
@@ -209,7 +209,7 @@ async def get_positions(
             """SELECT p.*, w.stop_loss_price, w.take_profit_price
                FROM stock_positions p
                LEFT JOIN (SELECT account_id, stock_code, stop_loss_price, take_profit_price
-                          FROM watchlist WHERE is_active = 1
+                          FROM watchlist WHERE status IN ('pending', 'watching', 'bought')
                           GROUP BY account_id, stock_code) w
                  ON p.account_id = w.account_id AND p.stock_code = w.stock_code
                WHERE p.account_id = ? AND p.quantity > 0 ORDER BY p.stock_code""",
@@ -290,11 +290,25 @@ async def get_strategy_position_stats(
         GROUP BY strategy_id
     """, (account_id,))
 
+    # 按策略分组统计交易记录（买入笔数、金额、卖出笔数、金额）
+    trade_stats = await db.fetchall("""
+        SELECT strategy_id,
+               SUM(CASE WHEN trade_type = 'buy' THEN 1 ELSE 0 END) as buy_count,
+               SUM(CASE WHEN trade_type = 'buy' THEN amount ELSE 0 END) as buy_amount,
+               SUM(CASE WHEN trade_type = 'sell' THEN 1 ELSE 0 END) as sell_count,
+               SUM(CASE WHEN trade_type = 'sell' THEN amount ELSE 0 END) as sell_amount,
+               MIN(CASE WHEN trade_type = 'buy' THEN trade_time ELSE NULL END) as first_buy_time
+        FROM trade_records
+        WHERE account_id = ? AND status = 'completed'
+        GROUP BY strategy_id
+    """, (account_id,))
+    trade_map = {r["strategy_id"] or 0: r for r in trade_stats}
+
     # 关联策略名称和现金信息
     stats = []
     total_strategy_cash = 0  # 统计策略现金总和
     for row in rows:
-        sid = row["strategy_id"]
+        sid = row["strategy_id"] or 0  # null → 0
         if sid and sid in strategy_map:
             s = strategy_map[sid]
             strategy_name = s["name"]
@@ -311,8 +325,32 @@ async def get_strategy_position_stats(
 
         total_strategy_cash += strategy_cash
 
+        # 交易统计
+        trade = trade_map.get(sid, {})
+        buy_count = trade.get("buy_count") or 0
+        buy_amount = trade.get("buy_amount") or 0
+        sell_count = trade.get("sell_count") or 0
+        sell_amount = trade.get("sell_amount") or 0
+        first_buy_time = trade.get("first_buy_time")
+
+        # 收益率 = (卖出金额 + 当前持仓市值 - 买入金额) / 买入金额
+        total_invested = buy_amount
+        total_return = sell_amount + pos_mv
+        profit_rate = (total_return - total_invested) / total_invested if total_invested > 0 else 0
+
+        # 年化收益率（基于首次买入时间）
+        annualized_rate = 0
+        if first_buy_time and total_invested > 0:
+            from datetime import datetime
+            try:
+                first_dt = datetime.fromisoformat(first_buy_time.replace('Z', '+00:00').replace('+08:00', ''))
+                days = max((get_china_time() - first_dt).days, 1)
+                annualized_rate = ((total_return / total_invested) ** (365 / days) - 1) if days > 0 else 0
+            except:
+                pass
+
         stats.append({
-            "strategy_id": sid,
+            "strategy_id": row["strategy_id"],  # 保持原始值（可能是 None）
             "strategy_name": strategy_name,
             "position_count": row["position_count"],
             "total_mv": round(pos_mv, 2),
@@ -320,6 +358,12 @@ async def get_strategy_position_stats(
             "position_pct": round(pos_mv / total_assets * 100, 2) if total_assets > 0 else 0,
             "strategy_cash": round(strategy_cash, 2),
             "strategy_total_asset": round(strategy_total_asset, 2),
+            "buy_count": buy_count,
+            "buy_amount": round(buy_amount, 2),
+            "sell_count": sell_count,
+            "sell_amount": round(sell_amount, 2),
+            "profit_rate": round(profit_rate * 100, 2),
+            "annualized_rate": round(annualized_rate * 100, 2),
         })
 
     # 补充未持有股票的策略（有现金分配但无持仓）
@@ -327,6 +371,8 @@ async def get_strategy_position_stats(
         if s["id"] not in [r["strategy_id"] for r in rows if r["strategy_id"]]:
             strategy_cash = s.get("strategy_cash") or 0
             total_strategy_cash += strategy_cash
+            # 该策略的交易统计
+            trade = trade_map.get(s["id"], {})
             stats.append({
                 "strategy_id": s["id"],
                 "strategy_name": s["name"],
@@ -336,7 +382,20 @@ async def get_strategy_position_stats(
                 "position_pct": 0,
                 "strategy_cash": round(strategy_cash, 2),
                 "strategy_total_asset": round(strategy_cash, 2),
+                "buy_count": trade.get("buy_count") or 0,
+                "buy_amount": round(trade.get("buy_amount") or 0, 2),
+                "sell_count": trade.get("sell_count") or 0,
+                "sell_amount": round(trade.get("sell_amount") or 0, 2),
+                "profit_rate": 0,
+                "annualized_rate": 0,
             })
+
+    # 手动买入可用现金 = 账户可用资金 - 所有策略现金之和
+    manual_available_cash = available_cash - total_strategy_cash
+    for stat in stats:
+        if stat["strategy_id"] is None or stat["strategy_id"] == 0:
+            stat["strategy_cash"] = round(manual_available_cash, 2)
+            stat["strategy_total_asset"] = round(manual_available_cash + stat["total_mv"], 2)
 
     return {
         "account_id": account_id,

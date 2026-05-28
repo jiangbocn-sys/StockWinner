@@ -27,25 +27,46 @@
           </div>
         </template>
         <el-table :data="filteredStrategyStats" stripe size="small" @row-click="onStrategyRowClick" :row-class-name="strategyRowClass">
-          <el-table-column prop="strategy_name" label="策略名称" min-width="140" />
-          <el-table-column prop="position_count" label="持仓数" width="80" align="center" />
-          <el-table-column prop="total_mv" label="持仓市值" width="140" align="right">
-            <template #default="{ row }">¥{{ formatNumber(row.total_mv) }}</template>
+          <el-table-column prop="strategy_name" label="策略名称" min-width="120" />
+          <el-table-column label="买入" width="70" align="center">
+            <template #default="{ row }">{{ row.buy_count }}笔</template>
           </el-table-column>
-          <el-table-column prop="total_pnl" label="盈亏" width="140" align="right">
+          <el-table-column label="买入金额" width="110" align="right">
+            <template #default="{ row }">¥{{ formatNumber(row.buy_amount) }}</template>
+          </el-table-column>
+          <el-table-column label="卖出" width="70" align="center">
+            <template #default="{ row }">{{ row.sell_count }}笔</template>
+          </el-table-column>
+          <el-table-column label="卖出金额" width="110" align="right">
+            <template #default="{ row }">¥{{ formatNumber(row.sell_amount) }}</template>
+          </el-table-column>
+          <el-table-column prop="total_pnl" label="盈亏" width="110" align="right">
             <template #default="{ row }">
               <span :class="row.total_pnl >= 0 ? 'profit-positive' : 'profit-negative'">
                 {{ row.total_pnl >= 0 ? '+' : '' }}¥{{ formatNumber(Math.abs(row.total_pnl)) }}
               </span>
             </template>
           </el-table-column>
-          <el-table-column prop="position_pct" label="仓位占比" width="90" align="center">
-            <template #default="{ row }">{{ row.position_pct.toFixed(1) }}%</template>
-          </el-table-column>
-          <el-table-column prop="strategy_cash" label="可用现金" width="120" align="right">
+          <el-table-column label="收益率" width="90" align="right">
             <template #default="{ row }">
-              <span>¥{{ formatNumber(row.strategy_cash || 0) }}</span>
+              <span :class="row.profit_rate >= 0 ? 'profit-positive' : 'profit-negative'">
+                {{ row.profit_rate >= 0 ? '+' : '' }}{{ row.profit_rate }}%
+              </span>
             </template>
+          </el-table-column>
+          <el-table-column label="年化收益" width="90" align="right">
+            <template #default="{ row }">
+              <span :class="row.annualized_rate >= 0 ? 'profit-positive' : 'profit-negative'">
+                {{ row.annualized_rate >= 0 ? '+' : '' }}{{ row.annualized_rate }}%
+              </span>
+            </template>
+          </el-table-column>
+          <el-table-column prop="position_count" label="持仓数" width="70" align="center" />
+          <el-table-column prop="total_mv" label="持仓市值" width="110" align="right">
+            <template #default="{ row }">¥{{ formatNumber(row.total_mv) }}</template>
+          </el-table-column>
+          <el-table-column prop="strategy_cash" label="可用现金" width="100" align="right">
+            <template #default="{ row }">¥{{ formatNumber(row.strategy_cash || 0) }}</template>
           </el-table-column>
         </el-table>
       </el-card>

@@ -354,8 +354,23 @@ class SignalExecutor:
             )
 
     async def _update_watchlist_status(self, account_id: str, stock_code: str, status: str):
-        """更新 watchlist 状态"""
+        """更新 watchlist 状态
+
+        特殊处理：status='sold' 时检查是否有剩余持仓
+        - 无持仓：设为 'sold'
+        - 有持仓（部分卖出）：保持 'bought'
+        """
         db = get_db_manager()
+
+        # 卖出时检查剩余持仓
+        if status == 'sold':
+            remaining = await db.fetchone(
+                "SELECT quantity FROM stock_positions WHERE account_id = ? AND stock_code = ?",
+                (account_id, stock_code)
+            )
+            if remaining and remaining.get("quantity", 0) > 0:
+                status = 'bought'  # 部分卖出，保持持仓状态
+
         old = await db.fetchone(
             "SELECT status FROM watchlist WHERE account_id = ? AND stock_code = ?",
             (account_id, stock_code)

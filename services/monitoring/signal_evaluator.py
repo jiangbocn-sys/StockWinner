@@ -179,6 +179,132 @@ class SignalEvaluator:
                 kline_cache=kline_cache,
             )
 
+    async def evaluate_positions_stop_loss(self, account_id: str, market_data_cache: Optional[Dict[str, Any]] = None):
+        """评估不在 watchlist 中的持仓的止损止盈
+
+        持仓股票可能不在 watchlist 中（status='unknown'），但仍需要检查 trading_strategies 配置的止损。
+        此方法作为 monitor_watchlist 的补充，确保所有持仓都被评估。
+        """
+        db = get_db_manager()
+
+        # 获取所有持仓
+        positions = await db.fetchall(
+            "SELECT stock_code, stock_name, quantity, avg_cost, highest_price FROM stock_positions WHERE account_id = ? AND quantity > 0",
+            (account_id,),
+        )
+        if not positions:
+            return
+
+        # 获取已在 watchlist 中被监控的股票（避免重复）
+        watchlist_codes = await db.fetchall(
+            "SELECT DISTINCT stock_code FROM watchlist WHERE account_id = ? AND status IN ('pending', 'watching', 'bought')",
+            (account_id,),
+        )
+        monitored_codes = {r["stock_code"] for r in watchlist_codes}
+
+        # 过滤出不在 watchlist 的持仓
+        unmonitored_positions = [p for p in positions if p["stock_code"] not in monitored_codes]
+        if not unmonitored_positions:
+            return
+
+        get_logger("monitor").log_event("position_sl_check",
+            f"检查 {len(unmonitored_positions)} 只不在 watchlist 的持仓止损",
+            account_id=account_id, count=len(unmonitored_positions))
+
+        # 获取 trading_strategies 配置
+        ts_rows = await db.fetchall(
+            "SELECT stock_code, stop_loss_pct, take_profit_pct, stop_loss_price, take_profit_price, strategy_type FROM trading_strategies WHERE account_id = ?",
+            (account_id,),
+        )
+        ts_map = {r["stock_code"]: r for r in ts_rows}
+
+        # 批量获取行情
+        if market_data_cache:
+            batch_data = market_data_cache
+        else:
+            from services.common.price_cache import get_price_cache
+            from services.trading.gateway import MarketData
+            cache = get_price_cache()
+            codes = [p["stock_code"] for p in unmonitored_positions]
+            batch_ohlcv = cache.get_all_for_codes(set(codes))
+            if batch_ohlcv:
+                batch_data = {}
+                for code, ohlcv in batch_ohlcv.items():
+                    batch_data[code] = MarketData(
+                        stock_code=code, stock_name="",
+                        current_price=ohlcv.get('close', 0),
+                        change_percent=ohlcv.get('change_pct', 0),
+                        high=ohlcv.get('high', 0), low=ohlcv.get('low', 0),
+                        open_price=ohlcv.get('open', 0), prev_close=ohlcv.get('close', 0),
+                        volume=int(ohlcv.get('volume', 0)), amount=ohlcv.get('amount', 0),
+                        source=ohlcv.get('source', ''),
+                    )
+            else:
+                return
+
+        # 逐个检查止损
+        for pos in unmonitored_positions:
+            stock_code = pos["stock_code"]
+            stock_name = pos.get("stock_name", stock_code)
+            avg_cost = pos.get("avg_cost", 0) or 0
+            highest_price = pos.get("highest_price", 0) or 0
+
+            md = batch_data.get(stock_code)
+            if not md or md.current_price <= 0:
+                continue
+
+            current_price = md.current_price
+
+            # 从 trading_strategies 获取止损配置
+            ts = ts_map.get(stock_code)
+            if not ts:
+                continue  # 没有止损配置，跳过
+
+            ts_sl_price = ts.get("stop_loss_price", 0) or 0
+            ts_sl_pct = ts.get("stop_loss_pct", 0) or 0
+            ts_tp_price = ts.get("take_profit_price", 0) or 0
+            ts_tp_pct = ts.get("take_profit_pct", 0) or 0
+            ts_stype = ts.get("strategy_type", "fixed") or "fixed"
+
+            # 计算止损价
+            sl = 0
+            if ts_sl_price > 0:
+                sl = ts_sl_price
+            elif ts_stype == "trailing_stop" and highest_price > 0 and ts_tp_pct > 0:
+                sl = highest_price * (1 - ts_tp_pct)
+            elif ts_sl_pct > 0 and avg_cost > 0:
+                sl = avg_cost * (1 - ts_sl_pct)
+
+            # 计算止盈价
+            tp = ts_tp_price if ts_tp_price > 0 else (avg_cost * (1 + ts_tp_pct) if ts_tp_pct > 0 and avg_cost > 0 else 0)
+
+            # 检查是否触发
+            should_sell = False
+            reason = ""
+            if sl > 0 and current_price <= sl:
+                should_sell = True
+                reason = "stop_loss"
+            elif tp > 0 and current_price >= tp:
+                should_sell = True
+                reason = "take_profit"
+
+            if should_sell:
+                signal_type = "sell_stop_loss" if reason == "stop_loss" else "sell_take_profit"
+                get_logger("monitor").log_event("position_sell_signal",
+                    f"持仓止损触发：{stock_code} {stock_name}, 原因: {reason}",
+                    stock_code=stock_code, reason=reason,
+                    stop_loss_price=sl, take_profit_price=tp, current_price=current_price)
+
+                stock_info = {
+                    "stock_code": stock_code,
+                    "stock_name": stock_name,
+                    "avg_cost": avg_cost,
+                    "highest_price": highest_price,
+                }
+                await self._executor.execute_sell_signal(
+                    account_id, stock_info, current_price, signal_type, 0, trigger_source="position_stop_loss"
+                )
+
     async def _check_stock_signals_with_price(
         self, account_id: str, stock: Dict,
         ts_map: Optional[Dict[str, Dict]] = None,
@@ -211,16 +337,16 @@ class SignalEvaluator:
                             {"stock_code": stock_code, "stock_name": stock.get("stock_name", stock_code)},
                             trigger_price, "sell", target_quantity, trigger_source="manual",
                         )
-                        await db.update("watchlist", {"status": "sold", "updated_at": get_china_time().strftime("%Y-%m-%d %H:%M:%S")},
-                            "account_id = ? AND stock_code = ?", (account_id, stock_code))
+                        # 使用 executor 方法，会自动检查剩余持仓
+                        await self._executor._update_watchlist_status(account_id, stock_code, 'sold')
                     elif trigger_price <= 0:
                         await self._executor.execute_sell_signal(
                             account_id,
                             {"stock_code": stock_code, "stock_name": stock.get("stock_name", stock_code)},
                             current_price, "sell", target_quantity, trigger_source="manual",
                         )
-                        await db.update("watchlist", {"status": "sold", "updated_at": get_china_time().strftime("%Y-%m-%d %H:%M:%S")},
-                            "account_id = ? AND stock_code = ?", (account_id, stock_code))
+                        # 使用 executor 方法，会自动检查剩余持仓
+                        await self._executor._update_watchlist_status(account_id, stock_code, 'sold')
                 else:
                     if trigger_price > 0 and current_price <= trigger_price:
                         get_logger("monitor").log_event("manual_buy_signal",
@@ -237,11 +363,14 @@ class SignalEvaluator:
 
         elif status in ('watching', 'bought'):
             position = await db.fetchone(
-                "SELECT quantity FROM stock_positions WHERE account_id = ? AND stock_code = ?",
+                "SELECT quantity, avg_cost, highest_price FROM stock_positions WHERE account_id = ? AND stock_code = ?",
                 (account_id, stock_code),
             )
             if not position or position.get("quantity", 0) == 0:
                 return
+
+            # 将持仓信息合并到 stock 对象（用于止损止盈计算）
+            stock = {**stock, "avg_cost": position.get("avg_cost"), "highest_price": position.get("highest_price")}
 
             ts_config = ts_map.get(stock_code) if ts_map else None
             sell_sid = sell_strategy_map.get(stock_code) if sell_strategy_map else None
@@ -293,9 +422,37 @@ class SignalEvaluator:
                 if code_result["should_sell"]:
                     return code_result
 
-        # 优先级 2：watchlist 止盈止损值（含个股策略同步的价格）
+        # 优先级 2：止损止盈判断
+        # 先看 watchlist 的固定价格，如果没有则用 trading_strategies 配置计算
         sl = stock.get("stop_loss_price", 0) or 0
         tp = stock.get("take_profit_price", 0) or 0
+
+        # 如果 watchlist 没有止损价，使用 ts_config 计算
+        if sl == 0 and ts_config:
+            avg_cost = stock.get("avg_cost", 0) or 0
+            highest_price = stock.get("highest_price", 0) or 0
+            strategy_type = ts_config.get("strategy_type", "fixed")
+            stop_loss_pct = ts_config.get("stop_loss_pct", 0) or 0
+            stop_loss_price_ts = ts_config.get("stop_loss_price", 0) or 0
+            take_profit_pct = ts_config.get("take_profit_pct", 0) or 0
+            take_profit_price_ts = ts_config.get("take_profit_price", 0) or 0
+
+            # 计算止损价
+            if stop_loss_price_ts > 0:
+                sl = stop_loss_price_ts
+            elif strategy_type == "trailing_stop" and highest_price > 0 and take_profit_pct > 0:
+                # 移动止损：最高价 × (1 - take_profit_pct)
+                sl = highest_price * (1 - take_profit_pct)
+            elif stop_loss_pct > 0 and avg_cost > 0:
+                # 固定百分比止损：成本价 × (1 - stop_loss_pct)
+                sl = avg_cost * (1 - stop_loss_pct)
+
+            # 计算止盈价
+            if take_profit_price_ts > 0:
+                tp = take_profit_price_ts
+            elif take_profit_pct > 0 and avg_cost > 0:
+                tp = avg_cost * (1 + take_profit_pct)
+
         result["stop_loss_price"] = float(sl)
         result["take_profit_price"] = float(tp)
 

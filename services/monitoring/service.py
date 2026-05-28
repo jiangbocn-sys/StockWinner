@@ -146,7 +146,7 @@ class TradingMonitor:
         account_stocks: Dict[str, set] = {}
         try:
             # 全部活跃 watchlist 股票（跨账户去重）
-            wl = await db.fetchall("SELECT DISTINCT stock_code FROM watchlist WHERE is_active = 1")
+            wl = await db.fetchall("SELECT DISTINCT stock_code FROM watchlist WHERE status IN ('pending', 'watching', 'bought')")
             all_wl_codes = {r["stock_code"] for r in wl}
             # 全部持仓股
             pos = await db.fetchall("SELECT DISTINCT stock_code FROM stock_positions WHERE quantity > 0")
@@ -162,7 +162,7 @@ class TradingMonitor:
             codes = set()
             try:
                 wl = await db.fetchall(
-                    "SELECT DISTINCT stock_code FROM watchlist WHERE account_id = ? AND is_active = 1",
+                    "SELECT DISTINCT stock_code FROM watchlist WHERE account_id = ? AND status IN ('pending', 'watching', 'bought')",
                     (acct_id,),
                 )
                 codes.update(r["stock_code"] for r in wl)
@@ -240,6 +240,9 @@ class TradingMonitor:
 
         # watchlist 止损止盈（需要实时行情）
         await self._evaluator.monitor_watchlist(account_id, market_data_cache=tradable_data)
+
+        # 持仓止损止盈（不在 watchlist 的持仓）
+        await self._evaluator.evaluate_positions_stop_loss(account_id, market_data_cache=tradable_data)
 
         # 扫描手动 pending 信号（需要实时行情）
         await self._executor.scan_pending_signals(account_id, market_data_cache=tradable_data)
