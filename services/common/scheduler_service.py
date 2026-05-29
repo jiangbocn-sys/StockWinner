@@ -1577,7 +1577,8 @@ class SchedulerService:
 
     def _run_builtin_task_threadsafe(self, task_id: int):
         """在主事件循环中运行内置任务（避免临时循环导致 aiosqlite 问题）"""
-        result = self._run_in_main_loop(self._execute_strategy_task(task_id, force=False), timeout=300.0)
+        # 内置任务（如 K线下载）可能需要 10+ 分钟，设置足够长的超时
+        result = self._run_in_main_loop(self._execute_strategy_task(task_id, force=False), timeout=900.0)  # 15分钟超时
         if result:
             logger.info(f"内置任务 {task_id} 完成: {result}")
         else:
