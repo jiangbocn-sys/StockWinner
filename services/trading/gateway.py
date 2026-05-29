@@ -205,6 +205,112 @@ class TradingGateway(TradingGatewayInterface):
         snapshot = await asyncio.to_thread(sdk_mgr.query_snapshot, code_list, begin_date, end_date, priority)
         return snapshot
 
+    # ── 复权因子/基础数据/股东/股权/分红 ──
+
+    async def get_backward_factor(self, stock_codes: List[str], priority: int = 2) -> List[Dict]:
+        """获取后复权因子"""
+        from services.common.sdk_manager import get_sdk_manager
+        sdk_mgr = get_sdk_manager()
+        import asyncio
+        df = await asyncio.to_thread(sdk_mgr.get_backward_factor, stock_codes, priority)
+        return df.to_dict('records') if df is not None and not df.empty else []
+
+    async def get_stock_basic(self, stock_codes: List[str] = None, priority: int = 2) -> List[Dict]:
+        """获取股票基础信息（上市日期、退市日期、板块）"""
+        from services.common.sdk_manager import get_sdk_manager
+        sdk_mgr = get_sdk_manager()
+        import asyncio
+        df = await asyncio.to_thread(sdk_mgr.get_stock_basic, stock_codes or [], priority)
+        return df.to_dict('records') if df is not None and not df.empty else []
+
+    async def get_history_code_list(self, date: int, priority: int = 2) -> List[str]:
+        """获取历史代码列表"""
+        from services.common.sdk_manager import get_sdk_manager
+        sdk_mgr = get_sdk_manager()
+        import asyncio
+        codes = await asyncio.to_thread(sdk_mgr.get_history_code_list, date, priority)
+        return codes
+
+    async def get_bj_code_mapping(self, priority: int = 2) -> List[Dict]:
+        """获取北交所代码对照表"""
+        from services.common.sdk_manager import get_sdk_manager
+        sdk_mgr = get_sdk_manager()
+        import asyncio
+        df = await asyncio.to_thread(sdk_mgr.get_bj_code_mapping, priority)
+        return df.to_dict('records') if df is not None and not df.empty else []
+
+    async def get_shareholder(self, stock_codes: List[str], priority: int = 2) -> List[Dict]:
+        """获取十大股东"""
+        from services.common.sdk_manager import get_sdk_manager
+        sdk_mgr = get_sdk_manager()
+        import asyncio
+        df = await asyncio.to_thread(sdk_mgr.get_shareholder, stock_codes, priority)
+        return df.to_dict('records') if df is not None and not df.empty else []
+
+    async def get_holder_num(self, stock_codes: List[str], priority: int = 2) -> List[Dict]:
+        """获取股东户数"""
+        from services.common.sdk_manager import get_sdk_manager
+        sdk_mgr = get_sdk_manager()
+        import asyncio
+        df = await asyncio.to_thread(sdk_mgr.get_holder_num, stock_codes, priority)
+        return df.to_dict('records') if df is not None and not df.empty else []
+
+    async def get_equity_structure(self, stock_codes: List[str], priority: int = 2) -> List[Dict]:
+        """获取股本结构"""
+        from services.common.sdk_manager import get_sdk_manager
+        sdk_mgr = get_sdk_manager()
+        import asyncio
+        df = await asyncio.to_thread(sdk_mgr.get_equity_structure, stock_codes, priority)
+        return df.to_dict('records') if df is not None and not df.empty else []
+
+    async def get_equity_pledge_freeze(self, stock_codes: List[str], priority: int = 2) -> List[Dict]:
+        """获取股权质押冻结"""
+        from services.common.sdk_manager import get_sdk_manager
+        sdk_mgr = get_sdk_manager()
+        import asyncio
+        df = await asyncio.to_thread(sdk_mgr.get_equity_pledge_freeze, stock_codes, priority)
+        return df.to_dict('records') if df is not None and not df.empty else []
+
+    async def get_equity_restricted(self, stock_codes: List[str], priority: int = 2) -> List[Dict]:
+        """获取限售股解禁"""
+        from services.common.sdk_manager import get_sdk_manager
+        sdk_mgr = get_sdk_manager()
+        import asyncio
+        df = await asyncio.to_thread(sdk_mgr.get_equity_restricted, stock_codes, priority)
+        return df.to_dict('records') if df is not None and not df.empty else []
+
+    async def get_dividend(self, stock_codes: List[str], priority: int = 2) -> List[Dict]:
+        """获取分红数据"""
+        from services.common.sdk_manager import get_sdk_manager
+        sdk_mgr = get_sdk_manager()
+        import asyncio
+        df = await asyncio.to_thread(sdk_mgr.get_dividend, stock_codes, priority)
+        return df.to_dict('records') if df is not None and not df.empty else []
+
+    async def get_right_issue(self, stock_codes: List[str], priority: int = 2) -> List[Dict]:
+        """获取配股数据"""
+        from services.common.sdk_manager import get_sdk_manager
+        sdk_mgr = get_sdk_manager()
+        import asyncio
+        df = await asyncio.to_thread(sdk_mgr.get_right_issue, stock_codes, priority)
+        return df.to_dict('records') if df is not None and not df.empty else []
+
+    async def get_index_weight(self, index_code: str, priority: int = 2) -> List[Dict]:
+        """获取指数成分权重"""
+        from services.common.sdk_manager import get_sdk_manager
+        sdk_mgr = get_sdk_manager()
+        import asyncio
+        df = await asyncio.to_thread(sdk_mgr.get_index_weight, index_code, priority)
+        return df.to_dict('records') if df is not None and not df.empty else []
+
+    async def get_industry_weight(self, index_code: str, priority: int = 2) -> List[Dict]:
+        """获取行业成分权重"""
+        from services.common.sdk_manager import get_sdk_manager
+        sdk_mgr = get_sdk_manager()
+        import asyncio
+        df = await asyncio.to_thread(sdk_mgr.get_industry_weight, index_code, priority)
+        return df.to_dict('records') if df is not None and not df.empty else []
+
     # ── 交易执行 ──
 
     async def buy(self, stock_code: str, price: float, quantity: int, account_id: str = None) -> OrderResult:

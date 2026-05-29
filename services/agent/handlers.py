@@ -1525,6 +1525,301 @@ async def query_data_snapshot(
         return {"success": False, "error": str(e)}
 
 
+# ============== 复权因子/基础数据/股东/股权/分红端点 ==============
+
+@router.get("/query/data/backward-factor")
+async def query_data_backward_factor(
+    request: Request,
+    stock_codes: str = Query(..., description="股票代码列表，逗号分隔"),
+    agent: dict = Depends(verify_agent_key),
+):
+    """后复权因子数据"""
+    await log_action(
+        agent_id=agent["agent_id"], action="query.data.backward_factor", risk_level="low",
+        ip_address=request.client.host if request.client else None,
+    )
+    try:
+        from services.trading.gateway import get_gateway
+        gateway = await get_gateway()
+        priority = get_priority_for_role(agent["role"])
+        codes = [c.strip() for c in stock_codes.split(",") if c.strip()]
+        data = await gateway.get_backward_factor(codes, priority=priority)
+        return {"success": True, "stock_codes": codes, "data": data, "count": len(data)}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@router.get("/query/data/stock-basic")
+async def query_data_stock_basic(
+    request: Request,
+    stock_codes: str = Query(None, description="股票代码列表，逗号分隔，可选"),
+    summary_only: bool = Query(False, description="仅返回统计摘要"),
+    agent: dict = Depends(verify_agent_key),
+):
+    """股票基础信息（上市日期、退市日期、板块）"""
+    await log_action(
+        agent_id=agent["agent_id"], action="query.data.stock_basic", risk_level="low",
+        ip_address=request.client.host if request.client else None,
+    )
+    try:
+        from services.trading.gateway import get_gateway
+        gateway = await get_gateway()
+        priority = get_priority_for_role(agent["role"])
+        codes = [c.strip() for c in stock_codes.split(",") if c.strip()] if stock_codes else None
+        data = await gateway.get_stock_basic(codes, priority=priority)
+
+        if summary_only:
+            # 统计摘要
+            total = len(data)
+            listed = sum(1 for d in data if d.get('IS_LISTED') == 1)
+            delisted = sum(1 for d in data if d.get('IS_LISTED') == 3)
+            markets = {}
+            for d in data:
+                m = d.get('MARKET', 'unknown')
+                markets[m] = markets.get(m, 0) + 1
+            return {"success": True, "summary": {"total": total, "listed": listed, "delisted": delisted, "markets": markets}}
+        return {"success": True, "data": data, "count": len(data)}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@router.get("/query/data/history-code-list")
+async def query_data_history_code_list(
+    request: Request,
+    date: int = Query(..., description="历史日期 YYYYMMDD"),
+    agent: dict = Depends(verify_agent_key),
+):
+    """历史代码列表"""
+    await log_action(
+        agent_id=agent["agent_id"], action="query.data.history_code_list", risk_level="low",
+        ip_address=request.client.host if request.client else None,
+    )
+    try:
+        from services.trading.gateway import get_gateway
+        gateway = await get_gateway()
+        priority = get_priority_for_role(agent["role"])
+        codes = await gateway.get_history_code_list(date, priority=priority)
+        return {"success": True, "date": date, "code_list": codes, "count": len(codes)}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@router.get("/query/data/bj-code-mapping")
+async def query_data_bj_code_mapping(
+    request: Request,
+    agent: dict = Depends(verify_agent_key),
+):
+    """北交所代码对照表"""
+    await log_action(
+        agent_id=agent["agent_id"], action="query.data.bj_code_mapping", risk_level="low",
+        ip_address=request.client.host if request.client else None,
+    )
+    try:
+        from services.trading.gateway import get_gateway
+        gateway = await get_gateway()
+        priority = get_priority_for_role(agent["role"])
+        data = await gateway.get_bj_code_mapping(priority=priority)
+        return {"success": True, "data": data, "count": len(data)}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@router.get("/query/data/shareholder")
+async def query_data_shareholder(
+    request: Request,
+    stock_codes: str = Query(..., description="股票代码列表，逗号分隔"),
+    agent: dict = Depends(verify_agent_key),
+):
+    """十大股东"""
+    await log_action(
+        agent_id=agent["agent_id"], action="query.data.shareholder", risk_level="low",
+        ip_address=request.client.host if request.client else None,
+    )
+    try:
+        from services.trading.gateway import get_gateway
+        gateway = await get_gateway()
+        priority = get_priority_for_role(agent["role"])
+        codes = [c.strip() for c in stock_codes.split(",") if c.strip()]
+        data = await gateway.get_shareholder(codes, priority=priority)
+        return {"success": True, "stock_codes": codes, "data": data, "count": len(data)}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@router.get("/query/data/holder-num")
+async def query_data_holder_num(
+    request: Request,
+    stock_codes: str = Query(..., description="股票代码列表，逗号分隔"),
+    agent: dict = Depends(verify_agent_key),
+):
+    """股东户数"""
+    await log_action(
+        agent_id=agent["agent_id"], action="query.data.holder_num", risk_level="low",
+        ip_address=request.client.host if request.client else None,
+    )
+    try:
+        from services.trading.gateway import get_gateway
+        gateway = await get_gateway()
+        priority = get_priority_for_role(agent["role"])
+        codes = [c.strip() for c in stock_codes.split(",") if c.strip()]
+        data = await gateway.get_holder_num(codes, priority=priority)
+        return {"success": True, "stock_codes": codes, "data": data, "count": len(data)}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@router.get("/query/data/equity-structure")
+async def query_data_equity_structure(
+    request: Request,
+    stock_codes: str = Query(..., description="股票代码列表，逗号分隔"),
+    agent: dict = Depends(verify_agent_key),
+):
+    """股本结构"""
+    await log_action(
+        agent_id=agent["agent_id"], action="query.data.equity_structure", risk_level="low",
+        ip_address=request.client.host if request.client else None,
+    )
+    try:
+        from services.trading.gateway import get_gateway
+        gateway = await get_gateway()
+        priority = get_priority_for_role(agent["role"])
+        codes = [c.strip() for c in stock_codes.split(",") if c.strip()]
+        data = await gateway.get_equity_structure(codes, priority=priority)
+        return {"success": True, "stock_codes": codes, "data": data, "count": len(data)}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@router.get("/query/data/equity-pledge-freeze")
+async def query_data_equity_pledge_freeze(
+    request: Request,
+    stock_codes: str = Query(..., description="股票代码列表，逗号分隔"),
+    agent: dict = Depends(verify_agent_key),
+):
+    """股权质押冻结"""
+    await log_action(
+        agent_id=agent["agent_id"], action="query.data.equity_pledge_freeze", risk_level="low",
+        ip_address=request.client.host if request.client else None,
+    )
+    try:
+        from services.trading.gateway import get_gateway
+        gateway = await get_gateway()
+        priority = get_priority_for_role(agent["role"])
+        codes = [c.strip() for c in stock_codes.split(",") if c.strip()]
+        data = await gateway.get_equity_pledge_freeze(codes, priority=priority)
+        return {"success": True, "stock_codes": codes, "data": data, "count": len(data)}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@router.get("/query/data/equity-restricted")
+async def query_data_equity_restricted(
+    request: Request,
+    stock_codes: str = Query(..., description="股票代码列表，逗号分隔"),
+    agent: dict = Depends(verify_agent_key),
+):
+    """限售股解禁"""
+    await log_action(
+        agent_id=agent["agent_id"], action="query.data.equity_restricted", risk_level="low",
+        ip_address=request.client.host if request.client else None,
+    )
+    try:
+        from services.trading.gateway import get_gateway
+        gateway = await get_gateway()
+        priority = get_priority_for_role(agent["role"])
+        codes = [c.strip() for c in stock_codes.split(",") if c.strip()]
+        data = await gateway.get_equity_restricted(codes, priority=priority)
+        return {"success": True, "stock_codes": codes, "data": data, "count": len(data)}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@router.get("/query/data/dividend")
+async def query_data_dividend(
+    request: Request,
+    stock_codes: str = Query(..., description="股票代码列表，逗号分隔"),
+    agent: dict = Depends(verify_agent_key),
+):
+    """分红数据"""
+    await log_action(
+        agent_id=agent["agent_id"], action="query.data.dividend", risk_level="low",
+        ip_address=request.client.host if request.client else None,
+    )
+    try:
+        from services.trading.gateway import get_gateway
+        gateway = await get_gateway()
+        priority = get_priority_for_role(agent["role"])
+        codes = [c.strip() for c in stock_codes.split(",") if c.strip()]
+        data = await gateway.get_dividend(codes, priority=priority)
+        return {"success": True, "stock_codes": codes, "data": data, "count": len(data)}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@router.get("/query/data/right-issue")
+async def query_data_right_issue(
+    request: Request,
+    stock_codes: str = Query(..., description="股票代码列表，逗号分隔"),
+    agent: dict = Depends(verify_agent_key),
+):
+    """配股数据"""
+    await log_action(
+        agent_id=agent["agent_id"], action="query.data.right_issue", risk_level="low",
+        ip_address=request.client.host if request.client else None,
+    )
+    try:
+        from services.trading.gateway import get_gateway
+        gateway = await get_gateway()
+        priority = get_priority_for_role(agent["role"])
+        codes = [c.strip() for c in stock_codes.split(",") if c.strip()]
+        data = await gateway.get_right_issue(codes, priority=priority)
+        return {"success": True, "stock_codes": codes, "data": data, "count": len(data)}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@router.get("/query/data/index-weight")
+async def query_data_index_weight(
+    request: Request,
+    index_code: str = Query(..., description="指数代码"),
+    agent: dict = Depends(verify_agent_key),
+):
+    """指数成分权重"""
+    await log_action(
+        agent_id=agent["agent_id"], action="query.data.index_weight", risk_level="low",
+        ip_address=request.client.host if request.client else None,
+    )
+    try:
+        from services.trading.gateway import get_gateway
+        gateway = await get_gateway()
+        priority = get_priority_for_role(agent["role"])
+        data = await gateway.get_index_weight(index_code, priority=priority)
+        return {"success": True, "index_code": index_code, "data": data, "count": len(data)}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@router.get("/query/data/industry-weight")
+async def query_data_industry_weight(
+    request: Request,
+    index_code: str = Query(..., description="行业指数代码"),
+    agent: dict = Depends(verify_agent_key),
+):
+    """行业成分权重"""
+    await log_action(
+        agent_id=agent["agent_id"], action="query.data.industry_weight", risk_level="low",
+        ip_address=request.client.host if request.client else None,
+    )
+    try:
+        from services.trading.gateway import get_gateway
+        gateway = await get_gateway()
+        priority = get_priority_for_role(agent["role"])
+        data = await gateway.get_industry_weight(index_code, priority=priority)
+        return {"success": True, "index_code": index_code, "data": data, "count": len(data)}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
 # ============== 策略提交端点 (strategist+) ==============
 # Phase 2 实现
 

@@ -434,3 +434,193 @@ async def mcp_treasury_yield() -> dict:
         国债收益率曲线数据
     """
     return await api.get("/query/data/treasury-yield")
+
+
+# ================================================================
+# 复权因子/基础数据/股东/股权/分红
+# ================================================================
+
+@mcp.tool()
+async def mcp_backward_factor(stock_codes: str) -> dict:
+    """
+    查询后复权因子
+
+    Args:
+        stock_codes: 股票代码列表，逗号分隔
+
+    Returns:
+        复权因子数据，用于计算复权价格
+    """
+    return await api.get("/query/data/backward-factor", {"stock_codes": stock_codes})
+
+
+@mcp.tool()
+async def mcp_stock_basic(stock_codes: str = None, summary_only: bool = False) -> dict:
+    """
+    查询股票基础信息（上市日期、退市日期、板块）
+
+    Args:
+        stock_codes: 股票代码列表，逗号分隔（可选）
+        summary_only: 仅返回统计摘要
+
+    Returns:
+        summary_only=True: 统计摘要（总数、上市数、退市数、市场分布）
+        summary_only=False: 详细数据列表
+    """
+    params = {}
+    if stock_codes:
+        params["stock_codes"] = stock_codes
+    if summary_only:
+        params["summary_only"] = "true"
+    return await api.get("/query/data/stock-basic", params)
+
+
+@mcp.tool()
+async def mcp_history_code_list(date: int) -> dict:
+    """
+    查询历史代码列表
+
+    Args:
+        date: 历史日期（YYYYMMDD）
+
+    Returns:
+        该日期有效的股票代码列表
+    """
+    return await api.get("/query/data/history-code-list", {"date": date})
+
+
+@mcp.tool()
+async def mcp_bj_code_mapping() -> dict:
+    """
+    查询北交所代码对照表
+
+    Returns:
+        北交所股票代码映射数据
+    """
+    return await api.get("/query/data/bj-code-mapping")
+
+
+@mcp.tool()
+async def mcp_shareholder(stock_codes: str) -> dict:
+    """
+    查询十大股东
+
+    Args:
+        stock_codes: 股票代码列表，逗号分隔
+
+    Returns:
+        十大股东数据
+    """
+    return await api.get("/query/data/shareholder", {"stock_codes": stock_codes})
+
+
+@mcp.tool()
+async def mcp_holder_num(stock_codes: str) -> dict:
+    """
+    查询股东户数
+
+    Args:
+        stock_codes: 股票代码列表，逗号分隔
+
+    Returns:
+        股东户数变化数据
+    """
+    return await api.get("/query/data/holder-num", {"stock_codes": stock_codes})
+
+
+@mcp.tool()
+async def mcp_equity_structure(stock_codes: str) -> dict:
+    """
+    查询股本结构
+
+    Args:
+        stock_codes: 股票代码列表，逗号分隔
+
+    Returns:
+        股本结构数据（总股本、流通股等）
+    """
+    return await api.get("/query/data/equity-structure", {"stock_codes": stock_codes})
+
+
+@mcp.tool()
+async def mcp_equity_pledge_freeze(stock_codes: str) -> dict:
+    """
+    查询股权质押冻结
+
+    Args:
+        stock_codes: 股票代码列表，逗号分隔
+
+    Returns:
+        股权质押冻结数据
+    """
+    return await api.get("/query/data/equity-pledge-freeze", {"stock_codes": stock_codes})
+
+
+@mcp.tool()
+async def mcp_equity_restricted(stock_codes: str) -> dict:
+    """
+    查询限售股解禁
+
+    Args:
+        stock_codes: 股票代码列表，逗号分隔
+
+    Returns:
+        限售股解禁数据（解禁日期、解禁数量）
+    """
+    return await api.get("/query/data/equity-restricted", {"stock_codes": stock_codes})
+
+
+@mcp.tool()
+async def mcp_dividend(stock_codes: str) -> dict:
+    """
+    查询分红数据
+
+    Args:
+        stock_codes: 股票代码列表，逗号分隔
+
+    Returns:
+        分红数据（分红金额、分红日期）
+    """
+    return await api.get("/query/data/dividend", {"stock_codes": stock_codes})
+
+
+@mcp.tool()
+async def mcp_right_issue(stock_codes: str) -> dict:
+    """
+    查询配股数据
+
+    Args:
+        stock_codes: 股票代码列表，逗号分隔
+
+    Returns:
+        配股数据（配股比例、配股价格）
+    """
+    return await api.get("/query/data/right-issue", {"stock_codes": stock_codes})
+
+
+@mcp.tool()
+async def mcp_index_weight(index_code: str) -> dict:
+    """
+    查询指数成分权重
+
+    Args:
+        index_code: 指数代码，如 000300.SH
+
+    Returns:
+        成分股权重数据
+    """
+    return await api.get("/query/data/index-weight", {"index_code": index_code})
+
+
+@mcp.tool()
+async def mcp_industry_weight(index_code: str) -> dict:
+    """
+    查询行业成分权重
+
+    Args:
+        index_code: 行业指数代码，如 801010.SI
+
+    Returns:
+        行业成分股权重数据
+    """
+    return await api.get("/query/data/industry-weight", {"index_code": index_code})
