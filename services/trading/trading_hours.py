@@ -233,12 +233,16 @@ def get_next_trading_window(dt: datetime = None) -> tuple[datetime | None, str]:
     if dt is None:
         dt = get_china_time()
 
-    if not is_today_trading_day(dt):
-        # 非交易日 → 找下一个交易日
+    # 检查今天是否是交易日（使用 SDK 日历）
+    today_is_trading = is_today_trading_day(dt)
+
+    if not today_is_trading:
+        # 非交易日 → 找下一个交易日（用 weekday 降级判断）
         next_day = dt + timedelta(days=1)
         next_day = next_day.replace(hour=0, minute=0, second=0, microsecond=0)
         for _ in range(7):
-            if is_today_trading_day(next_day):
+            # 未来日期用 weekday 判断（周一到周五）
+            if next_day.weekday() < 5:
                 target = next_day.replace(hour=9, minute=15, second=0, microsecond=0)
                 return target, f"等待下一个交易日 {next_day.strftime('%Y-%m-%d')} 09:15"
             next_day += timedelta(days=1)
@@ -258,11 +262,11 @@ def get_next_trading_window(dt: datetime = None) -> tuple[datetime | None, str]:
         return target, "等待下午开盘 13:00"
 
     if t >= dtime(15, 0):
-        # 收盘后 → 等下一个交易日
+        # 收盘后 → 等下一个交易日（用 weekday 判断）
         next_day = dt + timedelta(days=1)
         next_day = next_day.replace(hour=0, minute=0, second=0, microsecond=0)
         for _ in range(7):
-            if is_today_trading_day(next_day):
+            if next_day.weekday() < 5:
                 target = next_day.replace(hour=9, minute=15, second=0, microsecond=0)
                 return target, f"收盘，等待 {next_day.strftime('%Y-%m-%d')} 09:15"
             next_day += timedelta(days=1)

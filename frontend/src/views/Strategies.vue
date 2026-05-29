@@ -815,6 +815,36 @@
             </el-select>
             <div class="hint" style="margin-left:120px">可下拉选择，也可手动输入自定义条件</div>
           </el-form-item>
+
+          <el-divider>信号分配配置</el-divider>
+          <el-row :gutter="16">
+            <el-col :span="12">
+              <el-form-item label="最多买入股票">
+                <el-input-number v-model="editingScreening.signalAllocation.max_stocks" :min="1" :max="20" style="width:100%" />
+              </el-form-item>
+            </el-col>
+            <el-col :span="12">
+              <el-form-item label="分配模式">
+                <el-select v-model="editingScreening.signalAllocation.allocation_mode" style="width:100%">
+                  <el-option label="均分 (equal)" value="equal" />
+                  <el-option label="按评分加权 (weighted)" value="weighted" />
+                  <el-option label="前N只优先 (top_n)" value="top_n" />
+                </el-select>
+              </el-form-item>
+            </el-col>
+          </el-row>
+          <el-row :gutter="16">
+            <el-col :span="12">
+              <el-form-item label="单股最小金额">
+                <el-input-number v-model="editingScreening.signalAllocation.min_amount_per_stock" :min="100" :max="100000" :step="100" style="width:100%" />
+              </el-form-item>
+            </el-col>
+            <el-col :span="12">
+              <el-form-item label="单股最大仓位%">
+                <el-input-number v-model="editingScreening.signalAllocation.max_position_pct" :min="1" :max="100" style="width:100%" />
+              </el-form-item>
+            </el-col>
+          </el-row>
         </el-form>
         <template #footer>
           <el-button @click="showEditScreeningDialog = false">取消</el-button>
@@ -875,6 +905,37 @@
             />
             <span class="hint" style="margin-left: 8px">该策略下所有持仓总市值上限（元），留空表示不限</span>
           </el-form-item>
+
+          <el-divider>信号分配配置</el-divider>
+          <el-row :gutter="16">
+            <el-col :span="12">
+              <el-form-item label="最多买入股票">
+                <el-input-number v-model="codeStrategyForm.signalAllocation.max_stocks" :min="1" :max="20" style="width:100%" />
+              </el-form-item>
+            </el-col>
+            <el-col :span="12">
+              <el-form-item label="分配模式">
+                <el-select v-model="codeStrategyForm.signalAllocation.allocation_mode" style="width:100%">
+                  <el-option label="均分 (equal)" value="equal" />
+                  <el-option label="按评分加权 (weighted)" value="weighted" />
+                  <el-option label="前N只优先 (top_n)" value="top_n" />
+                </el-select>
+              </el-form-item>
+            </el-col>
+          </el-row>
+          <el-row :gutter="16">
+            <el-col :span="12">
+              <el-form-item label="单股最小金额">
+                <el-input-number v-model="codeStrategyForm.signalAllocation.min_amount_per_stock" :min="100" :max="100000" :step="100" style="width:100%" />
+              </el-form-item>
+            </el-col>
+            <el-col :span="12">
+              <el-form-item label="单股最大仓位%">
+                <el-input-number v-model="codeStrategyForm.signalAllocation.max_position_pct" :min="1" :max="100" style="width:100%" />
+              </el-form-item>
+            </el-col>
+          </el-row>
+
           <el-form-item label="Python 代码">
             <el-collapse style="margin-bottom: 8px">
               <el-collapse-item title="📖 编写规则" name="rules">
@@ -1202,7 +1263,8 @@ const showEditScreeningDialog = ref(false)
 const savingEditScreening = ref(false)
 const editingScreening = reactive({
   id: null, name: '', description: '',
-  filters: {}, markets: [], buyConditions: []
+  filters: {}, markets: [], buyConditions: [],
+  signalAllocation: { max_stocks: 5, allocation_mode: 'equal', min_amount_per_stock: 1000, max_position_pct: 20 }
 })
 const showCreateCodeDialog = ref(false)
 const editingCodeId = ref(null)
@@ -1212,7 +1274,11 @@ const codeValidationResult = ref(null)
 const kronosStatus = ref(null)  // { available, error, device }
 const codeFileInput = ref(null)
 const importedFileName = ref(null)
-const codeStrategyForm = reactive({ name: '', description: '', code: '', function_name: 'run', code_scope: 'screening', config: { max_position_amount: null, quantity: null, position_pct: null } })
+const codeStrategyForm = reactive({
+  name: '', description: '', code: '', function_name: 'run', code_scope: 'screening',
+  config: { max_position_amount: null, quantity: null, position_pct: null },
+  signalAllocation: { max_stocks: 5, allocation_mode: 'equal', min_amount_per_stock: 1000, max_position_pct: 20 }
+})
 
 // 代码型策略（独立数据源）
 const codeStrategies = ref([])
@@ -1812,8 +1878,16 @@ const editCodeStrategy = (row) => {
       quantity: cfg.quantity || null,
       position_pct: cfg.position_pct || null,
     }
+    // Load signal allocation
+    codeStrategyForm.signalAllocation = {
+      max_stocks: cfg.signal_allocation?.max_stocks || 5,
+      allocation_mode: cfg.signal_allocation?.allocation_mode || 'equal',
+      min_amount_per_stock: cfg.signal_allocation?.min_amount_per_stock || 1000,
+      max_position_pct: cfg.signal_allocation?.max_position_pct || 20,
+    }
   } catch {
     codeStrategyForm.config = { max_position_amount: null, quantity: null, position_pct: null }
+    codeStrategyForm.signalAllocation = { max_stocks: 5, allocation_mode: 'equal', min_amount_per_stock: 1000, max_position_pct: 20 }
   }
   showCreateCodeDialog.value = true
   codeValidationResult.value = null
@@ -1871,7 +1945,10 @@ const saveCodeStrategy = async () => {
       code: codeStrategyForm.code,
       function_name: codeStrategyForm.function_name,
       status: 'draft',
-      config: JSON.stringify(codeStrategyForm.config),
+      config: JSON.stringify({
+        ...codeStrategyForm.config,
+        signal_allocation: codeStrategyForm.signalAllocation,
+      }),
     }
     const res = await fetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
     const data = await res.json()
@@ -1884,6 +1961,7 @@ const saveCodeStrategy = async () => {
       codeStrategyForm.code = ''
       codeStrategyForm.function_name = 'run'
       codeStrategyForm.config = { max_position_amount: null, quantity: null, position_pct: null }
+      codeStrategyForm.signalAllocation = { max_stocks: 5, allocation_mode: 'equal', min_amount_per_stock: 1000, max_position_pct: 20 }
       codeStrategyForm.code_scope = 'screening'
       codeValidationResult.value = null
       importedFileName.value = null
@@ -2113,6 +2191,10 @@ const editScreeningStrategy = (row) => {
     ? buyConds.map(c => typeof c === 'string' ? c : JSON.stringify(c))
     : []
 
+  // 信号分配配置
+  const signalAlloc = cfg.signal_allocation || { max_stocks: 5, allocation_mode: 'equal', min_amount_per_stock: 1000, max_position_pct: 20 }
+  editingScreening.signalAllocation = { ...signalAlloc }
+
   showEditScreeningDialog.value = true
 }
 
@@ -2143,6 +2225,7 @@ const saveEditScreening = async () => {
   const config = {
     stock_filters: stockFiltersNode,
     buy_conditions: editingScreening.buyConditions,
+    signal_allocation: editingScreening.signalAllocation,
   }
   if (markets) config.markets = markets
 
@@ -2206,6 +2289,9 @@ const deleteScreeningStrategy = async (row) => {
       if (row.strategy_type === 'code' || row.code_scope !== undefined) {
         await loadCodeStrategies()
       }
+    } else {
+      // 显示后端返回的具体错误信息
+      ElMessage.error(data.detail || '删除失败')
     }
   } catch (error) {
     if (error !== 'cancel') {

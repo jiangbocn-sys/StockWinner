@@ -39,13 +39,13 @@ class AuthService:
             登录结果：{success: bool, message: str, token: str, account: dict}
         """
         try:
-            # 查询用户
-            account = await self.db.fetchone(
-                "SELECT * FROM accounts WHERE name = ? AND is_active = 1",
+            # 查询用户（先查是否存在）
+            account_exists = await self.db.fetchone(
+                "SELECT * FROM accounts WHERE name = ?",
                 (name,)
             )
 
-            if not account:
+            if not account_exists:
                 return {
                     "success": False,
                     "message": "用户名或密码错误",
@@ -53,9 +53,18 @@ class AuthService:
                     "account": None
                 }
 
+            # 检查账户是否被锁定
+            if not account_exists.get("is_active"):
+                return {
+                    "success": False,
+                    "message": "账户已被锁定，请联系管理员",
+                    "token": None,
+                    "account": None
+                }
+
             # 验证密码
             password_hash = self._hash_password(password)
-            if account.get("password_hash") != password_hash:
+            if account_exists.get("password_hash") != password_hash:
                 return {
                     "success": False,
                     "message": "用户名或密码错误",
@@ -67,7 +76,7 @@ class AuthService:
             token = str(uuid.uuid4())
 
             # 存储会话（排除密码）
-            account_data = dict(account)
+            account_data = dict(account_exists)
             account_data.pop("password_hash", None)
 
             self._sessions[token] = {
@@ -99,7 +108,7 @@ class AuthService:
 
     def validate_token(self, token: str) -> Optional[Dict[str, Any]]:
         """
-        验证会话 token
+        验证会话 token（滑动过期：每次请求刷新过期时间）
 
         Returns:
             有效的账户信息，无效则返回 None
@@ -111,6 +120,9 @@ class AuthService:
         if get_china_time() > session["expires_at"]:
             del self._sessions[token]
             return None
+
+        # 滑动过期：每次有效请求时刷新过期时间
+        session["expires_at"] = get_china_time() + timedelta(seconds=SESSION_EXPIRY)
 
         return session["account"]
 
@@ -133,6 +145,14 @@ class AuthService:
             "broker_server_port": account.get("broker_server_port", 8600),
             "broker_status": account.get("broker_status", "normal")
         }
+
+    def is_admin(self, token: str) -> bool:
+        """检查用户是否为管理员"""
+        account = self.validate_token(token)
+        if not account:
+            return False
+        return account.get("role") == "admin"
+
 
     def cleanup_expired(self):
         """清理过期会话"""

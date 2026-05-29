@@ -246,7 +246,12 @@ async def delete_strategy(
     account_id: str = Path(..., description="账户 ID"),
     strategy_id: int = Path(..., description="策略 ID")
 ):
-    """删除策略"""
+    """删除策略
+
+    删除前校验：
+    - 检查是否有运行中的策略任务
+    - 检查是否有策略持仓
+    """
     db = get_db_manager()
 
     # 从数据库验证账户
@@ -259,12 +264,34 @@ async def delete_strategy(
 
     # 检查策略是否存在
     strategy = await db.fetchone(
-        "SELECT * FROM strategies WHERE id = ? AND account_id = ?",
+        "SELECT id, name FROM strategies WHERE id = ? AND account_id = ?",
         (strategy_id, account_id)
     )
 
     if not strategy:
         raise HTTPException(status_code=404, detail="策略不存在")
+
+    # 1. 检查是否有运行中的策略任务
+    running_task = await db.fetchone(
+        "SELECT id, name FROM strategy_tasks WHERE strategy_id = ? AND last_status = 'running'",
+        (strategy_id,)
+    )
+    if running_task:
+        raise HTTPException(
+            status_code=400,
+            detail=f"策略「{strategy['name']}」有运行中的任务「{running_task['name']}」，请先停止任务再删除策略"
+        )
+
+    # 2. 检查是否有策略持仓（quantity > 0）
+    position = await db.fetchone(
+        "SELECT stock_code, stock_name, quantity FROM stock_positions WHERE account_id = ? AND strategy_id = ? AND quantity > 0 LIMIT 1",
+        (account_id, strategy_id)
+    )
+    if position:
+        raise HTTPException(
+            status_code=400,
+            detail=f"策略「{strategy['name']}」有持仓「{position['stock_name']} ({position['stock_code']})」{position['quantity']}股，请先清仓再删除策略"
+        )
 
     # 删除前存档
     try:

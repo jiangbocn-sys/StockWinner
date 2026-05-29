@@ -87,6 +87,31 @@ class SignalExecutor:
                     if risk_limit >= 100:
                         target_quantity = (risk_limit // 100) * 100
 
+        # 检查信号分配配置中的单股最小金额
+        strategy_id = stock.get('strategy_id')
+        if strategy_id and target_quantity > 0 and current_price > 0:
+            strategy = await db.fetchone(
+                "SELECT config FROM strategies WHERE id = ?",
+                (strategy_id,)
+            )
+            if strategy and strategy.get("config"):
+                try:
+                    import json
+                    config = json.loads(strategy["config"]) if isinstance(strategy["config"], str) else strategy["config"]
+                    signal_alloc = config.get("signal_allocation", {})
+                    min_amount = signal_alloc.get("min_amount_per_stock", 0)
+                    if min_amount > 0:
+                        actual_amount = target_quantity * current_price
+                        if actual_amount < min_amount:
+                            logger = get_logger("monitor")
+                            logger.log_event("buy_skip_min_amount",
+                                f"跳过买入 {stock_code}：金额 {actual_amount:.0f} 小于配置最小金额 {min_amount}",
+                                stock_code=stock_code, actual_amount=actual_amount, min_amount=min_amount,
+                                strategy_id=strategy_id)
+                            return  # 不执行买入
+                except (json.JSONDecodeError, ValueError, TypeError):
+                    pass
+
         # 执行买入
         from services.trading.execution_service import get_trade_execution_service
         execution = get_trade_execution_service(account_id)
