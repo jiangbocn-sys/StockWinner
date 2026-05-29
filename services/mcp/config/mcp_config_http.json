@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "stockwinner": {
+      "url": "http://100.102.36.3:9000/mcp",
+      "transport": "streamable-http",
+      "headers": {
+        "X-Agent-Key": "sk-agent-xxx"
+      }
+    }
+  }
+}

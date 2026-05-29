@@ -1,6 +1,15 @@
 # StockWinner MCP 服务
 
-基于 Agent API 的 MCP 服务，为 Claude Desktop / Claude Code 提供自然语言交互能力。
+基于 Agent API 的 MCP 服务，为 Claude Desktop / Claude Code / OpenClaw / Hermes 提供自然语言交互能力。
+
+## 传输模式
+
+支持两种传输模式：
+
+| 模式 | 适用场景 | 启动方式 |
+|------|---------|---------|
+| **stdio** | Claude Desktop/Code 本地集成 | 默认模式，无需参数 |
+| **http** | OpenClaw/Hermes 外部 Agent | `--http --port 9000` |
 
 ## 功能
 
@@ -80,6 +89,44 @@ curl -X POST http://localhost:8080/api/v1/agent/admin/agents \
 
 配置生效后，Claude Desktop 会自动加载 MCP 服务。
 
+## HTTP 模式配置（OpenClaw/Hermes）
+
+### 启动 HTTP 服务
+
+```bash
+# 启动 MCP HTTP 服务（默认端口 9000）
+python3 /home/bobo/StockWinner/services/mcp/server.py --http
+
+# 指定端口
+python3 /home/bobo/StockWinner/services/mcp/server.py --http --port 8081
+
+# 后台运行
+nohup python3 /home/bobo/StockWinner/services/mcp/server.py --http > mcp_http.log 2>&1 &
+```
+
+### OpenClaw/Hermes 配置
+
+```json
+{
+  "mcpServers": {
+    "stockwinner": {
+      "url": "http://100.102.36.3:9000/mcp",
+      "transport": "streamable-http",
+      "headers": {
+        "X-Agent-Key": "sk-agent-xxx"
+      }
+    }
+  }
+}
+```
+
+### HTTP 模式安全建议
+
+HTTP 模式暴露端口，建议：
+1. **API Key 校验**：请求必须携带有效 `X-Agent-Key`
+2. **IP 白名单**：只允许特定 IP 访问
+3. **TLS 加密**：生产环境使用 HTTPS
+
 ## 使用示例
 
 ### 数据查询
@@ -123,9 +170,21 @@ Claude: [调用 mcp_set_trading_strategy] → 设置结果
 
 ## 架构
 
+### stdio 模式（Claude Desktop）
 ```
 Claude Desktop / Claude Code
-    ↓ MCP 协议 (stdio)
+    ↓ MCP 协议 (stdin/stdout)
+StockWinner MCP Server
+    ↓ HTTP REST
+Agent API (/api/v1/agent/*)
+    ↓ IPC
+SDK 子进程 → TGW (单连接)
+```
+
+### HTTP 模式（OpenClaw/Hermes）
+```
+OpenClaw / Hermes
+    ↓ HTTP + SSE (端口 9000)
 StockWinner MCP Server
     ↓ HTTP REST
 Agent API (/api/v1/agent/*)
@@ -138,6 +197,7 @@ SDK 子进程 → TGW (单连接)
 - 继承 PriceCache 缓存
 - 复用权限校验与审计日志
 - 统一管理 SDK 调用
+- 支持多客户端（HTTP 模式）
 
 ## 工具列表
 
@@ -155,7 +215,7 @@ SDK 子进程 → TGW (单连接)
 | mcp_create_screening_strategy | 创建策略 |
 | mcp_set_trading_strategy | 设置止盈止损 |
 
-共 50+ 工具。
+共 69 个 MCP 工具。
 
 ## 故障排查
 

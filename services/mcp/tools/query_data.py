@@ -16,7 +16,7 @@ from fastmcp import FastMCP
 from services.mcp.utils import get_api_client
 
 # 获取全局 MCP 实例（从 server.py 导入）
-from services.mcp.server import mcp
+from services.mcp import mcp
 
 api = get_api_client()
 

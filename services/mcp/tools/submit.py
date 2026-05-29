@@ -15,7 +15,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from fastmcp import FastMCP
 from typing import Optional, Dict, Any
 from services.mcp.utils import get_api_client
-from services.mcp.server import mcp
+from services.mcp import mcp
 
 api = get_api_client()
 
