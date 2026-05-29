@@ -1,9 +1,9 @@
-# StockWinner 智能股票交易系统 v7.8.13
+# StockWinner 智能股票交易系统 v7.8.14
 
-多账户智能股票交易系统 - Agent API + SDK子进程隔离 + 策略沙箱 + 优先级队列 + 系统配置管理 + 信号分配
+多账户智能股票交易系统 - Agent API + SDK子进程隔离 + 策略沙箱 + 优先级队列 + 系统配置管理 + 信号分配 + MCP服务
 
 ## 版本信息
-- **版本**: v7.8.13
+- **版本**: v7.8.14
 - **平台**: Ubuntu 22.04/24.04 LTS (x86_64)
 - **Python**: 3.10+
 - **数据库**: SQLite 3.x (WAL 模式) - 双库架构
@@ -40,6 +40,12 @@
 - ✅ 操作风险分级（low/medium/high/critical）
 - ✅ 幂等请求缓存（5 分钟去重）
 - ✅ 速率限制（角色差异化 Token Bucket）
+
+### MCP 服务
+- ✅ Claude Desktop/Code 自然语言交互支持
+- ✅ 56 个 MCP 工具（SDK数据 + 业务数据 + 系统管理）
+- ✅ 3 个 MCP Resources（API规格、工具概览、系统状态）
+- ✅ 统一 TGW 连接管理（解决 MCP 与 Backend 连接冲突）
 
 ---
 
@@ -391,6 +397,57 @@ StockWinner/
 
 ---
 
+## MCP 服务
+
+### MCP 工具分类
+
+| 类别 | 工具数 | 功能示例 |
+|------|--------|----------|
+| SDK 数据查询 | 24 | mcp_kline, mcp_market, mcp_factors, mcp_code_list, mcp_calendar, mcp_snapshot |
+| 业务数据查询 | 17 | mcp_positions, mcp_signals, mcp_strategies, mcp_dashboard |
+| 系统管理 | 7 | mcp_monitoring_start/stop, mcp_scheduler_run_now |
+| 策略操作 | 8 | mcp_create_strategy, mcp_set_trading_strategy |
+
+### MCP Resources
+
+| Resource URI | 内容 |
+|--------------|------|
+| `stockwinner://doc/spec` | Agent API 规格文档 |
+| `stockwinner://doc/api-summary` | MCP 工具概览 |
+| `stockwinner://system/status` | 系统运行状态（实时） |
+
+### Claude Desktop 配置
+
+```json
+{
+  "mcpServers": {
+    "stockwinner": {
+      "command": "python3",
+      "args": ["services/mcp/server.py"],
+      "env": {
+        "AGENT_API_KEY": "sk-agent-xxx",
+        "AGENT_API_BASE_URL": "http://localhost:8080/api/v1/agent"
+      }
+    }
+  }
+}
+```
+
+### 使用示例
+
+```
+用户: 查询我的持仓
+Claude: [mcp_positions] → 返回持仓列表
+
+用户: 分析工商银行最近走势
+Claude: [mcp_kline + mcp_factors] → K线 + 技术指标
+
+用户: 启动监控服务
+Claude: [mcp_monitoring_start] → 启动结果
+```
+
+---
+
 ## 调度任务
 
 ### 内置任务
@@ -505,6 +562,7 @@ Watchlist 止盈止损 (watchlist 表) — 兜底
 
 | 版本 | 日期 | 核心功能 |
 |------|------|----------|
+| v7.8.14 | 2026-05-29 | MCP 服务（52工具+3资源），Claude Desktop 自然语言交互 |
 | v7.8.13 | 2026-05-29 | 信号分配配置、策略删除校验、Session滑动过期、交易日历修复 |
 | v7.8.11 | 2026-05-29 | 系统配置管理、PriceCache TTL 动态调整、已清仓策略筛选 |
 | v7.8.9 | 2026-05-28 | Agent API 全面开放、SDK 优先级队列 |

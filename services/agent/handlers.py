@@ -1423,6 +1423,108 @@ async def query_data_treasury_yield(
         return {"success": False, "error": str(e)}
 
 
+@router.get("/query/data/code-list")
+async def query_data_code_list(
+    request: Request,
+    security_type: str = Query("EXTRA_STOCK_A", description="证券类型：EXTRA_STOCK_A/EXTRA_INDEX_A/EXTRA_ETF/EXTRA_KZZ"),
+    agent: dict = Depends(verify_agent_key),
+):
+    """证券代码列表
+
+    security_type 可选值：
+    - EXTRA_STOCK_A: 沪深北A股
+    - EXTRA_INDEX_A: 沪深北指数
+    - EXTRA_ETF: 沪深ETF
+    - EXTRA_KZZ: 沪深可转债
+    """
+    await log_action(
+        agent_id=agent["agent_id"], action="query.data.code_list", risk_level="low",
+        ip_address=request.client.host if request.client else None,
+    )
+    try:
+        from services.trading.gateway import get_gateway
+        gateway = await get_gateway()
+        priority = get_priority_for_role(agent["role"])
+        code_list = await gateway.get_code_list(security_type, priority=priority)
+        return {"success": True, "security_type": security_type, "code_list": code_list, "count": len(code_list)}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@router.get("/query/data/code-info")
+async def query_data_code_info(
+    request: Request,
+    security_type: str = Query("EXTRA_STOCK_A", description="证券类型"),
+    agent: dict = Depends(verify_agent_key),
+):
+    """证券信息（每日更新，含涨跌停价、昨收价）"""
+    await log_action(
+        agent_id=agent["agent_id"], action="query.data.code_info", risk_level="low",
+        ip_address=request.client.host if request.client else None,
+    )
+    try:
+        from services.trading.gateway import get_gateway
+        gateway = await get_gateway()
+        priority = get_priority_for_role(agent["role"])
+        code_info = await gateway.get_code_info(security_type, priority=priority)
+        return {"success": True, "security_type": security_type, "data": code_info, "count": len(code_info)}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@router.get("/query/data/calendar")
+async def query_data_calendar(
+    request: Request,
+    market: str = Query("SH", description="市场：SH/SZ/BJ"),
+    agent: dict = Depends(verify_agent_key),
+):
+    """交易日历"""
+    await log_action(
+        agent_id=agent["agent_id"], action="query.data.calendar", risk_level="low",
+        ip_address=request.client.host if request.client else None,
+    )
+    try:
+        from services.trading.gateway import get_gateway
+        gateway = await get_gateway()
+        priority = get_priority_for_role(agent["role"])
+        calendar = await gateway.get_calendar(market, priority=priority)
+        return {"success": True, "market": market, "calendar": calendar, "count": len(calendar)}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@router.get("/query/data/snapshot")
+async def query_data_snapshot(
+    request: Request,
+    codes: str = Query(..., description="股票代码列表，逗号分隔"),
+    begin_date: int = Query(None, description="开始日期 YYYYMMDD"),
+    end_date: int = Query(None, description="结束日期 YYYYMMDD"),
+    agent: dict = Depends(verify_agent_key),
+):
+    """历史快照数据（自动识别资产类型）"""
+    await log_action(
+        agent_id=agent["agent_id"], action="query.data.snapshot", risk_level="low",
+        ip_address=request.client.host if request.client else None,
+    )
+    try:
+        from services.trading.gateway import get_gateway
+        gateway = await get_gateway()
+        priority = get_priority_for_role(agent["role"])
+        code_list = [c.strip() for c in codes.split(",") if c.strip()]
+
+        # 默认当天
+        if not begin_date:
+            from services.common.timezone import get_china_time
+            begin_date = int(get_china_time().strftime("%Y%m%d"))
+        if not end_date:
+            end_date = begin_date
+
+        snapshot = await gateway.query_snapshot(code_list, begin_date, end_date, priority=priority)
+        return {"success": True, "codes": code_list, "begin_date": begin_date, "end_date": end_date, "data": snapshot}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
 # ============== 策略提交端点 (strategist+) ==============
 # Phase 2 实现
 

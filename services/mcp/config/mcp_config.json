@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "stockwinner": {
+      "command": "python3",
+      "args": ["/home/bobo/StockWinner/services/mcp/server.py"],
+      "env": {
+        "AGENT_API_KEY": "sk-agent-xxx",
+        "AGENT_API_BASE_URL": "http://localhost:8080/api/v1/agent"
+      }
+    }
+  }
+}

@@ -179,6 +179,32 @@ class TradingGateway(TradingGatewayInterface):
         """获取国债收益率（用户查询，默认 medium priority）"""
         return await self._external_data.get_treasury_yield(priority=priority, connected=self.connected)
 
+    # ── 代码列表/日历/快照 ──
+
+    async def get_code_list(self, security_type: str = 'EXTRA_STOCK_A', priority: int = 2) -> List[str]:
+        """获取证券代码列表"""
+        from services.common.sdk_manager import get_sdk_manager
+        sdk_mgr = get_sdk_manager()
+        import asyncio
+        code_list = await asyncio.to_thread(sdk_mgr.get_code_list, security_type, priority)
+        return code_list
+
+    async def get_calendar(self, market: str = 'SH', priority: int = 2) -> List[int]:
+        """获取交易日历"""
+        from services.common.sdk_manager import get_sdk_manager
+        sdk_mgr = get_sdk_manager()
+        import asyncio
+        calendar = await asyncio.to_thread(sdk_mgr.get_calendar, priority)
+        return calendar
+
+    async def query_snapshot(self, code_list: List[str], begin_date: int, end_date: int, priority: int = 2) -> Dict:
+        """查询历史快照数据"""
+        from services.common.sdk_manager import get_sdk_manager
+        sdk_mgr = get_sdk_manager()
+        import asyncio
+        snapshot = await asyncio.to_thread(sdk_mgr.query_snapshot, code_list, begin_date, end_date, priority)
+        return snapshot
+
     # ── 交易执行 ──
 
     async def buy(self, stock_code: str, price: float, quantity: int, account_id: str = None) -> OrderResult:
