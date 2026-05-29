@@ -547,17 +547,18 @@ async def get_closed_positions(
     if not account:
         raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
 
-    # 1. 找出所有有买入记录的股票
+    # 1. 找出所有有买入记录的股票（含策略ID）
     buy_stocks = await db.fetchall("""
         SELECT stock_code, stock_name,
                SUM(quantity) as total_buy_qty,
                SUM(amount) as total_buy_amount,
                SUM(commission) as total_buy_commission,
                MIN(trade_time) as first_buy_time,
-               AVG(price) as avg_buy_price
+               AVG(price) as avg_buy_price,
+               strategy_id
         FROM trade_records
         WHERE account_id = ? AND trade_type = 'buy'
-        GROUP BY stock_code
+        GROUP BY stock_code, strategy_id
     """, (account_id,))
 
     if not buy_stocks:
@@ -573,7 +574,7 @@ async def get_closed_positions(
         buy_commission = stock["total_buy_commission"]
         first_buy = stock["first_buy_time"]
 
-        # 查询卖出记录
+        # 查询卖出记录（同策略维度）
         sell_record = await db.fetchone("""
             SELECT SUM(quantity) as total_sell_qty,
                    SUM(amount) as total_sell_amount,
@@ -581,7 +582,8 @@ async def get_closed_positions(
                    MAX(trade_time) as last_sell_time
             FROM trade_records
             WHERE account_id = ? AND stock_code = ? AND trade_type = 'sell'
-        """, (account_id, code))
+                  AND (strategy_id = ? OR (strategy_id IS NULL AND ? IS NULL))
+        """, (account_id, code, stock.get("strategy_id"), stock.get("strategy_id")))
 
         if not sell_record:
             continue
@@ -623,6 +625,7 @@ async def get_closed_positions(
         closed.append({
             "stock_code": code,
             "stock_name": name,
+            "strategy_id": stock.get("strategy_id"),  # 策略ID
             "buy_quantity": buy_qty,
             "avg_buy_price": round(buy_amount / buy_qty, 3) if buy_qty > 0 else 0,
             "avg_sell_price": round(sell_amount / sell_qty, 3) if sell_qty > 0 else 0,

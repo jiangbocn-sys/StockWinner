@@ -925,17 +925,32 @@ class LocalKlineDataService:
         realtime_quotes = {}
         if fetch_realtime_fn is not None:
             import asyncio
-            loop = asyncio.new_event_loop()
-            try:
+            from services.common.scheduler_service import _get_fastapi_loop
+
+            main_loop = _get_fastapi_loop()
+            if main_loop is not None and not main_loop.is_closed():
+                # 使用主循环安全执行
                 for code in stock_codes:
                     try:
-                        quote = loop.run_until_complete(fetch_realtime_fn(code))
+                        future = asyncio.run_coroutine_threadsafe(fetch_realtime_fn(code), main_loop)
+                        quote = future.result(timeout=5.0)
                         if quote:
                             realtime_quotes[code] = quote
                     except Exception:
                         pass
-            finally:
-                loop.close()
+            else:
+                # 无主循环时创建临时循环（仅用于独立调用场景，如命令行脚本）
+                loop = asyncio.new_event_loop()
+                try:
+                    for code in stock_codes:
+                        try:
+                            quote = loop.run_until_complete(fetch_realtime_fn(code))
+                            if quote:
+                                realtime_quotes[code] = quote
+                        except Exception:
+                            pass
+                finally:
+                    loop.close()
 
         return self.get_kline_spliced(stock_codes, lookback=lookback, realtime_quotes=realtime_quotes)
 
@@ -949,7 +964,7 @@ def is_trading_hours() -> bool:
     判断当前是否处于交易时段（用于决定数据源策略）
 
     规则：
-    - 交易日 09:00 - 16:00 → True（需要实时数据拼接）
+    - 交易日 09:30-11:30 或 13:00-15:00 → True（需要实时数据拼接）
     - 其他时间 → False（可用本地因子表）
 
     注意：此处简化处理，不考虑节假日精确判断。
@@ -960,7 +975,20 @@ def is_trading_hours() -> bool:
     if weekday >= 5:
         return False
     hour = now.hour
-    return 9 <= hour < 16
+    minute = now.minute
+    # 上午交易时段：09:30 - 11:30
+    if hour == 9 and minute >= 30:
+        return True
+    if hour == 10:
+        return True
+    if hour == 11 and minute < 30:
+        return True
+    # 下午交易时段：13:00 - 15:00
+    if 13 <= hour < 15:
+        return True
+    if hour == 15 and minute == 0:
+        return True
+    return False
 
 
 def get_local_data_service() -> LocalKlineDataService:

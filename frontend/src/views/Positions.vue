@@ -127,6 +127,9 @@
               </span>
             </template>
           </el-table-column>
+          <el-table-column prop="first_buy_date" label="建仓日期" width="110" sortable="custom">
+            <template #default="{ row }">{{ row.first_buy_date ? row.first_buy_date.substring(0, 10) : '-' }}</template>
+          </el-table-column>
           <el-table-column prop="stop_loss_price" label="止损价" width="100" align="right">
             <template #default="{ row }">{{ row.stop_loss_price ? '¥' + Number(row.stop_loss_price).toFixed(2) : '-' }}</template>
           </el-table-column>
@@ -160,6 +163,9 @@
           <el-table-column type="index" label="序号" width="60" align="center" :index="closedIndexMethod" />
           <el-table-column prop="stock_code" label="股票代码" width="100" />
           <el-table-column prop="stock_name" label="股票名称" width="120" />
+          <el-table-column label="策略" width="100">
+            <template #default="{ row }">{{ getStrategyName(row.strategy_id) }}</template>
+          </el-table-column>
           <el-table-column prop="buy_quantity" label="数量" width="80" align="right" />
           <el-table-column label="买入价" width="100" align="right">
             <template #default="{ row }">¥{{ row.avg_buy_price }}</template>
@@ -200,11 +206,11 @@
           </el-table-column>
         </el-table>
 
-        <div class="pagination-bar" v-if="activeTab === 'closed' && closedPositions.length > closedPageSize">
+        <div class="pagination-bar" v-if="activeTab === 'closed' && filteredClosedPositions.length > closedPageSize">
           <el-pagination
             v-model:current-page="closedCurrentPage"
             v-model:page-size="closedPageSize"
-            :total="closedPositions.length"
+            :total="filteredClosedPositions.length"
             :page-sizes="[10, 20, 50, 100]"
             layout="sizes, prev, pager, next, total"
             small
@@ -423,6 +429,13 @@ const filteredStrategyStats = computed(() => {
   return strategyStats.value.filter(s => (s.position_count > 0) || (s.strategy_cash > 0))
 })
 
+// 策略ID -> 名称映射
+const getStrategyName = (strategyId) => {
+  if (strategyId == null) return '手动买入'
+  const s = strategyStats.value.find(s => s.strategy_id === strategyId)
+  return s?.strategy_name || `策略#${strategyId}`
+}
+
 // 策略筛选状态
 const selectedStrategyId = ref(null)
 
@@ -435,7 +448,8 @@ const onStrategyRowClick = (row) => {
     // 点击其他策略 → 筛选该策略
     selectedStrategyId.value = row.strategy_id
   }
-  posCurrentPage.value = 1 // 重置分页
+  posCurrentPage.value = 1 // 重置持仓分页
+  closedCurrentPage.value = 1 // 重置已清仓分页
 }
 
 // 策略表格行样式
@@ -459,8 +473,13 @@ const onPosSortChange = ({ prop, order }) => {
 const sortedPositions = computed(() => {
   // 先按策略筛选
   let arr = positions.value
-  if (selectedStrategyId.value != null) {
-    arr = arr.filter(p => p.strategy_id === selectedStrategyId.value)
+  if (selectedStrategyId.value !== null) {
+    if (selectedStrategyId.value === 0) {
+      // 手动买入：筛选 strategy_id 为 null/undefined/0 的数据
+      arr = arr.filter(p => !p.strategy_id || p.strategy_id === 0)
+    } else {
+      arr = arr.filter(p => p.strategy_id === selectedStrategyId.value)
+    }
   }
   // 再排序
   arr = [...arr]
@@ -502,13 +521,24 @@ const loadStrategyStats = async () => {
   }
 }
 
-// 已清仓明细
+// 已清仓明细（含策略筛选）
 const activeTab = ref('holding')
 const closedCurrentPage = ref(1)
 const closedPageSize = ref(20)
+const filteredClosedPositions = computed(() => {
+  // 按策略筛选：手动买入(strategy_id=0)对应 null/undefined 的数据
+  if (selectedStrategyId.value !== null) {
+    if (selectedStrategyId.value === 0) {
+      // 手动买入：筛选 strategy_id 为 null/undefined/0 的数据
+      return closedPositions.value.filter(p => !p.strategy_id || p.strategy_id === 0)
+    }
+    return closedPositions.value.filter(p => p.strategy_id === selectedStrategyId.value)
+  }
+  return closedPositions.value
+})
 const paginatedClosed = computed(() => {
   const start = (closedCurrentPage.value - 1) * closedPageSize.value
-  return closedPositions.value.slice(start, start + closedPageSize.value)
+  return filteredClosedPositions.value.slice(start, start + closedPageSize.value)
 })
 const closedIndexMethod = (index) => (closedCurrentPage.value - 1) * closedPageSize.value + index + 1
 
@@ -553,6 +583,7 @@ const holdingColumns = [
 const closedColumns = [
   { label: '股票代码', prop: 'stock_code' },
   { label: '股票名称', prop: 'stock_name' },
+  { label: '策略', prop: 'strategy_id' },
   { label: '买入数量', prop: 'buy_quantity' },
   { label: '买入均价', prop: 'avg_buy_price' },
   { label: '卖出均价', prop: 'avg_sell_price' },
@@ -565,9 +596,17 @@ const closedColumns = [
 
 const handleExportPositions = (format) => {
   if (activeTab.value === 'holding') {
-    doExport(holdingColumns, positions.value, '当前持仓', format)
+    let data = positions.value
+    if (selectedStrategyId.value !== null) {
+      if (selectedStrategyId.value === 0) {
+        data = positions.value.filter(p => !p.strategy_id || p.strategy_id === 0)
+      } else {
+        data = positions.value.filter(p => p.strategy_id === selectedStrategyId.value)
+      }
+    }
+    doExport(holdingColumns, data, '当前持仓', format)
   } else {
-    doExport(closedColumns, closedPositions.value, '已清仓', format)
+    doExport(closedColumns, filteredClosedPositions.value, '已清仓', format)
   }
 }
 
@@ -608,14 +647,45 @@ const strategyForm = ref({
   take_profit_pct: 0.15,
 })
 
-const openStrategyDialog = (row) => {
-  strategyForm.value = {
-    stock_code: row.stock_code,
-    stock_name: row.stock_name || row.stock_code,
-    stop_loss_price: row.stop_loss_price || null,
-    stop_loss_pct: 0.05,
-    take_profit_price: row.take_profit_price || null,
-    take_profit_pct: 0.15,
+const openStrategyDialog = async (row) => {
+  // 先从 API 加载现有策略
+  try {
+    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/trading-strategies/stock/${row.stock_code}`)
+    const data = await res.json()
+    if (data.success && data.exists && data.strategy) {
+      // 已有策略，加载现有数据
+      strategyForm.value = {
+        stock_code: row.stock_code,
+        stock_name: data.strategy.stock_name || row.stock_name || row.stock_code,
+        stop_loss_price: data.strategy.stop_loss_price || null,
+        stop_loss_pct: data.strategy.stop_loss_pct || 0.05,
+        take_profit_price: data.strategy.take_profit_price || null,
+        take_profit_pct: data.strategy.take_profit_pct || 0.15,
+        strategy_type: data.strategy.strategy_type || 'fixed',
+        entry_price: data.strategy.entry_price || null,
+        max_trade_quantity: data.strategy.max_trade_quantity || null,
+      }
+    } else {
+      // 无策略，使用默认值
+      strategyForm.value = {
+        stock_code: row.stock_code,
+        stock_name: row.stock_name || row.stock_code,
+        stop_loss_price: row.stop_loss_price || null,
+        stop_loss_pct: 0.05,
+        take_profit_price: row.take_profit_price || null,
+        take_profit_pct: 0.15,
+      }
+    }
+  } catch (e) {
+    // API 失败，使用默认值
+    strategyForm.value = {
+      stock_code: row.stock_code,
+      stock_name: row.stock_name || row.stock_code,
+      stop_loss_price: row.stop_loss_price || null,
+      stop_loss_pct: 0.05,
+      take_profit_price: row.take_profit_price || null,
+      take_profit_pct: 0.15,
+    }
   }
   strategyDialogVisible.value = true
 }

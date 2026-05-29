@@ -18,7 +18,7 @@ def create_lifespan():
     import os
     import json
 
-    MIGRATION_VERSION = 14
+    MIGRATION_VERSION = 16
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -69,12 +69,13 @@ def create_lifespan():
         try:
             from services.common.price_cache import get_price_cache
             from services.data.local_data_service import is_trading_hours
+            from services.common.system_config import get_system_config
             cache = get_price_cache()
-            if is_trading_hours():
-                cache.set_ttl(600)
-            else:
-                cache.set_ttl(43200)
-                log.log_event("price_cache_ttl_extended", f"非交易时段 PriceCache TTL 延长至 12 小时")
+            config = get_system_config()
+            ttl = config.get_price_cache_ttl(is_trading_hours())
+            cache.set_ttl(ttl)
+            if not is_trading_hours():
+                log.log_event("price_cache_ttl_extended", f"非交易时段 PriceCache TTL 延长至 {ttl//3600} 小时")
         except Exception as e:
             log.error("price_cache_ttl", f"初始化 PriceCache TTL 失败: {e}")
 
@@ -686,6 +687,25 @@ async def _run_migrations(db_manager, log, migration_version: int):
         "CREATE INDEX IF NOT EXISTS idx_cash_tx_strategy ON strategy_cash_transactions(strategy_id)",
     ])
 
+    # v15: 数据源使用统计
+    await run_migration(15, "数据源使用统计", [
+        """CREATE TABLE IF NOT EXISTS data_source_usage_stats (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            provider_id TEXT NOT NULL,
+            date TEXT NOT NULL,
+            channel_type TEXT,
+            method TEXT,
+            call_count INTEGER DEFAULT 0,
+            success_count INTEGER DEFAULT 0,
+            failure_count INTEGER DEFAULT 0,
+            avg_latency_ms REAL DEFAULT 0,
+            last_error TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_usage_stats_provider_date ON data_source_usage_stats(provider_id, date)",
+    ])
+
     # v7 数据源配置 seed
     try:
         from services.data.channel.config_manager import seed_provider_configs, add_account_role_column
@@ -694,6 +714,24 @@ async def _run_migrations(db_manager, log, migration_version: int):
         log.log_event("db_migration_v7", "数据源配置已初始化")
     except Exception as e:
         log.error("db_migration_v7", f"数据源初始化失败: {e}")
+
+    # 创建 admin 用户（首次启动）
+    try:
+        import hashlib
+        import uuid
+        from services.common.timezone import get_china_time
+        existing = await db_manager.fetchone("SELECT * FROM accounts WHERE name = 'admin'")
+        if not existing:
+            password_hash = hashlib.sha256("admin2026!".encode()).hexdigest()
+            account_id = str(uuid.uuid4())[:8].upper()
+            now = get_china_time().strftime("%Y-%m-%dT%H:%M:%S")
+            await db_manager.execute("""
+                INSERT INTO accounts (account_id, name, password_hash, display_name, role, is_active, created_at)
+                VALUES (?, 'admin', ?, '系统管理员', 'admin', 1, ?)
+            """, (account_id, password_hash, now))
+            log.log_event("admin_user_created", f"管理员用户已创建: {account_id}")
+    except Exception as e:
+        log.error("admin_user_creation", f"创建管理员用户失败: {e}")
 
 
 async def _init_channel_router(db_manager, log):

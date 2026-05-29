@@ -48,6 +48,36 @@
               <el-descriptions-item label="内存">{{ memoryMb }} MB</el-descriptions-item>
               <el-descriptions-item label="硬盘">{{ diskPercent }}%</el-descriptions-item>
             </el-descriptions>
+            <!-- 服务状态 -->
+            <el-descriptions :column="4" border style="margin-top: 10px">
+              <el-descriptions-item label="监控服务">
+                <el-tag :type="monitorRunning ? 'success' : 'danger'" size="small">
+                  {{ monitorRunning ? '运行中' : '已停止' }}
+                </el-tag>
+                <span v-if="monitorRunning && monitorHeartbeatAge > 0" style="color: #909399; font-size: 12px; margin-left: 4px">
+                  {{ monitorHeartbeatAge }}秒前
+                </span>
+              </el-descriptions-item>
+              <el-descriptions-item label="监控心跳">
+                <el-tag :type="monitorDataStale ? 'warning' : 'success'" size="small">
+                  {{ monitorDataStale ? '数据过期' : '数据新鲜' }}
+                </el-tag>
+              </el-descriptions-item>
+              <el-descriptions-item label="调度服务">
+                <el-tag :type="schedulerRunning ? 'success' : 'danger'" size="small">
+                  {{ schedulerRunning ? '运行中' : '已停止' }}
+                </el-tag>
+                <span style="color: #909399; font-size: 12px; margin-left: 4px">
+                  {{ schedulerJobsCount }}个任务
+                </span>
+              </el-descriptions-item>
+              <el-descriptions-item label="行情缓存">
+                <span>{{ priceCacheTotal }}/{{ priceCacheValid }} 条</span>
+                <el-tag size="small" style="margin-left: 8px" :type="priceCacheTtl > 3600 ? 'success' : 'warning'">
+                  TTL {{ priceCacheTtl >= 3600 ? Math.round(priceCacheTtl/3600) + '小时' : Math.round(priceCacheTtl/60) + '分钟' }}
+                </el-tag>
+              </el-descriptions-item>
+            </el-descriptions>
             <el-alert v-if="sdkIssues.length > 0" type="error" :closable="false" style="margin-top: 15px">
               <template #title>健康异常</template>
               <div v-for="(issue, idx) in sdkIssues" :key="idx" style="margin-top: 5px">
@@ -254,6 +284,17 @@ const memoryMb = ref(0)
 const diskPercent = ref(0)
 const sdkIssues = ref([])
 const sdkErrorTime = ref('')
+
+// 服务状态
+const monitorRunning = ref(false)
+const monitorDataStale = ref(false)
+const monitorHeartbeatAge = ref(0)
+const schedulerRunning = ref(false)
+const schedulerJobsCount = ref(0)
+const priceCacheTotal = ref(0)
+const priceCacheValid = ref(0)
+const priceCacheTtl = ref(600)
+
 const taskCount = ref(0)
 const taskSuccess = ref(0)
 const taskFail = ref(0)
@@ -447,7 +488,22 @@ const loadDashboard = async (silent = false, signal = null) => {
 
     healthStatus.value = data.system_health?.status || 'unknown'
     sdkIssues.value = data.system_health?.issues || []
-    sdkErrorTime.value = data.system_health?.monitor_sdk_error_time || ''
+    sdkErrorTime.value = data.system_health?.monitor?.sdk_error_time || ''
+
+    // 服务状态（新结构）
+    const monitor = data.system_health?.monitor || {}
+    monitorRunning.value = monitor.running || false
+    monitorDataStale.value = monitor.data_stale || false
+    monitorHeartbeatAge.value = monitor.heartbeat_age || 0
+
+    const scheduler = data.system_health?.scheduler || {}
+    schedulerRunning.value = scheduler.running || false
+    schedulerJobsCount.value = scheduler.jobs_count || 0
+
+    const priceCache = data.system_health?.price_cache || {}
+    priceCacheTotal.value = priceCache.total || 0
+    priceCacheValid.value = priceCache.valid || 0
+    priceCacheTtl.value = priceCache.ttl_seconds || 600
 
     // 服务器启动时间戳，用于本地时钟计算运行时长
     if (data.system_health?.server_start) {
@@ -553,6 +609,17 @@ const refreshHealthStatus = async () => {
     if (data.system_health) {
       healthStatus.value = data.system_health.status || 'unknown'
       sdkIssues.value = data.system_health.issues || []
+      // 更新服务状态
+      const monitor = data.system_health.monitor || {}
+      monitorRunning.value = monitor.running || false
+      monitorDataStale.value = monitor.data_stale || false
+      monitorHeartbeatAge.value = monitor.heartbeat_age || 0
+      const scheduler = data.system_health.scheduler || {}
+      schedulerRunning.value = scheduler.running || false
+      schedulerJobsCount.value = scheduler.jobs_count || 0
+      const priceCache = data.system_health.price_cache || {}
+      priceCacheTotal.value = priceCache.total || 0
+      priceCacheValid.value = priceCache.valid || 0
     }
   } catch { /* 静默 */ }
 }

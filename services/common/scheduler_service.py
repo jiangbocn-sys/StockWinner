@@ -969,14 +969,13 @@ class SchedulerService:
         from services.data.local_data_service import is_trading_hours
         from services.common.price_cache import get_price_cache
 
-        # 动态调整 PriceCache TTL：非交易时段 12 小时，交易时段 10 分钟
+        # 动态调整 PriceCache TTL：非交易时段长 TTL，交易时段短 TTL
+        from services.common.system_config import get_system_config
         cache = get_price_cache()
-        if is_trading_hours():
-            if cache._ttl != 600:
-                cache.set_ttl(600)
-        else:
-            if cache._ttl != 43200:
-                cache.set_ttl(43200)
+        config = get_system_config()
+        ttl = config.get_price_cache_ttl(is_trading_hours())
+        if cache._ttl != ttl:
+            cache.set_ttl(ttl)
 
         try:
             from services.trading.gateway_dispatcher import get_gateway_dispatcher
@@ -1231,22 +1230,24 @@ class SchedulerService:
                 logger.error(f"检查交易监控状态失败: {e}")
 
     def _monitor_auto_start_job(self):
-        """9:15 定时任务 — 自动启动交易监控
+        """9:15 / 13:00 定时任务 — 自动启动交易监控
 
-        使用 run_coroutine_threadsafe 提交到主事件循环，避免临时循环导致 aiosqlite 连接失效。
+        使用 _get_fastapi_loop() + run_coroutine_threadsafe 提交到主事件循环，
+        避免 APScheduler daemon 线程中的 asyncio.get_event_loop() 返回错误循环。
         """
         logger.info("执行交易监控自动启动任务")
 
         try:
-            main_loop = asyncio.get_event_loop()
-            if main_loop.is_closed():
-                logger.warning("主事件循环已关闭，无法启动监控")
+            # 使用 _get_fastapi_loop() 获取 FastAPI 主循环引用（由 lifespan 设置）
+            main_loop = _get_fastapi_loop()
+            if main_loop is None or main_loop.is_closed():
+                logger.warning("FastAPI 主事件循环不可用，无法启动监控")
                 return
 
             future = asyncio.run_coroutine_threadsafe(self._do_monitor_auto_start(), main_loop)
             future.result(timeout=30.0)  # 等待完成，最多 30 秒
         except RuntimeError as e:
-            logger.warning(f"无法获取事件循环: {e}")
+            logger.warning(f"事件循环异常: {e}")
         except Exception as e:
             logger.error(f"监控自动启动异常: {e}")
 

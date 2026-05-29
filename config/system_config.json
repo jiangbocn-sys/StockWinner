@@ -1,0 +1,11 @@
+{
+  "price_cache_ttl_trading": 300,
+  "price_cache_ttl_non_trading": 43200,
+  "price_cache_max_size": 10000,
+  "price_cache_flush_interval": 900,
+  "monitor_interval": 60,
+  "monitor_watch_refresh_interval": 120,
+  "auto_start_monitor": true,
+  "circuit_breaker_recovery_timeout": 300,
+  "circuit_breaker_failure_threshold": 5
+}

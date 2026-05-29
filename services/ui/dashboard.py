@@ -193,6 +193,75 @@ def check_sdk_connection() -> str:
         return "login_failed"
 
 
+@router.get("/api/v1/public/system-status")
+async def get_public_system_status():
+    """公开系统状态（无需认证）— 供管理员快速检查"""
+    from services.monitoring.service import get_trading_monitor
+    from services.common.scheduler_service import get_scheduler
+    from services.common.price_cache import get_price_cache
+    from services.trading.trading_hours import is_today_trading_day, can_trade
+
+    # Monitor status
+    try:
+        monitor = get_trading_monitor()
+        monitor_status = monitor.get_status()
+    except Exception:
+        monitor_status = {"running": False, "error": "无法获取监控状态"}
+
+    # Scheduler status
+    try:
+        scheduler = get_scheduler()
+        scheduler_status = scheduler.get_status()
+    except Exception:
+        scheduler_status = {"running": False, "error": "无法获取调度状态"}
+
+    # PriceCache status
+    try:
+        cache = get_price_cache()
+        cache_stats = cache.get_stats()
+    except Exception:
+        cache_stats = {"cache_total": 0, "cache_valid": 0}
+
+    # SDK connection
+    sdk_status = check_sdk_connection()
+
+    # Trading hours
+    try:
+        trading_day = is_today_trading_day()
+        trading_hours = can_trade()
+    except Exception:
+        trading_day = False
+        trading_hours = False
+
+    return {
+        "timestamp": get_china_time().isoformat(),
+        "version": VERSION,
+        "uptime": get_uptime_text(),
+        "trading_day": trading_day,
+        "trading_hours": trading_hours,
+        "sdk_connection": sdk_status,
+        "monitor": {
+            "running": monitor_status.get("running", False),
+            "account_ids": monitor_status.get("account_ids", []),
+            "heartbeat_age": monitor_status.get("heartbeat_age", 0),
+            "is_zombie": monitor_status.get("is_zombie", False),
+            "sdk_healthy": monitor_status.get("sdk_healthy", True),
+            "data_stale": monitor_status.get("data_stale", False),
+        },
+        "scheduler": {
+            "running": scheduler_status.get("running", False),
+            "scheduler_running": scheduler_status.get("scheduler_running", False),
+            "jobs_count": len(scheduler_status.get("jobs", [])),
+        },
+        "price_cache": {
+            "total": cache_stats.get("cache_total", 0),
+            "valid": cache_stats.get("cache_valid", 0),
+            "ttl_seconds": cache_stats.get("ttl_seconds", 600),
+        },
+        "resources": get_resource_usage(),
+    }
+
+
 @router.get("/api/v1/ui/{account_id}/dashboard")
 async def get_dashboard(account_id: str = Path(..., description="账户 ID")):
     """仪表盘总览数据"""
@@ -319,11 +388,41 @@ async def get_dashboard(account_id: str = Path(..., description="账户 ID")):
         monitor_running = monitor_status.get("running", False)
         monitor_data_stale = monitor_status.get("data_stale", False)
         monitor_last_data_time = monitor_status.get("last_data_time", "")
+        monitor_heartbeat_age = monitor_status.get("heartbeat_age", 0)
+        monitor_is_zombie = monitor_status.get("is_zombie", False)
     except Exception:
         monitor_sdk_healthy = True
         monitor_sdk_error_time = ""
         monitor_sdk_error_msg = ""
         monitor_running = False
+        monitor_data_stale = False
+        monitor_last_data_time = ""
+        monitor_heartbeat_age = 0
+        monitor_is_zombie = False
+
+    # 获取调度器状态
+    try:
+        from services.common.scheduler_service import get_scheduler
+        scheduler = get_scheduler()
+        scheduler_status = scheduler.get_status()
+        scheduler_running = scheduler_status.get("running", False)
+        scheduler_jobs_count = len(scheduler_status.get("jobs", []))
+    except Exception:
+        scheduler_running = False
+        scheduler_jobs_count = 0
+
+    # 获取 PriceCache 状态
+    try:
+        from services.common.price_cache import get_price_cache
+        cache = get_price_cache()
+        cache_stats = cache.get_stats()
+        price_cache_total = cache_stats.get("cache_total", 0)
+        price_cache_valid = cache_stats.get("cache_valid", 0)
+        price_cache_ttl = cache_stats.get("ttl_seconds", 600)
+    except Exception:
+        price_cache_total = 0
+        price_cache_valid = 0
+        price_cache_ttl = 600
 
     # 综合健康状态：SDK + Galaxy API + 服务运行状态
     sdk_connection_ok = check_sdk_connection()
@@ -349,12 +448,25 @@ async def get_dashboard(account_id: str = Path(..., description="账户 ID")):
             "uptime_text": get_uptime_text(),
             "server_start": get_start_time().isoformat() if get_start_time() else None,
             "galaxy_api": sdk_connection_ok,
-            "monitor_sdk_healthy": monitor_sdk_healthy,
-            "monitor_sdk_error_time": monitor_sdk_error_time,
-            "monitor_sdk_error_msg": monitor_sdk_error_msg,
-            "monitor_running": monitor_running,
-            "monitor_data_stale": monitor_data_stale,
-            "monitor_last_data_time": monitor_last_data_time,
+            "monitor": {
+                "running": monitor_running,
+                "sdk_healthy": monitor_sdk_healthy,
+                "data_stale": monitor_data_stale,
+                "heartbeat_age": monitor_heartbeat_age,
+                "is_zombie": monitor_is_zombie,
+                "sdk_error_time": monitor_sdk_error_time,
+                "sdk_error_msg": monitor_sdk_error_msg,
+                "last_data_time": monitor_last_data_time,
+            },
+            "scheduler": {
+                "running": scheduler_running,
+                "jobs_count": scheduler_jobs_count,
+            },
+            "price_cache": {
+                "total": price_cache_total,
+                "valid": price_cache_valid,
+                "ttl_seconds": price_cache_ttl,
+            },
             "cpu_percent": resources["cpu_percent"],
             "memory_mb": resources["memory_mb"],
             "disk_percent": resources["disk_percent"],
