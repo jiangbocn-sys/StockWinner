@@ -147,22 +147,23 @@ def calculate_and_save_factors_for_dates(
                             continue
                         calc_end = calc_end_dt.strftime('%Y-%m-%d')
 
-                # 获取K线数据（前溯120天）
-                kline_query_start = calc_start if only_new_dates else start_date
-                if only_new_dates:
-                    query_start_dt = datetime.strptime(kline_query_start, '%Y-%m-%d') - timedelta(days=120)
-                    cursor.execute("SELECT MIN(trade_date) FROM kline_data WHERE stock_code = ?", (stock_code,))
-                    min_kline = cursor.fetchone()[0]
-                    if min_kline:
-                        kline_query_start = max(min_kline, query_start_dt.strftime('%Y-%m-%d'))
-
+                # 获取K线数据（取足够的交易日历史数据，确保能计算 MA250）
+                # 从计算结束日期往前取 260 条数据（确保 MA250 有足够数据）
+                kline_end = calc_end if only_new_dates else end_date
                 cursor.execute("""
                     SELECT trade_date, open, high, low, close, volume, amount
                     FROM kline_data
-                    WHERE stock_code = ? AND trade_date >= ? AND trade_date <= ?
-                    ORDER BY trade_date
-                """, (stock_code, kline_query_start, calc_end if only_new_dates else end_date))
-                kline_rows = cursor.fetchall()
+                    WHERE stock_code = ? AND trade_date <= ?
+                    ORDER BY trade_date DESC
+                    LIMIT 260
+                """, (stock_code, kline_end))
+                rows_desc = cursor.fetchall()
+                if rows_desc:
+                    # 反转为正序（从旧到新）
+                    rows_desc.reverse()
+                    kline_rows = rows_desc
+                else:
+                    kline_rows = []
 
                 if not kline_rows:
                     continue
@@ -260,7 +261,7 @@ def calculate_and_save_factors_for_dates(
                                 amount_std_5, amount_std_10, amount_std_20,
                                 kdj_k, kdj_d, kdj_j,
                                 dif, dea, macd,
-                                ma5, ma10, ma20, ma60,
+                                ma5, ma10, ma20, ma60, ma120, ma250,
                                 ema12, ema26, adx,
                                 rsi_14, cci_20, atr_14,
                                 boll_upper, boll_middle, boll_lower, hv_20,
@@ -274,7 +275,7 @@ def calculate_and_save_factors_for_dates(
                                 gap_up_ratio,
                                 next_period_change, is_traded,
                                 source, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """, (
                             stock_code,
                             stock_name,
@@ -307,6 +308,8 @@ def calculate_and_save_factors_for_dates(
                             to_python_value(row.get('ma10')),
                             to_python_value(row.get('ma20')),
                             to_python_value(row.get('ma60')),
+                            to_python_value(row.get('ma120')),
+                            to_python_value(row.get('ma250')),
                             to_python_value(row.get('ema12')),
                             to_python_value(row.get('ema26')),
                             to_python_value(row.get('adx')),
@@ -470,7 +473,7 @@ def fill_empty_factor_values(
 
     # 检测所有因子字段的空值（与 INSERT 语句中的字段保持一致）
     ALL_FACTOR_FIELDS = [
-        'ma5', 'ma10', 'ma20', 'ma60', 'ema12', 'ema26',
+        'ma5', 'ma10', 'ma20', 'ma60', 'ma120', 'ma250', 'ema12', 'ema26',
         'kdj_k', 'kdj_d', 'kdj_j', 'dif', 'dea', 'macd',
         'rsi_14', 'cci_20', 'adx', 'atr_14',
         'boll_upper', 'boll_middle', 'boll_lower',
@@ -693,7 +696,7 @@ def smart_update_factors(
 
     # 检测所有因子字段的空值（与 INSERT 语句中的字段保持一致）
     ALL_FACTOR_FIELDS = [
-        'ma5', 'ma10', 'ma20', 'ma60', 'ema12', 'ema26',
+        'ma5', 'ma10', 'ma20', 'ma60', 'ma120', 'ma250', 'ema12', 'ema26',
         'kdj_k', 'kdj_d', 'kdj_j', 'dif', 'dea', 'macd',
         'rsi_14', 'cci_20', 'adx', 'atr_14',
         'boll_upper', 'boll_middle', 'boll_lower',
@@ -877,7 +880,7 @@ def smart_update_factors(
                                 amount_std_5, amount_std_10, amount_std_20,
                                 kdj_k, kdj_d, kdj_j,
                                 dif, dea, macd,
-                                ma5, ma10, ma20, ma60,
+                                ma5, ma10, ma20, ma60, ma120, ma250,
                                 ema12, ema26, adx,
                                 rsi_14, cci_20, atr_14,
                                 boll_upper, boll_middle, boll_lower, hv_20,
@@ -891,7 +894,7 @@ def smart_update_factors(
                                 gap_up_ratio,
                                 next_period_change, is_traded,
                                 source, created_at, updated_at
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """, (
                             stock_code, stock_name, trade_date,
                             circ_market_cap, total_market_cap, days_since_ipo,
@@ -920,6 +923,8 @@ def smart_update_factors(
                             to_python_value(row.get('ma10')),
                             to_python_value(row.get('ma20')),
                             to_python_value(row.get('ma60')),
+                            to_python_value(row.get('ma120')),
+                            to_python_value(row.get('ma250')),
                             to_python_value(row.get('ema12')),
                             to_python_value(row.get('ema26')),
                             to_python_value(row.get('adx')),
@@ -965,7 +970,7 @@ def smart_update_factors(
                     row = row_data.iloc[0]
 
                     factor_fields = [
-                        'ma5', 'ma10', 'ma20', 'ma60', 'ema12', 'ema26',
+                        'ma5', 'ma10', 'ma20', 'ma60', 'ma120', 'ma250', 'ema12', 'ema26',
                         'kdj_k', 'kdj_d', 'kdj_j', 'dif', 'dea', 'macd',
                         'rsi_14', 'cci_20', 'adx', 'atr_14',
                         'boll_upper', 'boll_middle', 'boll_lower',
