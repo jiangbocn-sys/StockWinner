@@ -105,7 +105,8 @@ class GatewayDispatcher:
             return {}
 
         codes = list(sub.stock_codes)
-        result = await self._query_sdk(codes)
+        # 使用订阅的 priority
+        result = await self._query_sdk(codes, priority=sub.priority)
 
         # 写入 PriceCache（source 由 MarketData.source 自动决定）
         if result:
@@ -149,7 +150,7 @@ class GatewayDispatcher:
             await asyncio.sleep(self._tick_interval)
 
     async def _dispatch_tick(self):
-        """单次调度 tick：收集需要刷新的订阅，合并去重后刷新"""
+        """单次调度 tick：按优先级分批刷新订阅"""
         from services.trading.trading_hours import can_trade
 
         if not can_trade():
@@ -169,35 +170,43 @@ class GatewayDispatcher:
         if not due_subs:
             return
 
-        # 按优先级排序
+        # 按优先级排序（priority 数值越小优先级越高）
         due_subs.sort(key=lambda s: s.priority)
 
-        # 合并所有需要刷新的股票，去重
-        all_codes: Set[str] = set()
-        for sub in due_subs:
-            for code in sub.stock_codes:
-                last = self._stock_last_refresh.get(code, 0)
-                if now - last >= self._min_refresh_gap:
-                    all_codes.add(code)
-
-        if not all_codes:
-            return
-
-        # 执行 SDK 查询（通过 gateway 的 _serial_lock 排队）
-        async with self._get_lock():
-            result = await self._query_sdk(list(all_codes))
-
-        if result:
-            self._write_to_price_cache(result)
+        # 按优先级分组刷新（先 high，再 medium，最后 low）
+        for priority_level in [1, 2, 3]:
+            # 收集该优先级的股票
+            priority_codes: Set[str] = set()
             for sub in due_subs:
-                sub.last_refresh_ts = time.time()
+                if sub.priority == priority_level:
+                    for code in sub.stock_codes:
+                        last = self._stock_last_refresh.get(code, 0)
+                        if now - last >= self._min_refresh_gap:
+                            priority_codes.add(code)
+
+            if not priority_codes:
+                continue
+
+            # 执行 SDK 查询
+            async with self._get_lock():
+                result = await self._query_sdk(list(priority_codes), priority=priority_level)
+
+            if result:
+                self._write_to_price_cache(result)
+                # 更新该优先级订阅的时间戳
+                for sub in due_subs:
+                    if sub.priority == priority_level:
+                        sub.last_refresh_ts = time.time()
 
     # ── SDK 查询 ──
 
-    async def _query_sdk(self, codes: List[str]) -> Dict[str, Any]:
+    async def _query_sdk(self, codes: List[str], priority: int = 1) -> Dict[str, Any]:
         """分批调 SDK snapshot，失败后回退 K 线数据，返回 {stock_code: MarketData}
 
         所有 SDK 调用通过 asyncio.to_thread 运行在线程池中，不阻塞事件循环。
+
+        Args:
+            priority: 优先级 (0=highest, 1=high, 2=medium, 3=low)
         """
         import asyncio
         from services.common.sdk_manager import get_sdk_manager
@@ -217,7 +226,7 @@ class GatewayDispatcher:
                 batch = codes[i:i + self._sdk_batch_size]
                 result = await asyncio.to_thread(
                     sdk_mgr.query_snapshot,
-                    code_list=batch, begin_date=today_int, end_date=today_int
+                    code_list=batch, begin_date=today_int, end_date=today_int, priority=priority
                 )
 
                 batch_valid = 0
@@ -266,7 +275,7 @@ class GatewayDispatcher:
 
         # ② snapshot 失败的代码，回退到 K 线数据
         if snapshot_failed:
-            kline_results = await self._fallback_kline(snapshot_failed)
+            kline_results = await self._fallback_kline(snapshot_failed, priority)
             for code in snapshot_failed:
                 if code in kline_results:
                     results[code] = kline_results[code]
@@ -279,15 +288,10 @@ class GatewayDispatcher:
                 if md and md.current_price > 0:
                     results[code] = md
 
-        # ④ 仍有 None 的代码 → 从本地 kline.db 兜底（仅非交易时段）
-        still_none = [c for c in codes if results.get(c) is None]
-        if still_none:
-            from services.trading.trading_hours import can_trade
-            if not can_trade():
-                kline_db_results = self._fill_from_kline_db_local(set(still_none))
-                for code, md in kline_db_results.items():
-                    if md and md.current_price > 0:
-                        results[code] = md
+        # ④ 不再从 kline.db 兜底填充 PriceCache
+        # PriceCache 应只存放当日实时行情，前一交易日数据不应填充
+        # 非交易时段 TTL=9h 确保收盘数据在 24:00 失效，开盘前 PriceCache 为空是合理现象
+        # 用户查看历史数据应直接从 kline.db 读取，而非通过 PriceCache
 
         valid_count = sum(1 for v in results.values() if v is not None)
 
@@ -320,10 +324,13 @@ class GatewayDispatcher:
             f"total_valid={valid_count}")
         return results
 
-    async def _fallback_kline(self, codes: List[str]) -> Dict[str, Any]:
-        """snapshot 失败时回退到 K 线数据获取价格（不限股票数，分批 15 只）
+    async def _fallback_kline(self, codes: List[str], priority: int = 1) -> Dict[str, Any]:
+        """snapshot 失败时回退到 K 线数据获取价格（不限股票数，分批 200 只）
 
         所有 SDK 调用通过 asyncio.to_thread 运行在线程池中，不阻塞事件循环。
+
+        Args:
+            priority: 优先级 (继承自 _query_sdk)
         """
         import asyncio
         import datetime
@@ -360,6 +367,7 @@ class GatewayDispatcher:
                 begin_date=begin_date_int,
                 end_date=end_date_int,
                 period=DAY_PERIOD,
+                priority=priority,
             )
 
             if result and isinstance(result, dict):
@@ -577,8 +585,11 @@ class GatewayDispatcher:
     def _write_to_price_cache(results: Dict[str, Any]):
         """将 MarketData 结果写入 PriceCache（source 由 MarketData.source 决定）"""
         from services.common.price_cache import get_price_cache
+        from services.common.structured_logger import get_logger
 
         cache = get_price_cache()
+        logger = get_logger("dispatcher")
+        written_count = 0
         for code, md in results.items():
             if md and md.current_price > 0:
                 cache.update_ohlcv(
@@ -592,6 +603,9 @@ class GatewayDispatcher:
                     change_pct=md.change_percent or 0.0,
                     source=md.source if hasattr(md, 'source') else "",
                 )
+                written_count += 1
+        logger.log_event("price_cache_write", f"写入 PriceCache {written_count}/{len(results)} 条",
+                        written=written_count, total=len(results))
 
     def get_status(self) -> Dict[str, Any]:
         """返回调度器状态"""

@@ -1,6 +1,6 @@
 {
   "price_cache_ttl_trading": 300,
-  "price_cache_ttl_non_trading": 43200,
+  "price_cache_ttl_non_trading": 32400,
   "price_cache_max_size": 10000,
   "price_cache_flush_interval": 900,
   "monitor_interval": 60,

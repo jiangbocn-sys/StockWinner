@@ -332,9 +332,13 @@ class PriceCache:
     def get_stats(self) -> Dict[str, Any]:
         """获取缓存统计（含容量上限信息）"""
         with self._lock:
+            now = time.time()
             entries = len(self._prices)
+            # 统计新鲜条目（在 TTL 内）
+            valid_count = sum(1 for e in self._prices.values() if now - e.timestamp <= self._ttl)
             return {
-                "total_entries": entries,
+                "cache_total": entries,  # 总条目数
+                "cache_valid": valid_count,  # 新鲜条目数（TTL内）
                 "max_size": self._max_size,
                 "usage_pct": round(entries / self._max_size * 100, 1) if self._max_size > 0 else 0,
                 "last_flush_age_seconds": round(time.time() - self._last_flush, 0),

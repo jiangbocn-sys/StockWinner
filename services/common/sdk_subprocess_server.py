@@ -150,6 +150,7 @@ SDK_METHODS = {
     "get_treasury_yield",
     "get_industry_constituent",
     "get_index_constituent",
+    "get_adj_factor",      # 复权因子（前复权/后复权）
     "connect",        # 等效于确保登录
     "disconnect",     # 清理实例
     "is_connected",   # 返回 True（如果已登录）
@@ -311,6 +312,18 @@ def execute_sdk_method(method: str, kwargs: dict):
         elif method == "get_index_constituent":
             return get_info().get_index_constituent(
                 code_list=kwargs.get("index_codes"), is_local=False
+            )
+
+        elif method == "get_adj_factor":
+            # 获取复权因子（BaseData.get_adj_factor）
+            # handbook: 需要 code_list, local_path, is_local 三个参数
+            local_path = "/home/bobo/StockWinner/data/adj_factor/"
+            import os
+            os.makedirs(local_path, exist_ok=True)
+            return get_base_data().get_adj_factor(
+                code_list=kwargs.get("stock_codes", []),
+                local_path=local_path,
+                is_local=False  # 从服务端获取最新数据
             )
 
         else:
