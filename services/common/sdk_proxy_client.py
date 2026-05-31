@@ -13,7 +13,7 @@ import socket
 import time
 import json
 import threading
-from typing import Optional, Dict
+from typing import Optional, Dict, Tuple
 import pandas as pd
 from pathlib import Path
 
@@ -351,6 +351,67 @@ class SDKProxyClient:
         except Exception:
             return pd.DataFrame()
 
+    def get_adj_factor(self, stock_codes: list, priority: int = 2) -> pd.DataFrame:
+        """获取复权因子（默认 medium priority）
+
+        用于 K 线前复权计算：
+        - 前复权价格 = 原价 × 当日复权因子 / 最新复权因子
+
+        Returns:
+            DataFrame with columns: stock_code, trade_date, adj_factor
+        """
+        try:
+            result = self._call_ipc("get_adj_factor", {"stock_codes": stock_codes}, priority=priority, timeout=30.0)
+            return _to_dataframe(result) if result is not None else pd.DataFrame()
+        except Exception:
+            return pd.DataFrame()
+
+    # ── ETF 专项数据 ──
+
+    def get_etf_pcf(self, etf_codes: list, priority: int = 3) -> Tuple[pd.DataFrame, Dict]:
+        """ETF 申赎数据（后台任务，默认 low priority）
+
+        Returns:
+            (pcf_info DataFrame, constituents dict)
+        """
+        try:
+            result = self._call_ipc("get_etf_pcf", {"etf_codes": etf_codes}, priority=priority, timeout=60.0)
+            if result and isinstance(result, dict):
+                pcf_info = _to_dataframe(result.get("pcf_info"))
+                constituents = result.get("constituents", {})
+                return pcf_info, constituents
+            return pd.DataFrame(), {}
+        except Exception:
+            return pd.DataFrame(), {}
+
+    def get_fund_share(self, etf_codes: list, priority: int = 3) -> Dict[str, pd.DataFrame]:
+        """ETF 基金份额（后台任务，默认 low priority）
+
+        Returns:
+            dict: {etf_code: DataFrame}
+        """
+        try:
+            result = self._call_ipc("get_fund_share", {"etf_codes": etf_codes}, priority=priority, timeout=60.0)
+            if result and isinstance(result, dict):
+                return {k: _to_dataframe(v) for k, v in result.items()}
+            return {}
+        except Exception:
+            return {}
+
+    def get_fund_iopv(self, etf_codes: list, priority: int = 3) -> Dict[str, pd.DataFrame]:
+        """ETF IOPV 净值（后台任务，默认 low priority）
+
+        Returns:
+            dict: {etf_code: DataFrame}
+        """
+        try:
+            result = self._call_ipc("get_fund_iopv", {"etf_codes": etf_codes}, priority=priority, timeout=60.0)
+            if result and isinstance(result, dict):
+                return {k: _to_dataframe(v) for k, v in result.items()}
+            return {}
+        except Exception:
+            return {}
+
 
 def _to_dataframe(obj) -> pd.DataFrame:
     """将反序列化结果转为 DataFrame"""
@@ -428,6 +489,10 @@ class _IPCBaseData:
     def get_calendar(self, **kw):
         return self._client.get_calendar()
 
+    def get_adj_factor(self, stock_codes, priority=None, **kw):
+        """获取复权因子"""
+        return self._client.get_adj_factor(stock_codes, priority=priority or self._default_priority)
+
 
 class _IPCMarketData:
     def __init__(self, client: SDKProxyClient, default_priority: int = 1):
@@ -460,17 +525,21 @@ class SDKSubprocessManager:
         logger = get_logger("sdk_subprocess_mgr")
 
         with self._lock:
+            # 强制终止旧子进程（确保完全清理）
             if self._subprocess and self._subprocess.poll() is None:
-                logger.log_event("sdk_subprocess_already_running",
-                    f"子进程已运行 (PID: {self._subprocess_pid})")
-                return True
+                logger.log_event("sdk_subprocess_stopping_old",
+                    f"终止旧子进程 PID: {self._subprocess_pid}")
+                self._kill_subprocess()
+                # 等待进程完全退出
+                time.sleep(0.5)
 
-            # 清理旧 socket
+            # 清理旧 socket（确保文件不存在）
             if os.path.exists(SOCKET_PATH):
                 try:
                     os.unlink(SOCKET_PATH)
-                except Exception:
-                    pass
+                    logger.log_event("sdk_socket_cleaned", "旧 socket 文件已清理")
+                except Exception as e:
+                    logger.warning(f"清理 socket 失败: {e}")
 
             # 启动子进程
             python_path = sys.executable or "python3"
@@ -509,24 +578,50 @@ class SDKSubprocessManager:
                 return False
 
     def _wait_for_ready(self, timeout: float = 30.0):
-        """等待子进程报告 ready"""
-        import subprocess
+        """等待子进程报告 ready（使用 select 避免阻塞）"""
+        import select
         if not self._subprocess or not self._subprocess.stdout:
             return
         start = time.monotonic()
+        logger = get_logger("sdk_subprocess_mgr")
+
         while time.monotonic() - start < timeout:
-            line = self._subprocess.stdout.readline()
-            if not line:
-                if self._subprocess.poll() is not None:
-                    break  # 子进程已退出
-                continue
+            remaining = timeout - (time.monotonic() - start)
+            if remaining <= 0:
+                break
+
+            # 使用 select 检查是否有数据可读（避免 readline 阻塞）
             try:
+                ready, _, _ = select.select([self._subprocess.stdout], [], [], min(remaining, 1.0))
+                if not ready:
+                    # 检查子进程是否已退出
+                    if self._subprocess.poll() is not None:
+                        logger.log_event("sdk_subprocess_exit",
+                            f"子进程意外退出，返回码: {self._subprocess.poll()}")
+                        break
+                    continue
+            except Exception:
+                # select 可能失败，fallback 到普通检查
+                if self._subprocess.poll() is not None:
+                    break
+                continue
+
+            # 有数据可读，读取一行
+            try:
+                line = self._subprocess.stdout.readline()
+                if not line:
+                    continue
                 msg = json.loads(line.decode("utf-8").strip())
                 if msg.get("event") == "sdk_ready":
                     self._ready_event.set()
+                    logger.log_event("sdk_ready_received", "收到子进程就绪信号")
                     return
             except Exception:
                 continue
+
+        # 超时或子进程退出
+        elapsed = time.monotonic() - start
+        logger.log_event("sdk_wait_timeout", f"等待就绪超时 ({elapsed:.1f}s)")
         self._ready_event.clear()
 
     def _kill_subprocess(self):

@@ -21,6 +21,7 @@ from services.common.download_progress import get_progress_tracker, DownloadStat
 from services.common.structured_logger import get_logger
 from services.common.database import get_sync_connection
 from services.factors.factor_pipeline import calculate_technical_factors, add_signal_indicators
+from services.common.security_type import get_security_type, is_stock_code
 
 
 # ================================================================
@@ -67,10 +68,13 @@ def calculate_and_save_factors_for_dates(
 
     # 获取日期范围内的所有股票
     if stock_codes is None:
+        # K线表中 trade_date 是整数格式（YYYYMMDD），需转换
+        start_date_int = int(start_date.replace('-', ''))
+        end_date_int = int(end_date.replace('-', ''))
         cursor.execute("""
             SELECT DISTINCT stock_code FROM kline_data
             WHERE trade_date >= ? AND trade_date <= ?
-        """, (start_date, end_date))
+        """, (start_date_int, end_date_int))
         stock_codes = [row[0] for row in cursor.fetchall()]
 
     if not stock_codes:
@@ -148,15 +152,22 @@ def calculate_and_save_factors_for_dates(
                         calc_end = calc_end_dt.strftime('%Y-%m-%d')
 
                 # 获取K线数据（取足够的交易日历史数据，确保能计算 MA250）
-                # 从计算结束日期往前取 260 条数据（确保 MA250 有足够数据）
+                # K线数量 = 计算区间天数 + 250（MA250历史） + 1（确保足额）
                 kline_end = calc_end if only_new_dates else end_date
+                calc_start_dt = datetime.strptime(calc_start if only_new_dates else start_date, '%Y-%m-%d')
+                calc_end_dt = datetime.strptime(kline_end, '%Y-%m-%d')
+                calc_days = (calc_end_dt - calc_start_dt).days + 1
+                # 估算交易日数（约 5/7），加上 MA250 需要的 250 条，再加 10 条缓冲
+                kline_limit = int(calc_days * 5 / 7) + 260
+                # K线表中 trade_date 是整数格式（YYYYMMDD），需转换
+                kline_end_int = int(kline_end.replace('-', ''))
                 cursor.execute("""
                     SELECT trade_date, open, high, low, close, volume, amount
                     FROM kline_data
                     WHERE stock_code = ? AND trade_date <= ?
                     ORDER BY trade_date DESC
-                    LIMIT 260
-                """, (stock_code, kline_end))
+                    LIMIT ?
+                """, (stock_code, kline_end_int, kline_limit))
                 rows_desc = cursor.fetchall()
                 if rows_desc:
                     # 反转为正序（从旧到新）
@@ -179,36 +190,45 @@ def calculate_and_save_factors_for_dates(
                 df = calculate_technical_factors(df)
                 df = add_signal_indicators(df)
 
-                # 获取股本数据
+                # 判断证券类型
+                security_type = get_security_type(stock_code)
+                is_stock = security_type == 'stock'
+
+                # 获取股本数据（仅股票适用）
                 float_share = None
                 total_share = None
-                try:
-                    cursor.execute("SELECT float_share, total_share FROM stock_base_info WHERE stock_code = ?", (stock_code,))
-                    result = cursor.fetchone()
-                    if result:
-                        float_share = result[0]
-                        total_share = result[1]
-                except:
-                    pass
+                if is_stock:
+                    try:
+                        cursor.execute("SELECT float_share, total_share FROM stock_base_info WHERE stock_code = ?", (stock_code,))
+                        result = cursor.fetchone()
+                        if result:
+                            float_share = result[0]
+                            total_share = result[1]
+                    except:
+                        pass
 
-                # 获取上市日期
+                # 获取上市日期（仅股票适用）
                 ipo_date = None
-                try:
-                    cursor.execute("SELECT list_date FROM stock_base_info WHERE stock_code = ?", (stock_code,))
-                    result = cursor.fetchone()
-                    if result and result[0]:
-                        list_val = result[0]
-                        if isinstance(list_val, int) and list_val > 19000000:
-                            ipo_date = f"{list_val // 10000}-{(list_val % 10000) // 100:02d}-{list_val % 100:02d}"
-                        else:
-                            ipo_date = str(list_val)
-                except:
-                    pass
+                if is_stock:
+                    try:
+                        cursor.execute("SELECT list_date FROM stock_base_info WHERE stock_code = ?", (stock_code,))
+                        result = cursor.fetchone()
+                        if result and result[0]:
+                            list_val = result[0]
+                            if isinstance(list_val, int) and list_val > 19000000:
+                                ipo_date = f"{list_val // 10000}-{(list_val % 10000) // 100:02d}-{list_val % 100:02d}"
+                            else:
+                                ipo_date = str(list_val)
+                    except:
+                        pass
 
                 # 批量插入
                 insert_count = 0
                 insert_start = calc_start if only_new_dates else start_date
                 insert_end = calc_end if only_new_dates else end_date
+                # 转换为整数格式进行比较（K线trade_date是整数）
+                insert_start_int = int(insert_start.replace('-', ''))
+                insert_end_int = int(insert_end.replace('-', ''))
 
                 if show_progress and insert_count == 0:
                     log.debug("factor", f"{stock_code}: insert范围 {insert_start} ~ {insert_end}, df日期 {df['trade_date'].min()} ~ {df['trade_date'].max()}",
@@ -228,7 +248,7 @@ def calculate_and_save_factors_for_dates(
 
                 for _, row in df.iterrows():
                     trade_date = row['trade_date']
-                    if trade_date < insert_start or trade_date > insert_end:
+                    if trade_date < insert_start_int or trade_date > insert_end_int:
                         continue
 
                     close_price = row['close']

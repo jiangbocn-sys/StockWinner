@@ -151,7 +151,9 @@ async def download_all_kline_data(
     broker_password: str = "",
     calculate_factors: bool = True,
     market_filter: Optional[List[str]] = None,
-    download_industry: bool = True
+    download_industry: bool = True,
+    download_etf: bool = True,
+    security_type: str = 'EXTRA_STOCK_A'
 ) -> bool:
     """
     异步下载全量 K 线数据
@@ -169,6 +171,8 @@ async def download_all_kline_data(
         calculate_factors: 是否计算因子
         market_filter: 市场筛选列表 ['SH', 'SZ', 'BJ']
         download_industry: 是否下载行业指数
+        download_etf: 是否下载 ETF K 线和专项数据
+        security_type: 证券类型（EXTRA_STOCK_A/EXTRA_ETF/EXTRA_INDEX_A）
 
     Returns:
         下载是否成功
@@ -209,17 +213,23 @@ async def download_all_kline_data(
 
     print(f"[LocalData] 下载日期范围：{start_date} 至 {end_date}")
 
-    tracker.set_status_sync(DownloadStatus.DOWNLOADING, "获取股票列表...")
-    stock_list = await gateway.get_stock_list()
+    tracker.set_status_sync(DownloadStatus.DOWNLOADING, "获取证券列表...")
+    stock_list = await gateway.get_stock_list(security_type=security_type)
 
     # 按市场分组（排除 SI，SI 用专用接口）
+    # 同时排除北交所 4xxxxx 和 8xxxxx 代码（创新层/基础层流动性差）
+    # ETF 无北交所，无需排除
     markets: Dict[str, List[dict]] = {}
     for s in stock_list:
         m = s.get('market', '')
+        code = s.get('code', '')
         if market_filter and m not in market_filter:
             continue
         if m == 'SI':
             continue  # 行业指数走专用接口
+        # 排除北交所创新层(4xxxxx)和基础层(8xxxxx)（仅股票类型）
+        if security_type == 'EXTRA_STOCK_A' and m == 'BJ' and (code.startswith('4') or code.startswith('8')):
+            continue
         if m not in markets:
             markets[m] = []
         markets[m].append(s)
@@ -227,7 +237,8 @@ async def download_all_kline_data(
     # 市场顺序：SH → SZ → BJ
     market_order = [m for m in ['SH', 'SZ', 'BJ'] if m in markets]
     total_stocks = sum(len(v) for v in markets.values())
-    print(f"[LocalData] 获取到 {total_stocks} 只股票（按市场: "
+    type_name = {'EXTRA_STOCK_A': '股票', 'EXTRA_ETF': 'ETF', 'EXTRA_INDEX_A': '指数'}.get(security_type, '证券')
+    print(f"[LocalData] 获取到 {total_stocks} 只{type_name}（按市场: "
           f"{', '.join(f'{m}={len(markets[m])}' for m in market_order)}）")
 
     # 计算交易天数和动态批次大小
@@ -340,6 +351,37 @@ async def download_all_kline_data(
         except Exception as e:
             print(f"[LocalData] 行业指数下载失败：{e}")
 
+    # 下载 ETF K 数据和专项数据（可选，仅在下载股票时触发）
+    if download_etf and security_type == 'EXTRA_STOCK_A':
+        tracker.set_status_sync(DownloadStatus.DOWNLOADING, "下载 ETF K 线数据...")
+        try:
+            # ETF K 线下载
+            etf_success = await download_all_kline_data(
+                batch_size=batch_size,
+                months=months,
+                start_date=start_date,
+                end_date=end_date,
+                broker_account=broker_account,
+                broker_password=broker_password,
+                calculate_factors=True,  # ETF 因子计算（自动识别ETF跳过不适用因子）
+                market_filter=['SH', 'SZ'],  # ETF 只有沪深两市
+                download_industry=False,
+                download_etf=False,  # 避免递归
+                security_type='EXTRA_ETF'
+            )
+            if etf_success:
+                print(f"[LocalData] ETF K 线下载完成")
+
+                # ETF 专项数据下载
+                tracker.set_status_sync(DownloadStatus.DOWNLOADING, "下载 ETF 专项数据...")
+                etf_special_result = download_etf_special_data()
+                print(f"[LocalData] ETF 专项数据下载完成：申赎={etf_special_result.get('pcf_count', 0)}, "
+                      f"份额={etf_special_result.get('share_count', 0)}, IOPV={etf_special_result.get('iopv_count', 0)}")
+            else:
+                print(f"[LocalData] ETF K 线下载失败")
+        except Exception as e:
+            print(f"[LocalData] ETF 数据下载失败：{e}")
+
     tracker.complete_sync()
 
     return failed_count < total_stocks * 0.5
@@ -354,7 +396,8 @@ def download_all_kline_data_sync(
     broker_password: str = "",
     calculate_factors: bool = True,
     market_filter: Optional[List[str]] = None,
-    download_industry: bool = False
+    download_industry: bool = False,
+    download_etf: bool = False
 ) -> bool:
     """同步版本的下载函数，用于后台任务"""
     async def _async_download():
@@ -367,7 +410,8 @@ def download_all_kline_data_sync(
             broker_password=broker_password,
             calculate_factors=calculate_factors,
             market_filter=market_filter,
-            download_industry=download_industry
+            download_industry=download_industry,
+            download_etf=download_etf
         )
 
     loop = asyncio.new_event_loop()
@@ -391,7 +435,8 @@ async def download_incremental_kline_data(
     use_trading_time_rule: bool = True,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
-    download_industry: bool = True
+    download_industry: bool = True,
+    download_etf: bool = True
 ) -> bool:
     """
     增量下载 K 线数据（带交易时间检查）
@@ -430,7 +475,8 @@ async def download_incremental_kline_data(
         broker_account=broker_account,
         broker_password=broker_password,
         calculate_factors=calculate_factors,
-        download_industry=download_industry
+        download_industry=download_industry,
+        download_etf=download_etf
     )
 
 
@@ -443,7 +489,8 @@ def download_incremental_kline_data_sync(
     use_trading_time_rule: bool = True,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
-    download_industry: bool = True
+    download_industry: bool = True,
+    download_etf: bool = True
 ) -> bool:
     """同步版本的增量下载函数"""
     async def _async_download():
@@ -456,7 +503,8 @@ def download_incremental_kline_data_sync(
             use_trading_time_rule=use_trading_time_rule,
             start_date=start_date,
             end_date=end_date,
-            download_industry=download_industry
+            download_industry=download_industry,
+            download_etf=download_etf
         )
 
     loop = asyncio.new_event_loop()
@@ -590,3 +638,225 @@ def download_industry_indices() -> Dict:
         'total_records': total_saved,
         'latest_date': str(max(latest_dates) if latest_dates else 'N/A')
     }
+
+
+async def download_all_etf_kline_data(
+    batch_size: int = 500,
+    months: int = 24,
+    start_date: str = None,
+    end_date: str = None,
+    broker_account: str = "",
+    broker_password: str = "",
+    calculate_factors: bool = True
+) -> bool:
+    """
+    下载 ETF K 线数据
+
+    Args:
+        batch_size: 每批次下载的数量（默认 500）
+        months: 下载的月数（默认 24 个月）
+        start_date: 开始日期（YYYY-MM-DD）
+        end_date: 结束日期（YYYY-MM-DD）
+        broker_account: 券商账户
+        broker_password: 券商密码
+        calculate_factors: 是否计算因子
+
+    Returns:
+        下载是否成功
+    """
+    return await download_all_kline_data(
+        batch_size=batch_size,
+        months=months,
+        start_date=start_date,
+        end_date=end_date,
+        broker_account=broker_account,
+        broker_password=broker_password,
+        calculate_factors=calculate_factors,
+        download_industry=False,  # ETF 不下载行业指数
+        security_type='EXTRA_ETF'
+    )
+
+
+def download_etf_special_data(etf_codes: List[str] = None) -> dict:
+    """
+    下载 ETF 专项数据：申赎数据、基金份额、IOPV 净值
+
+    Args:
+        etf_codes: ETF 代码列表，如不传则从数据库获取已有的 ETF
+
+    Returns:
+        {'success': bool, 'pcf_count': int, 'share_count': int, 'iopv_count': int}
+    """
+    from services.common.sdk_manager import get_sdk_manager
+    from services.common.database import get_sync_connection
+    from services.common.timezone import get_china_time
+    from services.common.security_type import is_etf_code
+    from services.common.structured_logger import get_logger
+
+    logger = get_logger("download")
+
+    # 获取 ETF 代码列表
+    if etf_codes is None:
+        conn = get_sync_connection("kline")
+        cursor = conn.cursor()
+        cursor.execute("SELECT DISTINCT stock_code FROM kline_data")
+        all_codes = [row[0] for row in cursor.fetchall()]
+        etf_codes = [code for code in all_codes if is_etf_code(code)]
+
+    if not etf_codes:
+        logger.log_event("etf_special_no_data", "无 ETF 代码，跳过专项数据下载")
+        return {'success': True, 'pcf_count': 0, 'share_count': 0, 'iopv_count': 0}
+
+    logger.log_event("etf_special_start", f"开始下载 {len(etf_codes)} 只 ETF 专项数据")
+
+    sdk_mgr = get_sdk_manager()
+    conn = get_sync_connection("kline")
+    cursor = conn.cursor()
+    now = get_china_time().isoformat()
+
+    result = {'success': True, 'pcf_count': 0, 'share_count': 0, 'iopv_count': 0}
+
+    # 1. 下载 ETF 申赎数据
+    try:
+        pcf_info, constituents = sdk_mgr.get_etf_pcf(etf_codes, priority=3)
+
+        if pcf_info is not None and len(pcf_info) > 0:
+            for idx, row in pcf_info.iterrows():
+                etf_code = str(idx)
+                trade_date = row.get('trading_day')
+                if trade_date and isinstance(trade_date, int):
+                    trade_date = f"{trade_date // 10000}-{(trade_date % 10000) // 100:02d}-{trade_date % 100:02d}"
+
+                cursor.execute('''
+                    INSERT OR REPLACE INTO etf_pcf_info
+                    (etf_code, trade_date, creation_redemption_unit, max_cash_ratio, publish,
+                     creation, redemption, estimate_cash_component, cash_component,
+                     nav_per_cu, nav, dividend_per_cu, creation_limit, redemption_limit, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    etf_code, trade_date,
+                    row.get('creation_redemption_unit'),  # 股数，不放大
+                    str(row.get('max_cash_ratio', '')),
+                    str(row.get('publish', '')),
+                    str(row.get('creation', '')),
+                    str(row.get('redemption', '')),
+                    row.get('estimate_cash_component') / 1e6 if row.get('estimate_cash_component') else 0,  # 放大100万倍
+                    row.get('cash_component') / 1e6 if row.get('cash_component') else 0,  # 放大100万倍
+                    row.get('nav_per_cu') / 1e6 if row.get('nav_per_cu') else 0,  # 放大100万倍
+                    row.get('nav') / 1e6 if row.get('nav') else 0,  # 放大100万倍
+                    row.get('dividend_per_cu') / 1e6 if row.get('dividend_per_cu') else 0,  # 放大100万倍
+                    row.get('creation_limit'),
+                    row.get('redemption_limit'),
+                    now
+                ))
+                result['pcf_count'] += 1
+
+        # 成分股数据
+        if constituents:
+            for etf_code, const_df in constituents.items():
+                if const_df is None or len(const_df) == 0:
+                    continue
+                # 获取该 ETF 的最新交易日
+                cursor.execute("SELECT trade_date FROM etf_pcf_info WHERE etf_code = ? ORDER BY trade_date DESC LIMIT 1", (etf_code,))
+                row = cursor.fetchone()
+                trade_date = row[0] if row else None
+
+                if trade_date:
+                    for _, const_row in const_df.iterrows():
+                        cursor.execute('''
+                            INSERT OR REPLACE INTO etf_pcf_constituent
+                            (etf_code, trade_date, underlying_symbol, component_share, substitute_flag, premium_ratio, discount_ratio)
+                            VALUES (?, ?, ?, ?, ?, ?, ?)
+                        ''', (
+                            etf_code, trade_date,
+                            const_row.get('underlying_symbol'),
+                            const_row.get('component_share'),
+                            str(const_row.get('substitute_flag', '')),
+                            const_row.get('premium_ratio'),
+                            const_row.get('discount_ratio')
+                        ))
+
+        conn.commit()
+        logger.log_event("etf_pcf_done", f"ETF 申赎数据下载完成：{result['pcf_count']} 条")
+
+    except Exception as e:
+        logger.log_event("etf_pcf_error", f"ETF 申赎数据下载失败：{e}")
+        result['success'] = False
+
+    # 2. 下载 ETF 基金份额
+    try:
+        fund_share = sdk_mgr.get_fund_share(etf_codes, priority=3)
+
+        if fund_share:
+            for etf_code, share_df in fund_share.items():
+                if share_df is None or len(share_df) == 0:
+                    continue
+                for idx, row in share_df.iterrows():
+                    trade_date = idx
+                    if isinstance(trade_date, int):
+                        trade_date = f"{trade_date // 10000}-{(trade_date % 10000) // 100:02d}-{trade_date % 100:02d}"
+                    elif hasattr(trade_date, 'strftime'):
+                        trade_date = trade_date.strftime('%Y-%m-%d')
+
+                    cursor.execute('''
+                        INSERT OR REPLACE INTO etf_fund_share
+                        (etf_code, trade_date, fund_share, change_reason, is_consolidated_data, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                    ''', (
+                        etf_code, trade_date,
+                        row.get('FUND_SHARE'),
+                        str(row.get('CHANGE_REASON', '')),
+                        row.get('IS_CONSOLIDATED_DATA'),
+                        now
+                    ))
+                    result['share_count'] += 1
+
+            conn.commit()
+            logger.log_event("etf_share_done", f"ETF 基金份额下载完成：{result['share_count']} 条")
+
+    except Exception as e:
+        logger.log_event("etf_share_error", f"ETF 基金份额下载失败：{e}")
+
+    # 3. 下载 ETF IOPV 净值
+    try:
+        fund_iopv = sdk_mgr.get_fund_iopv(etf_codes, priority=3)
+
+        if fund_iopv:
+            for etf_code, iopv_df in fund_iopv.items():
+                if iopv_df is None or len(iopv_df) == 0:
+                    continue
+                for idx, row in iopv_df.iterrows():
+                    trade_date = idx
+                    if isinstance(trade_date, int):
+                        trade_date = f"{trade_date // 10000}-{(trade_date % 10000) // 100:02d}-{trade_date % 100:02d}"
+                    elif hasattr(trade_date, 'strftime'):
+                        trade_date = trade_date.strftime('%Y-%m-%d')
+
+                    iopv = row.get('IOPV') or row.get('iopv')
+                    nav = row.get('NAV') or row.get('nav')
+
+                    # 计算折溢价
+                    premium_discount = None
+                    premium_discount_pct = None
+                    if iopv and nav and nav > 0:
+                        premium_discount = iopv - nav
+                        premium_discount_pct = (premium_discount / nav) * 100
+
+                    cursor.execute('''
+                        INSERT OR REPLACE INTO etf_iopv
+                        (etf_code, trade_date, iopv, nav, premium_discount, premium_discount_pct, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ''', (
+                        etf_code, trade_date,
+                        iopv, nav, premium_discount, premium_discount_pct, now
+                    ))
+                    result['iopv_count'] += 1
+
+            conn.commit()
+            logger.log_event("etf_iopv_done", f"ETF IOPV 净值下载完成：{result['iopv_count']} 条")
+
+    except Exception as e:
+        logger.log_event("etf_iopv_error", f"ETF IOPV 净值下载失败：{e}")
+
+    logger.log_event("etf_special_done", f"ETF 专项数据下载完成：pcf={result['pcf_count']}, share={result['share_count']}, iopv={result['iopv_count']}")
+    return result
