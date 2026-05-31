@@ -1,0 +1,26 @@
+[Unit]
+Description=StockWinner MCP HTTP Service (for OpenClaw/Hermes)
+After=network.target stockwinner-backend.service
+Requires=stockwinner-backend.service
+
+[Service]
+Type=simple
+User=bobo
+Group=bobo
+WorkingDirectory=/home/bobo/StockWinner
+ExecStart=/usr/bin/python3 services/mcp/server.py --http --host 0.0.0.0 --port 9000
+Restart=always
+RestartSec=10
+StandardOutput=append:/home/bobo/StockWinner/logs/mcp.log
+StandardError=append:/home/bobo/StockWinner/logs/mcp.log
+
+# 环境变量
+Environment="PYTHONUNBUFFERED=1"
+Environment="AGENT_API_KEY=sk-mcp-proxy"
+Environment="AGENT_API_BASE_URL=http://localhost:8080/api/v1/agent"
+
+# 资源限制
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
