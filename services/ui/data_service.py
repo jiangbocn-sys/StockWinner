@@ -26,11 +26,7 @@ async def get_index_list(
 ):
     """指数代码列表（上交所+深交所指数）"""
     db = get_db_manager()
-    account = await db.fetchone(
-        "SELECT 1 FROM accounts WHERE account_id = ? AND is_active = 1", (account_id,)
-    )
-    if not account:
-        raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
+    await validate_account_active(account_id)
 
     try:
         from services.trading.gateway import get_gateway
@@ -50,11 +46,7 @@ async def get_index_kline(
 ):
     """指数 K 线数据"""
     db = get_db_manager()
-    account = await db.fetchone(
-        "SELECT 1 FROM accounts WHERE account_id = ? AND is_active = 1", (account_id,)
-    )
-    if not account:
-        raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
+    await validate_account_active(account_id)
 
     try:
         from services.trading.gateway import get_gateway
@@ -78,11 +70,7 @@ async def get_industry_list(
 ):
     """申万行业分类列表"""
     db = get_db_manager()
-    account = await db.fetchone(
-        "SELECT 1 FROM accounts WHERE account_id = ? AND is_active = 1", (account_id,)
-    )
-    if not account:
-        raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
+    await validate_account_active(account_id)
 
     try:
         sdk_mgr = get_sdk_manager()
@@ -107,11 +95,7 @@ async def get_industry_kline(
 ):
     """行业指数日行情数据（含 OHLCV + PE/PB）"""
     db = get_db_manager()
-    account = await db.fetchone(
-        "SELECT 1 FROM accounts WHERE account_id = ? AND is_active = 1", (account_id,)
-    )
-    if not account:
-        raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
+    await validate_account_active(account_id)
 
     try:
         sdk_mgr = get_sdk_manager()
@@ -142,11 +126,7 @@ async def get_industry_constituent(
 ):
     """行业成分股列表"""
     db = get_db_manager()
-    account = await db.fetchone(
-        "SELECT 1 FROM accounts WHERE account_id = ? AND is_active = 1", (account_id,)
-    )
-    if not account:
-        raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
+    await validate_account_active(account_id)
 
     try:
         sdk_mgr = get_sdk_manager()
@@ -170,11 +150,7 @@ async def get_index_constituent(
 ):
     """指数成分股列表"""
     db = get_db_manager()
-    account = await db.fetchone(
-        "SELECT 1 FROM accounts WHERE account_id = ? AND is_active = 1", (account_id,)
-    )
-    if not account:
-        raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
+    await validate_account_active(account_id)
 
     try:
         sdk_mgr = get_sdk_manager()
@@ -246,11 +222,7 @@ async def get_income_statement(
 ):
     """利润表（三表之一）"""
     db = get_db_manager()
-    account = await db.fetchone(
-        "SELECT 1 FROM accounts WHERE account_id = ? AND is_active = 1", (account_id,)
-    )
-    if not account:
-        raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
+    await validate_account_active(account_id)
 
     try:
         sdk_mgr = get_sdk_manager()
@@ -268,11 +240,7 @@ async def get_balance_sheet(
 ):
     """资产负债表（三表之一）"""
     db = get_db_manager()
-    account = await db.fetchone(
-        "SELECT 1 FROM accounts WHERE account_id = ? AND is_active = 1", (account_id,)
-    )
-    if not account:
-        raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
+    await validate_account_active(account_id)
 
     try:
         sdk_mgr = get_sdk_manager()
@@ -290,11 +258,7 @@ async def get_cash_flow(
 ):
     """现金流量表（三表之一）"""
     db = get_db_manager()
-    account = await db.fetchone(
-        "SELECT 1 FROM accounts WHERE account_id = ? AND is_active = 1", (account_id,)
-    )
-    if not account:
-        raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
+    await validate_account_active(account_id)
 
     try:
         sdk_mgr = get_sdk_manager()
@@ -312,11 +276,7 @@ async def get_profit_notice(
 ):
     """业绩预告"""
     db = get_db_manager()
-    account = await db.fetchone(
-        "SELECT 1 FROM accounts WHERE account_id = ? AND is_active = 1", (account_id,)
-    )
-    if not account:
-        raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
+    await validate_account_active(account_id)
 
     try:
         sdk_mgr = get_sdk_manager()
@@ -340,11 +300,7 @@ async def get_profit_express(
 ):
     """业绩快报"""
     db = get_db_manager()
-    account = await db.fetchone(
-        "SELECT 1 FROM accounts WHERE account_id = ? AND is_active = 1", (account_id,)
-    )
-    if not account:
-        raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
+    await validate_account_active(account_id)
 
     try:
         sdk_mgr = get_sdk_manager()
@@ -377,11 +333,7 @@ async def get_dragon_tiger(
     需显式传入 start_date 和 end_date，格式 YYYYMMDD。
     """
     db = get_db_manager()
-    account = await db.fetchone(
-        "SELECT 1 FROM accounts WHERE account_id = ? AND is_active = 1", (account_id,)
-    )
-    if not account:
-        raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
+    await validate_account_active(account_id)
 
     try:
         sdk_mgr = get_sdk_manager()
@@ -413,11 +365,7 @@ async def get_margin_summary(
     需显式传入 start_date 和 end_date，格式 YYYYMMDD。
     """
     db = get_db_manager()
-    account = await db.fetchone(
-        "SELECT 1 FROM accounts WHERE account_id = ? AND is_active = 1", (account_id,)
-    )
-    if not account:
-        raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
+    await validate_account_active(account_id)
 
     try:
         sdk_mgr = get_sdk_manager()
@@ -446,11 +394,7 @@ async def get_margin_detail(
     需显式传入 start_date 和 end_date，格式 YYYYMMDD。
     """
     db = get_db_manager()
-    account = await db.fetchone(
-        "SELECT 1 FROM accounts WHERE account_id = ? AND is_active = 1", (account_id,)
-    )
-    if not account:
-        raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
+    await validate_account_active(account_id)
 
     try:
         sdk_mgr = get_sdk_manager()
@@ -483,11 +427,7 @@ async def get_block_trading(
     需显式传入 start_date 和 end_date，格式 YYYYMMDD。
     """
     db = get_db_manager()
-    account = await db.fetchone(
-        "SELECT 1 FROM accounts WHERE account_id = ? AND is_active = 1", (account_id,)
-    )
-    if not account:
-        raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
+    await validate_account_active(account_id)
 
     try:
         sdk_mgr = get_sdk_manager()
@@ -514,11 +454,7 @@ async def get_treasury_yield(
 ):
     """国债收益率曲线"""
     db = get_db_manager()
-    account = await db.fetchone(
-        "SELECT 1 FROM accounts WHERE account_id = ? AND is_active = 1", (account_id,)
-    )
-    if not account:
-        raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
+    await validate_account_active(account_id)
 
     try:
         sdk_mgr = get_sdk_manager()

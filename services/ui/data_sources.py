@@ -226,3 +226,32 @@ async def check_data_sources_health_stream():
         "Connection": "keep-alive",
         "X-Accel-Buffering": "no",
     })
+
+
+@router.get("/api/v1/ui/data-sources/usage-stats")
+async def get_data_source_usage_stats(
+    provider_id: Optional[str] = None,
+    days: int = 7,
+) -> Dict:
+    """获取数据源使用统计
+
+    Args:
+        provider_id: 指定数据源（可选，不传则返回全部）
+        days: 统计天数（默认7天）
+    """
+    from services.data.channel.router import get_channel_router
+
+    try:
+        router = get_channel_router()
+        stats = await router.get_usage_stats(provider_id, days)
+        # 内存统计（当前运行期）
+        memory_stats = router.get_call_stats()
+    except Exception as e:
+        return {"success": False, "message": str(e)}
+
+    return {
+        "success": True,
+        "db_stats": stats,
+        "memory_stats": memory_stats,
+        "query_params": {"provider_id": provider_id, "days": days},
+    }

@@ -265,12 +265,7 @@ async def get_stock_quote(
     db = get_db_manager()
 
     # 验证账户
-    account = await db.fetchone(
-        "SELECT 1 FROM accounts WHERE account_id = ? AND is_active = 1",
-        (account_id,)
-    )
-    if not account:
-        raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
+    await validate_account_active(account_id)
 
     try:
         from services.common.price_cache import get_price_cache
@@ -364,12 +359,7 @@ async def get_batch_quotes(
     db = get_db_manager()
 
     # 验证账户
-    account = await db.fetchone(
-        "SELECT 1 FROM accounts WHERE account_id = ? AND is_active = 1",
-        (account_id,)
-    )
-    if not account:
-        raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
+    await validate_account_active(account_id)
 
     if not stock_codes or len(stock_codes) == 0:
         raise HTTPException(status_code=400, detail="股票代码列表不能为空")
@@ -482,12 +472,7 @@ async def get_kline_data(
     db = get_db_manager()
 
     # 验证账户
-    account = await db.fetchone(
-        "SELECT 1 FROM accounts WHERE account_id = ? AND is_active = 1",
-        (account_id,)
-    )
-    if not account:
-        raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
+    await validate_account_active(account_id)
 
     # 验证周期参数 - 扩展支持更多周期
     valid_periods = ["1m", "3m", "5m", "10m", "15m", "30m", "60m", "120m", "day", "week", "month"]
@@ -596,11 +581,7 @@ async def get_local_kline(
         factor_fields: 指定因子字段，如 "ma5,ma10,boll_upper"
     """
     db = get_db_manager()
-    account = await db.fetchone(
-        "SELECT 1 FROM accounts WHERE account_id = ? AND is_active = 1", (account_id,)
-    )
-    if not account:
-        raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
+    await validate_account_active(account_id)
 
     # 规范化股票代码
     if "." not in stock_code:
@@ -876,12 +857,7 @@ async def get_latest_kline(
     db = get_db_manager()
 
     # 验证账户
-    account = await db.fetchone(
-        "SELECT 1 FROM accounts WHERE account_id = ? AND is_active = 1",
-        (account_id,)
-    )
-    if not account:
-        raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
+    await validate_account_active(account_id)
 
     # 验证周期参数 - 扩展支持更多周期
     valid_periods = ["1m", "3m", "5m", "10m", "15m", "30m", "60m", "120m", "day", "week", "month"]
@@ -924,9 +900,7 @@ async def get_stock_info(
 ):
     """从本地 kline.db 查询股票名称和最新价格"""
     db = get_db_manager()
-    account = await db.fetchone("SELECT 1 FROM accounts WHERE account_id = ? AND is_active = 1", (account_id,))
-    if not account:
-        raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
+    await validate_account_active(account_id)
 
     try:
         conn = get_sync_connection("kline")
@@ -986,9 +960,7 @@ async def get_stock_factors(
     db = get_db_manager()
 
     # 验证账户
-    account = await db.fetchone("SELECT * FROM accounts WHERE account_id = ? AND is_active = 1", (account_id,))
-    if not account:
-        raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
+    await validate_account_active(account_id)
 
     conn = get_sync_connection("kline")
     cursor = conn.cursor()

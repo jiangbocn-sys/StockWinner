@@ -227,12 +227,7 @@ async def list_position_rules(account_id: str = PathParam(..., description="账�
     db = get_db_manager()
 
     # 验证账户
-    account = await db.fetchone(
-        "SELECT 1 FROM accounts WHERE account_id = ? AND is_active = 1",
-        (account_id,)
-    )
-    if not account:
-        raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
+    await validate_account_active(account_id)
 
     rules = await db.fetchall(
         "SELECT * FROM position_adjust_rules WHERE account_id = ? ORDER BY priority DESC, id ASC",
@@ -268,12 +263,7 @@ async def translate_trigger_condition(
     db = get_db_manager()
 
     # 验证账户
-    account = await db.fetchone(
-        "SELECT 1 FROM accounts WHERE account_id = ? AND is_active = 1",
-        (account_id,)
-    )
-    if not account:
-        raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
+    await validate_account_active(account_id)
 
     try:
         # 调用LLM翻译
@@ -318,12 +308,7 @@ async def create_position_rule(
     db = get_db_manager()
 
     # 验证账户
-    account = await db.fetchone(
-        "SELECT 1 FROM accounts WHERE account_id = ? AND is_active = 1",
-        (account_id,)
-    )
-    if not account:
-        raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
+    await validate_account_active(account_id)
 
     # 验证参数范围
     if target_max_total_pct is not None and not (0.0 <= target_max_total_pct <= 1.0):
@@ -373,12 +358,7 @@ async def create_rule_from_natural_language(
     db = get_db_manager()
 
     # 验证账户
-    account = await db.fetchone(
-        "SELECT 1 FROM accounts WHERE account_id = ? AND is_active = 1",
-        (account_id,)
-    )
-    if not account:
-        raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
+    await validate_account_active(account_id)
 
     try:
         # 调用LLM翻译

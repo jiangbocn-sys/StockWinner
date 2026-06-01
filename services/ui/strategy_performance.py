@@ -18,9 +18,8 @@ async def get_performance_summary(
     strategy_id: Optional[int] = Query(None, description="策略 ID，不传则返回所有策略汇总"),
 ):
     """策略效能汇总：胜率、总盈亏、执行率、交易次数"""
-    account_manager = get_account_manager()
-    if not await account_manager.validate_account(account_id):
-        raise HTTPException(status_code=404, detail=f"账户不存在：{account_id}")
+
+    await validate_account_active(account_id)
 
     db = get_db_manager()
 
@@ -151,9 +150,8 @@ async def get_strategy_selections(
     limit: int = Query(200, description="返回数量"),
 ):
     """选股明细：选出日期、价格、是否买入"""
-    account_manager = get_account_manager()
-    if not await account_manager.validate_account(account_id):
-        raise HTTPException(status_code=404, detail=f"账户不存在：{account_id}")
+
+    await validate_account_active(account_id)
 
     db = get_db_manager()
 
@@ -195,9 +193,8 @@ async def get_strategy_trades(
     limit: int = Query(200, description="返回数量"),
 ):
     """交易明细：买卖价格、盈亏、持仓天数"""
-    account_manager = get_account_manager()
-    if not await account_manager.validate_account(account_id):
-        raise HTTPException(status_code=404, detail=f"账户不存在：{account_id}")
+
+    await validate_account_active(account_id)
 
     db = get_db_manager()
 
@@ -227,9 +224,8 @@ async def get_equity_curve(
     strategy_id: Optional[int] = Query(None, description="策略 ID，不传则返回全部"),
 ):
     """权益曲线：按日期累计盈亏"""
-    account_manager = get_account_manager()
-    if not await account_manager.validate_account(account_id):
-        raise HTTPException(status_code=404, detail=f"账户不存在：{account_id}")
+
+    await validate_account_active(account_id)
 
     db = get_db_manager()
 

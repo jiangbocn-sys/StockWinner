@@ -30,12 +30,8 @@ async def get_signal_allocation_config(
     db = get_db_manager()
 
     # 验证账户
-    account = await db.fetchone(
-        "SELECT 1 FROM accounts WHERE account_id = ? AND is_active = 1",
-        (account_id,)
-    )
-    if not account:
-        raise HTTPException(status_code=404, detail=f"账户不存在：{account_id}")
+    
+    await validate_account_active(account_id)
 
     # 获取策略
     strategy = await db.fetchone(
@@ -82,12 +78,8 @@ async def update_signal_allocation_config(
     db = get_db_manager()
 
     # 验证账户
-    account = await db.fetchone(
-        "SELECT 1 FROM accounts WHERE account_id = ? AND is_active = 1",
-        (account_id,)
-    )
-    if not account:
-        raise HTTPException(status_code=404, detail=f"账户不存在：{account_id}")
+    
+    await validate_account_active(account_id)
 
     # 获取策略
     strategy = await db.fetchone(

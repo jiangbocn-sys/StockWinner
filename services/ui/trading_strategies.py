@@ -23,18 +23,32 @@ async def list_trading_strategies(
 ):
     """列出个股交易策略"""
     db = get_db_manager()
-    account = await db.fetchone(
-        "SELECT 1 FROM accounts WHERE account_id = ? AND is_active = 1",
-        (account_id,)
-    )
-    if not account:
-        raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
+    await validate_account_active(account_id)
 
     strategies = await db.fetchall(
         "SELECT * FROM trading_strategies WHERE account_id = ? ORDER BY updated_at DESC",
         (account_id,)
     )
     return {"success": True, "strategies": strategies}
+
+
+@router.get("/api/v1/ui/{account_id}/trading-strategies/stock/{stock_code}")
+async def get_stock_trading_strategy(
+    account_id: str = Path(..., description="账户 ID"),
+    stock_code: str = Path(..., description="股票代码"),
+):
+    """获取单只股票的止盈止损策略"""
+    db = get_db_manager()
+    await validate_account_active(account_id)
+
+    strategy = await db.fetchone(
+        "SELECT * FROM trading_strategies WHERE account_id = ? AND stock_code = ?",
+        (account_id, stock_code)
+    )
+    if strategy:
+        return {"success": True, "strategy": strategy, "exists": True}
+    else:
+        return {"success": True, "strategy": None, "exists": False}
 
 
 @router.post("/api/v1/ui/{account_id}/trading-strategies/stock")
@@ -55,12 +69,7 @@ async def upsert_stock_trading_strategy(
     db = get_db_manager()
 
     # 验证账户
-    account = await db.fetchone(
-        "SELECT 1 FROM accounts WHERE account_id = ? AND is_active = 1",
-        (account_id,)
-    )
-    if not account:
-        raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
+    await validate_account_active(account_id)
 
     # 验证参数范围
     if stop_loss_pct is not None and not (0.0 <= stop_loss_pct <= 1.0):

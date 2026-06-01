@@ -21,9 +21,7 @@ async def get_monitoring_status(account_id: str = Path(..., description="账户 
     db = get_db_manager()
 
     # 验证账户存在即可
-    account = await db.fetchone("SELECT 1 FROM accounts WHERE account_id = ? AND is_active = 1", (account_id,))
-    if not account:
-        raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
+    await validate_account_active(account_id)
 
     monitor = get_trading_monitor()
     status = monitor.get_status()
@@ -48,9 +46,7 @@ async def get_signals(
     db = get_db_manager()
 
     # 从数据库验证账户
-    account = await db.fetchone("SELECT * FROM accounts WHERE account_id = ? AND is_active = 1", (account_id,))
-    if not account:
-        raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
+    await validate_account_active(account_id)
 
     conditions = ["account_id = ?"]
     params = [account_id]
@@ -107,9 +103,7 @@ async def get_signal(
     db = get_db_manager()
 
     # 从数据库验证账户
-    account = await db.fetchone("SELECT * FROM accounts WHERE account_id = ? AND is_active = 1", (account_id,))
-    if not account:
-        raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
+    await validate_account_active(account_id)
 
     signal = await db.fetchone(
         "SELECT * FROM trading_signals WHERE id = ? AND account_id = ?",
@@ -148,9 +142,7 @@ async def execute_signal(
             }
 
     # 从数据库验证账户
-    account = await db.fetchone("SELECT * FROM accounts WHERE account_id = ? AND is_active = 1", (account_id,))
-    if not account:
-        raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
+    await validate_account_active(account_id)
 
     # 检查信号是否存在
     signal = await db.fetchone(
@@ -247,9 +239,7 @@ async def cancel_signal(
     db = get_db_manager()
 
     # 从数据库验证账户
-    account = await db.fetchone("SELECT * FROM accounts WHERE account_id = ? AND is_active = 1", (account_id,))
-    if not account:
-        raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
+    await validate_account_active(account_id)
 
     signal = await db.fetchone(
         "SELECT * FROM trading_signals WHERE id = ? AND account_id = ?",
@@ -306,9 +296,7 @@ async def clear_signals(
     db = get_db_manager()
 
     # 从数据库验证账户
-    account = await db.fetchone("SELECT * FROM accounts WHERE account_id = ? AND is_active = 1", (account_id,))
-    if not account:
-        raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
+    await validate_account_active(account_id)
 
     if status:
         await db.delete("trading_signals", "account_id = ? AND status = ?", (account_id, status))
@@ -330,9 +318,7 @@ async def get_manual_order_quote(
 ):
     """从缓存/SDK 获取实时行情（用于下单前的价格参考和名称填充）"""
     db = get_db_manager()
-    account = await db.fetchone("SELECT * FROM accounts WHERE account_id = ? AND is_active = 1", (account_id,))
-    if not account:
-        raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
+    await validate_account_active(account_id)
 
     from services.common.stock_code import normalize_stock_code
     normalized_code = normalize_stock_code(stock_code)
@@ -477,9 +463,7 @@ async def calculate_manual_order(
 ):
     """预计算手动订单：可买/可卖数量、总价、手续费"""
     db = get_db_manager()
-    account = await db.fetchone("SELECT * FROM accounts WHERE account_id = ? AND is_active = 1", (account_id,))
-    if not account:
-        raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
+    await validate_account_active(account_id)
 
     if trade_type not in ("buy", "sell"):
         return {"success": False, "message": "trade_type 必须为 buy 或 sell"}
@@ -554,9 +538,7 @@ async def submit_manual_order(
     """提交手动委托订单 → 创建 trading_signals 记录，由监控程序扫描执行"""
     db = get_db_manager()
 
-    account = await db.fetchone("SELECT * FROM accounts WHERE account_id = ? AND is_active = 1", (account_id,))
-    if not account:
-        raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
+    await validate_account_active(account_id)
 
     if trade_type not in ("buy", "sell"):
         return {"success": False, "message": "trade_type 必须为 buy 或 sell"}
@@ -716,9 +698,7 @@ async def immediate_sell_position(
     normalized_code = normalize_stock_code(stock_code)
 
     db = get_db_manager()
-    account = await db.fetchone("SELECT * FROM accounts WHERE account_id = ? AND is_active = 1", (account_id,))
-    if not account:
-        raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
+    await validate_account_active(account_id)
 
     # 检查持仓
     position = await db.fetchone(

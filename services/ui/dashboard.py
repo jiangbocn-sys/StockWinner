@@ -8,6 +8,8 @@ from services.common.account_manager import get_account_manager
 from services.common.database import get_db_manager, get_sync_connection
 from services.common.timezone import get_china_time
 from services._version import VERSION, get_start_time
+from services.auth.account_validator import validate_account_active
+from services.common.events import subscribe, EVENT_PROVIDER_STATUS
 
 router = APIRouter()
 
@@ -280,9 +282,8 @@ async def get_public_system_status():
 @router.get("/api/v1/ui/{account_id}/dashboard")
 async def get_dashboard(account_id: str = Path(..., description="账户 ID")):
     """仪表盘总览数据"""
-    account_manager = get_account_manager()
-    if not await account_manager.validate_account(account_id):
-        raise HTTPException(status_code=404, detail=f"账户不存在：{account_id}")
+
+    await validate_account_active(account_id)
 
     db = get_db_manager()
 
@@ -514,9 +515,8 @@ async def get_dashboard(account_id: str = Path(..., description="账户 ID")):
 @router.get("/api/v1/ui/{account_id}/health")
 async def health_check(account_id: str = Path(..., description="账户 ID")):
     """健康检查"""
-    account_manager = get_account_manager()
-    if not await account_manager.validate_account(account_id):
-        raise HTTPException(status_code=404, detail=f"账户不存在：{account_id}")
+
+    await validate_account_active(account_id)
 
     account_name = await account_manager.get_account_display_name(account_id)
     return {

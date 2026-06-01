@@ -16,10 +16,7 @@ router = APIRouter()
 @router.get("/api/v1/ui/{account_id}/trades/today")
 async def get_trades_today(account_id: str = Path(..., description="账户 ID")):
     """获取今日交易记录"""
-    account_manager = get_account_manager()
-
-    if not await account_manager.validate_account(account_id):
-        raise HTTPException(status_code=404, detail=f"账户不存在：{account_id}")
+    await validate_account_active(account_id)
 
     db = get_db_manager()
     today = get_china_time().strftime("%Y-%m-%d")
@@ -60,10 +57,7 @@ async def get_trades(
     limit: int = Query(50, description="返回数量限制")
 ):
     """获取交易记录（支持筛选）"""
-    account_manager = get_account_manager()
-
-    if not await account_manager.validate_account(account_id):
-        raise HTTPException(status_code=404, detail=f"账户不存在：{account_id}")
+    await validate_account_active(account_id)
 
     db = get_db_manager()
 
@@ -123,9 +117,8 @@ async def get_trading_signals(
     offset: int = Query(0, description="偏移量")
 ):
     """获取交易信号列表"""
-    account_manager = get_account_manager()
-    if not await account_manager.validate_account(account_id):
-        raise HTTPException(status_code=404, detail=f"账户不存在：{account_id}")
+
+    await validate_account_active(account_id)
 
     db = get_db_manager()
 
@@ -174,9 +167,8 @@ async def list_trading_strategies(
     enabled_only: bool = Query(False)
 ):
     """列出交易策略"""
-    account_manager = get_account_manager()
-    if not await account_manager.validate_account(account_id):
-        raise HTTPException(status_code=404, detail=f"账户不存在：{account_id}")
+
+    await validate_account_active(account_id)
 
     db = get_db_manager()
 
@@ -200,9 +192,8 @@ async def create_trading_strategy(
     body: TradingStrategyCreate = Body(...)
 ):
     """创建交易策略"""
-    account_manager = get_account_manager()
-    if not await account_manager.validate_account(account_id):
-        raise HTTPException(status_code=404, detail=f"账户不存在：{account_id}")
+
+    await validate_account_active(account_id)
 
     db = get_db_manager()
 
@@ -227,9 +218,8 @@ async def update_trading_strategy(
     body: TradingStrategyUpdate = Body(...)
 ):
     """更新交易策略"""
-    account_manager = get_account_manager()
-    if not await account_manager.validate_account(account_id):
-        raise HTTPException(status_code=404, detail=f"账户不存在：{account_id}")
+
+    await validate_account_active(account_id)
 
     db = get_db_manager()
 
@@ -253,9 +243,8 @@ async def delete_trading_strategy(
     strategy_id: int = Path(...)
 ):
     """删除交易策略"""
-    account_manager = get_account_manager()
-    if not await account_manager.validate_account(account_id):
-        raise HTTPException(status_code=404, detail=f"账户不存在：{account_id}")
+
+    await validate_account_active(account_id)
 
     db = get_db_manager()
 
@@ -278,9 +267,8 @@ async def toggle_trading_strategy(
     strategy_id: int = Path(...)
 ):
     """启用/停用交易策略"""
-    account_manager = get_account_manager()
-    if not await account_manager.validate_account(account_id):
-        raise HTTPException(status_code=404, detail=f"账户不存在：{account_id}")
+
+    await validate_account_active(account_id)
 
     db = get_db_manager()
 

@@ -222,9 +222,7 @@ async def list_strategy_tasks(account_id: str = Path(..., description="账户 ID
     from services.common.database import get_db_manager
     db = get_db_manager()
 
-    account = await db.fetchone("SELECT * FROM accounts WHERE account_id = ? AND is_active = 1", (account_id,))
-    if not account:
-        raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
+    await validate_account_active(account_id)
 
     rows = await db.fetchall("""
         SELECT t.*, s.name as strategy_name, g.name as group_name
@@ -494,9 +492,7 @@ async def create_strategy_task(
     import re
     db = get_db_manager()
 
-    account = await db.fetchone("SELECT * FROM accounts WHERE account_id = ? AND is_active = 1", (account_id,))
-    if not account:
-        raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
+    await validate_account_active(account_id)
 
     # 自动翻译中文 cron → 标准 cron
     cron_re = re.compile(r'^[0-9*,/\-]+$')
@@ -609,9 +605,7 @@ async def update_strategy_task(
     from services.common.database import get_db_manager
     db = get_db_manager()
 
-    account = await db.fetchone("SELECT * FROM accounts WHERE account_id = ? AND is_active = 1", (account_id,))
-    if not account:
-        raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
+    await validate_account_active(account_id)
 
     task = await db.fetchone("SELECT * FROM strategy_tasks WHERE id = ? AND (account_id = ? OR account_id = 'SYSTEM')", (task_id, account_id))
     if not task:
@@ -652,9 +646,7 @@ async def delete_strategy_task(
     from services.common.database import get_db_manager
     db = get_db_manager()
 
-    account = await db.fetchone("SELECT * FROM accounts WHERE account_id = ? AND is_active = 1", (account_id,))
-    if not account:
-        raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
+    await validate_account_active(account_id)
 
     task = await db.fetchone("SELECT id FROM strategy_tasks WHERE id = ? AND (account_id = ? OR account_id = 'SYSTEM')", (task_id, account_id))
     if not task:
@@ -677,9 +669,7 @@ async def run_strategy_task_manual(
     from services.common.database import get_db_manager
     db = get_db_manager()
 
-    account = await db.fetchone("SELECT * FROM accounts WHERE account_id = ? AND is_active = 1", (account_id,))
-    if not account:
-        raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
+    await validate_account_active(account_id)
 
     task = await db.fetchone("SELECT id FROM strategy_tasks WHERE id = ? AND (account_id = ? OR account_id = 'SYSTEM')", (task_id, account_id))
     if not task:

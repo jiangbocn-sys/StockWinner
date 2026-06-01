@@ -183,12 +183,7 @@ async def get_positions(
     db = get_db_manager()
 
     # 从数据库验证账户
-    account = await db.fetchone(
-        "SELECT 1 FROM accounts WHERE account_id = ? AND is_active = 1",
-        (account_id,)
-    )
-    if not account:
-        raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
+    await validate_account_active(account_id)
 
     if stock_code:
         positions = await db.fetchall(
@@ -259,12 +254,8 @@ async def get_strategy_position_stats(
     """按策略分组统计持仓（含策略现金）"""
     db = get_db_manager()
 
-    account = await db.fetchone(
-        "SELECT available_cash FROM accounts WHERE account_id = ? AND is_active = 1",
-        (account_id,)
-    )
-    if not account:
-        raise HTTPException(status_code=404, detail=f"账户不存在：{account_id}")
+    
+    await validate_account_active(account_id)
 
     available_cash = account.get("available_cash", 0)
 
@@ -421,12 +412,8 @@ async def get_position(
     db = get_db_manager()
 
     # 从数据库验证账户
-    account = await db.fetchone(
-        "SELECT 1 FROM accounts WHERE account_id = ? AND is_active = 1",
-        (account_id,)
-    )
-    if not account:
-        raise HTTPException(status_code=404, detail=f"账户不存在：{account_id}")
+    
+    await validate_account_active(account_id)
 
     position = await db.fetchone(
         "SELECT * FROM stock_positions WHERE account_id = ? AND stock_code = ?",
@@ -446,12 +433,8 @@ async def dsa_analyze_position(
 ):
     """对指定持仓股调用 DSA 分析，等待完成后返回结果"""
     db = get_db_manager()
-    account = await db.fetchone(
-        "SELECT 1 FROM accounts WHERE account_id = ? AND is_active = 1",
-        (account_id,)
-    )
-    if not account:
-        raise HTTPException(status_code=404, detail=f"账户不存在：{account_id}")
+    
+    await validate_account_active(account_id)
 
     # 提交 DSA 分析任务
     async with httpx.AsyncClient(timeout=30) as client:
@@ -539,12 +522,7 @@ async def get_closed_positions(
     """
     db = get_db_manager()
 
-    account = await db.fetchone(
-        "SELECT 1 FROM accounts WHERE account_id = ? AND is_active = 1",
-        (account_id,)
-    )
-    if not account:
-        raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
+    await validate_account_active(account_id)
 
     # 1. 找出所有有买入记录的股票（含策略ID）
     buy_stocks = await db.fetchall("""
@@ -662,12 +640,8 @@ async def dsa_analyze_any_stock(
 ):
     """对任意股票调用 DSA 分析（不要求有持仓）"""
     db = get_db_manager()
-    account = await db.fetchone(
-        "SELECT 1 FROM accounts WHERE account_id = ? AND is_active = 1",
-        (account_id,)
-    )
-    if not account:
-        raise HTTPException(status_code=404, detail=f"账户不存在：{account_id}")
+    
+    await validate_account_active(account_id)
 
     # 提交 DSA 分析任务
     async with httpx.AsyncClient(timeout=30) as client:

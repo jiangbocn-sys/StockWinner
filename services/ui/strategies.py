@@ -21,12 +21,7 @@ async def get_strategies(
     db = get_db_manager()
 
     # 从数据库验证账户
-    account = await db.fetchone(
-        "SELECT 1 FROM accounts WHERE account_id = ? AND is_active = 1",
-        (account_id,)
-    )
-    if not account:
-        raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
+    await validate_account_active(account_id)
 
     if status:
         strategies = await db.fetchall(
@@ -54,12 +49,8 @@ async def get_strategy(
     db = get_db_manager()
 
     # 从数据库验证账户
-    account = await db.fetchone(
-        "SELECT 1 FROM accounts WHERE account_id = ? AND is_active = 1",
-        (account_id,)
-    )
-    if not account:
-        raise HTTPException(status_code=404, detail=f"账户不存在：{account_id}")
+    
+    await validate_account_active(account_id)
 
     strategy = await db.fetchone(
         "SELECT * FROM strategies WHERE id = ? AND account_id = ?",
@@ -99,12 +90,8 @@ async def create_strategy(
     """创建新策略"""
     db = get_db_manager()
 
-    account = await db.fetchone(
-        "SELECT 1 FROM accounts WHERE account_id = ? AND is_active = 1",
-        (account_id,)
-    )
-    if not account:
-        raise HTTPException(status_code=404, detail=f"账户不存在：{account_id}")
+    
+    await validate_account_active(account_id)
 
     # Validate strategy_type
     if strategy_type not in ('screening', 'python'):
@@ -170,12 +157,7 @@ async def update_strategy(
     """更新策略"""
     db = get_db_manager()
 
-    account = await db.fetchone(
-        "SELECT 1 FROM accounts WHERE account_id = ? AND is_active = 1",
-        (account_id,)
-    )
-    if not account:
-        raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
+    await validate_account_active(account_id)
 
     strategy = await db.fetchone(
         "SELECT id FROM strategies WHERE id = ? AND account_id = ?",
@@ -255,12 +237,8 @@ async def delete_strategy(
     db = get_db_manager()
 
     # 从数据库验证账户
-    account = await db.fetchone(
-        "SELECT 1 FROM accounts WHERE account_id = ? AND is_active = 1",
-        (account_id,)
-    )
-    if not account:
-        raise HTTPException(status_code=404, detail=f"账户不存在：{account_id}")
+    
+    await validate_account_active(account_id)
 
     # 检查策略是否存在
     strategy = await db.fetchone(
@@ -323,12 +301,8 @@ async def activate_strategy(
     db = get_db_manager()
 
     # 从数据库验证账户
-    account = await db.fetchone(
-        "SELECT 1 FROM accounts WHERE account_id = ? AND is_active = 1",
-        (account_id,)
-    )
-    if not account:
-        raise HTTPException(status_code=404, detail=f"账户不存在：{account_id}")
+    
+    await validate_account_active(account_id)
 
     strategy = await db.fetchone(
         "SELECT * FROM strategies WHERE id = ? AND account_id = ?",
@@ -363,12 +337,8 @@ async def deactivate_strategy(
     db = get_db_manager()
 
     # 从数据库验证账户
-    account = await db.fetchone(
-        "SELECT 1 FROM accounts WHERE account_id = ? AND is_active = 1",
-        (account_id,)
-    )
-    if not account:
-        raise HTTPException(status_code=404, detail=f"账户不存在：{account_id}")
+    
+    await validate_account_active(account_id)
 
     strategy = await db.fetchone(
         "SELECT * FROM strategies WHERE id = ? AND account_id = ?",
@@ -403,12 +373,8 @@ async def get_backtest_result(
     db = get_db_manager()
 
     # 从数据库验证账户
-    account = await db.fetchone(
-        "SELECT 1 FROM accounts WHERE account_id = ? AND is_active = 1",
-        (account_id,)
-    )
-    if not account:
-        raise HTTPException(status_code=404, detail=f"账户不存在：{account_id}")
+    
+    await validate_account_active(account_id)
 
     strategy = await db.fetchone(
         "SELECT * FROM strategies WHERE id = ? AND account_id = ?",
@@ -447,12 +413,8 @@ async def generate_strategy_by_llm(
     db = get_db_manager()
 
     # 从数据库验证账户
-    account = await db.fetchone(
-        "SELECT 1 FROM accounts WHERE account_id = ? AND is_active = 1",
-        (account_id,)
-    )
-    if not account:
-        raise HTTPException(status_code=404, detail=f"账户不存在：{account_id}")
+    
+    await validate_account_active(account_id)
 
     try:
         # 使用 LLM 生成策略
@@ -521,12 +483,7 @@ async def get_code_strategies(
     """获取代码型策略列表（strategy_type='python'）"""
     db = get_db_manager()
 
-    account = await db.fetchone(
-        "SELECT 1 FROM accounts WHERE account_id = ? AND is_active = 1",
-        (account_id,)
-    )
-    if not account:
-        raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
+    await validate_account_active(account_id)
 
     if code_scope:
         strategies = await db.fetchall(
@@ -560,12 +517,7 @@ async def update_code_strategy(
     """更新代码型策略"""
     db = get_db_manager()
 
-    account = await db.fetchone(
-        "SELECT 1 FROM accounts WHERE account_id = ? AND is_active = 1",
-        (account_id,)
-    )
-    if not account:
-        raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
+    await validate_account_active(account_id)
 
     strategy = await db.fetchone(
         "SELECT id, strategy_type FROM strategies WHERE id = ? AND account_id = ?",
@@ -621,12 +573,8 @@ async def get_strategy_versions_list(
     """查询策略版本历史（系统存档，不面向用户展示）"""
     db = get_db_manager()
 
-    account = await db.fetchone(
-        "SELECT 1 FROM accounts WHERE account_id = ? AND is_active = 1",
-        (account_id,)
-    )
-    if not account:
-        raise HTTPException(status_code=404, detail=f"账户不存在：{account_id}")
+    
+    await validate_account_active(account_id)
 
     strategy = await db.fetchone(
         "SELECT id FROM strategies WHERE id = ? AND account_id = ?",
@@ -655,12 +603,8 @@ async def restore_strategy_version(
     """从指定版本恢复策略数据"""
     db = get_db_manager()
 
-    account = await db.fetchone(
-        "SELECT 1 FROM accounts WHERE account_id = ? AND is_active = 1",
-        (account_id,)
-    )
-    if not account:
-        raise HTTPException(status_code=404, detail=f"账户不存在：{account_id}")
+    
+    await validate_account_active(account_id)
 
     strategy = await db.fetchone(
         "SELECT id FROM strategies WHERE id = ? AND account_id = ?",
@@ -687,12 +631,7 @@ async def restore_strategy_version(
 async def get_sell_strategy_options(account_id: str = Path(..., description="账户 ID")):
     """获取可用作卖出策略的代码型策略列表"""
     db = get_db_manager()
-    account = await db.fetchone(
-        "SELECT 1 FROM accounts WHERE account_id = ? AND is_active = 1",
-        (account_id,)
-    )
-    if not account:
-        raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
+    await validate_account_active(account_id)
     strategies = await db.fetchall(
         "SELECT id, name, description, status FROM strategies "
         "WHERE account_id = ? AND strategy_type = 'python' AND code_scope = 'trading' "
@@ -706,12 +645,7 @@ async def get_sell_strategy_options(account_id: str = Path(..., description="账
 async def get_buy_strategy_options(account_id: str = Path(..., description="账户 ID")):
     """获取可用作买入策略的代码型策略列表"""
     db = get_db_manager()
-    account = await db.fetchone(
-        "SELECT 1 FROM accounts WHERE account_id = ? AND is_active = 1",
-        (account_id,)
-    )
-    if not account:
-        raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
+    await validate_account_active(account_id)
     strategies = await db.fetchall(
         "SELECT id, name, description, status FROM strategies "
         "WHERE account_id = ? AND strategy_type = 'python' "
@@ -730,12 +664,7 @@ async def validate_strategy_code(
     from services.strategy.engine import get_strategy_engine
     db = get_db_manager()
 
-    account = await db.fetchone(
-        "SELECT 1 FROM accounts WHERE account_id = ? AND is_active = 1",
-        (account_id,)
-    )
-    if not account:
-        raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
+    await validate_account_active(account_id)
 
     engine = get_strategy_engine()
     return engine.validate_code(code)
@@ -763,12 +692,7 @@ async def test_run_strategy(
     """
     db = get_db_manager()
 
-    account = await db.fetchone(
-        "SELECT 1 FROM accounts WHERE account_id = ? AND is_active = 1",
-        (account_id,)
-    )
-    if not account:
-        raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
+    await validate_account_active(account_id)
 
     from services.strategy.engine import get_strategy_engine
     from services.common import technical_indicators

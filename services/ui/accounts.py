@@ -78,13 +78,7 @@ async def get_account(account_id: str = Path(..., description="账户 ID")):
     db = get_db_manager()
 
     # 检查账户是否存在
-    existing = await db.fetchone(
-        "SELECT 1 FROM accounts WHERE account_id = ?",
-        (account_id,)
-    )
-
-    if not existing:
-        raise HTTPException(status_code=404, detail="账户不存在")
+    await validate_account_exists(account_id)
 
     account = await db.fetchone(
         "SELECT * FROM accounts WHERE account_id = ?",
@@ -168,13 +162,7 @@ async def update_account(account_id: str, account_data: dict = Body(...)):
     db = get_db_manager()
 
     # 检查账户是否存在
-    existing = await db.fetchone(
-        "SELECT 1 FROM accounts WHERE account_id = ?",
-        (account_id,)
-    )
-
-    if not existing:
-        raise HTTPException(status_code=404, detail="账户不存在")
+    await validate_account_exists(account_id)
 
     # 更新数据库
     update_fields = []
@@ -219,13 +207,7 @@ async def delete_account(account_id: str = Path(..., description="账户 ID")):
     db = get_db_manager()
 
     # 检查账户是否存在
-    existing = await db.fetchone(
-        "SELECT 1 FROM accounts WHERE account_id = ?",
-        (account_id,)
-    )
-
-    if not existing:
-        raise HTTPException(status_code=404, detail="账户不存在")
+    await validate_account_exists(account_id)
 
     # 删除账户
     await db.execute("DELETE FROM accounts WHERE account_id = ?", (account_id,))
@@ -238,12 +220,8 @@ async def get_position_strategy(account_id: str = Path(..., description="账户 
     """获取持仓策略参数"""
     db = get_db_manager()
 
-    existing = await db.fetchone(
-        "SELECT 1 FROM accounts WHERE account_id = ?",
-        (account_id,)
-    )
-    if not existing:
-        raise HTTPException(status_code=404, detail="账户不存在")
+    
+    await validate_account_exists(account_id)
 
     acc = await db.fetchone(
         "SELECT max_total_position_pct, max_single_position_pct, cash_reserve_pct FROM accounts WHERE account_id = ?",
@@ -268,12 +246,8 @@ async def update_position_strategy(
     """更新持仓策略参数"""
     db = get_db_manager()
 
-    existing = await db.fetchone(
-        "SELECT 1 FROM accounts WHERE account_id = ?",
-        (account_id,)
-    )
-    if not existing:
-        raise HTTPException(status_code=404, detail="账户不存在")
+    
+    await validate_account_exists(account_id)
 
     await db.execute(
         """UPDATE accounts
