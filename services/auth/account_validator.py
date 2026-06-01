@@ -57,7 +57,7 @@ async def validate_account_exists(account_id: str) -> dict:
 
 async def get_active_account_ids() -> list:
     """获取所有活跃账户 ID"""
-    db = await get_db_manager()
+    db = get_db_manager()
     rows = await db.fetchall(
         "SELECT account_id FROM accounts WHERE is_active = 1"
     )
@@ -66,7 +66,7 @@ async def get_active_account_ids() -> list:
 
 async def get_account_display_name(account_id: str) -> str:
     """获取账户显示名称"""
-    db = await get_db_manager()
+    db = get_db_manager()
     account = await db.fetchone(
         "SELECT display_name, name FROM accounts WHERE account_id = ?",
         (account_id,)
