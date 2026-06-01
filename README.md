@@ -1,9 +1,9 @@
-# StockWinner 智能股票交易系统 v7.9.1
+# StockWinner 智能股票交易系统 v7.9.2
 
-多账户智能股票交易系统 - Agent API + SDK子进程隔离 + 策略沙箱 + 优先级队列 + 系统配置管理 + 信号分配 + MCP服务 + K线增强 + ETF数据支持 + 复权因子管理
+多账户智能股票交易系统 - Agent API + SDK子进程隔离 + 策略沙箱 + 优先级队列 + 系统配置管理 + 信号分配 + MCP服务 + K线增强 + ETF数据支持 + 复权因子管理 + Agent API规范
 
 ## 版本信息
-- **版本**: v7.9.1
+- **版本**: v7.9.2
 - **平台**: Ubuntu 22.04/24.04 LTS (x86_64)
 - **Python**: 3.10+
 - **数据库**: SQLite 3.x (WAL 模式) - 双库架构
@@ -123,6 +123,9 @@ curl -X POST -H "X-Agent-Key: sk-agent-xxx" \
 
 ```
 StockWinner/
+├── spec/                     # 规范文档
+│   └── AGENT_API_SPEC.md     # Agent API 规范文档
+│
 ├── config/                    # 配置文件
 │   ├── llm.json               # LLM API 配置
 │   └── screening_templates.json  # 选股模板
@@ -294,6 +297,12 @@ StockWinner/
 ---
 
 ## Agent API 端点
+
+### 系统规范端点
+| 路径 | 功能 |
+|------|------|
+| `/spec` | 系统规格概览（Agent 首次连接必读） |
+| `/spec/agent-api` | Agent API 规范文档（变量命名、因子字段、常见错误） |
 
 ### 查询端点（viewer+）
 | 路径 | 功能 |

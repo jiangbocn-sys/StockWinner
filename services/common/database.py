@@ -23,6 +23,8 @@ logger = logging.getLogger('Database')
 
 DB_PATH = Path(__file__).parent.parent.parent / "data" / "stockwinner.db"
 KLINE_DB_PATH = Path(__file__).parent.parent.parent / "data" / "kline.db"
+PROJECT_ROOT = Path(__file__).parent.parent.parent
+SPEC_DIR = PROJECT_ROOT / "spec"
 
 
 class DatabaseManager:
