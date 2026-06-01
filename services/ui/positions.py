@@ -9,6 +9,7 @@ from fastapi import APIRouter, HTTPException, Path, Query, Body
 from typing import Optional
 from services.common.database import get_db_manager
 from services.common.timezone import get_china_time
+from services.auth.account_validator import validate_account_active
 
 router = APIRouter()
 
@@ -68,12 +69,7 @@ async def refresh_position_prices(
     logger = get_logger("positions_api")
     db = get_db_manager()
 
-    account = await db.fetchone(
-        "SELECT 1 FROM accounts WHERE account_id = ? AND is_active = 1",
-        (account_id,)
-    )
-    if not account:
-        raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
+    await validate_account_active(account_id)
 
     positions = await db.fetchall(
         "SELECT * FROM stock_positions WHERE account_id = ? AND quantity > 0 ORDER BY stock_code",
@@ -221,21 +217,24 @@ async def get_positions(
             (account_id,)
         )
 
-    # 从内存价格缓存注入实时现价
+    # 从内存价格缓存注入实时现价和涨跌幅
     try:
         from services.common.price_cache import get_price_cache
         cache = get_price_cache()
-        cached_prices = cache.get_all_prices()
+        cached_ohlcv = cache.get_all()
         for pos in positions:
             code = pos.get("stock_code")
-            if code and code in cached_prices:
-                pos["current_price"] = cached_prices[code]
-                # 重新计算市值和盈亏
-                qty = pos.get("quantity", 0)
-                avg = pos.get("avg_cost", 0)
-                price = cached_prices[code]
-                pos["market_value"] = round(price * qty, 2)
-                pos["profit_loss"] = round((price - avg) * qty, 2)
+            if code and code in cached_ohlcv:
+                ohlcv = cached_ohlcv[code]
+                price = ohlcv.get('close', 0)
+                if price > 0:
+                    pos["current_price"] = price
+                    pos["change_pct"] = ohlcv.get('change_pct', 0)
+                    # 重新计算市值和盈亏
+                    qty = pos.get("quantity", 0)
+                    avg = pos.get("avg_cost", 0)
+                    pos["market_value"] = round(price * qty, 2)
+                    pos["profit_loss"] = round((price - avg) * qty, 2)
     except Exception:
         pass
 

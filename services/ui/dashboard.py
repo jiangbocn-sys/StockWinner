@@ -62,6 +62,21 @@ def update_provider_status(provider_id: str, ok: bool, message: str = ""):
             return
 
 
+def _handle_provider_status_event(data: dict):
+    """事件处理器：接收 provider 状态变化事件"""
+    update_provider_status(
+        data.get("provider_id", ""),
+        data.get("ok", False),
+        data.get("message", "")
+    )
+
+
+def init_dashboard_events():
+    """初始化 dashboard 事件订阅（服务启动时调用）"""
+    from services.common.events import subscribe, EVENT_PROVIDER_STATUS
+    subscribe(EVENT_PROVIDER_STATUS, _handle_provider_status_event)
+
+
 async def _refresh_data_sources_background():
     """并行检测所有数据源，完成一个立即更新缓存"""
     from services.data.channel.config_manager import get_all_provider_configs

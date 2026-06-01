@@ -3,6 +3,7 @@
 
 根据通道类型（TRADING / MARKET_DATA / DATA_DOWNLOAD）选择数据源，
 支持自动降级（主通道失败时按顺序重试备用通道）。
+新增：数据源使用统计（成功/失败次数、耗时）
 """
 
 import asyncio
@@ -12,7 +13,9 @@ import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Any, Optional
 
+from services.common.database import get_db_manager
 from services.common.structured_logger import get_logger
+from services.common.timezone import get_china_time
 from services.data.providers.base import DataProvider, DataProviderError
 
 logger = get_logger("channel_router")
@@ -43,6 +46,8 @@ class ChannelRouter:
         self._channel_configs: Dict[ChannelType, ChannelConfig] = {}
         self._failure_counts: Dict[str, int] = {}  # provider_id -> consecutive failures
         self._initialized = False
+        self._call_counts: Dict[str, int] = {}  # provider_id -> total calls (内存缓存)
+        self._success_counts: Dict[str, int] = {}  # provider_id -> total successes
 
     # ============================================================
     # 注册和配置
@@ -101,6 +106,8 @@ class ChannelRouter:
                 continue
 
             tried.append(provider_id)
+            start_time = time.monotonic()
+
             try:
                 method = getattr(provider, method_name, None)
                 if not method:
@@ -110,45 +117,53 @@ class ChannelRouter:
                     method(**kwargs),
                     timeout=config.timeout_seconds,
                 )
-                # 成功：重置失败计数 + 更新仪表盘状态
+
+                # 成功：记录统计
+                elapsed_ms = (time.monotonic() - start_time) * 1000
                 self._failure_counts[provider_id] = 0
-                logger.debug(
+                self._call_counts[provider_id] = self._call_counts.get(provider_id, 0) + 1
+                self._success_counts[provider_id] = self._success_counts.get(provider_id, 0) + 1
+
+                # 异步写入数据库统计（不阻塞）
+                self._record_usage(provider_id, channel_type.value, method_name, True, elapsed_ms)
+
+                logger.info(
                     "channel_execute",
-                    f"通道 {channel_type.value}.{method_name} 成功: {provider_id}"
+                    f"通道 {channel_type.value}.{method_name} 成功: {provider_id} ({elapsed_ms:.0f}ms)"
                 )
-                try:
-                    from services.ui.dashboard import update_provider_status
-                    update_provider_status(provider_id, True)
-                except Exception:
-                    pass
+                from services.common.events import emit_provider_status
+                emit_provider_status(provider_id, True)
                 return result
 
             except asyncio.TimeoutError:
+                elapsed_ms = (time.monotonic() - start_time) * 1000
                 self._failure_counts[provider_id] = self._failure_counts.get(provider_id, 0) + 1
+                self._call_counts[provider_id] = self._call_counts.get(provider_id, 0) + 1
+                self._record_usage(provider_id, channel_type.value, method_name, False, elapsed_ms, "timeout")
                 last_error = DataProviderError(provider_id, f"超时 ({config.timeout_seconds}s)")
-                logger.warning("channel_timeout", f"Provider {provider_id} 超时: {method_name}({kwargs})")
-                try:
-                    from services.ui.dashboard import update_provider_status
-                    update_provider_status(provider_id, False, f"超时 ({config.timeout_seconds}s)")
-                except Exception: pass
+                logger.warning("channel_timeout", f"Provider {provider_id} 超时: {method_name} ({elapsed_ms:.0f}ms)")
+                from services.common.events import emit_provider_status
+                emit_provider_status(provider_id, False, f"超时 ({config.timeout_seconds}s)")
 
             except DataProviderError as e:
+                elapsed_ms = (time.monotonic() - start_time) * 1000
                 self._failure_counts[provider_id] = self._failure_counts.get(provider_id, 0) + 1
+                self._call_counts[provider_id] = self._call_counts.get(provider_id, 0) + 1
+                self._record_usage(provider_id, channel_type.value, method_name, False, elapsed_ms, str(e))
                 last_error = e
                 logger.warning("channel_error", f"Provider {provider_id} 失败: {e}")
-                try:
-                    from services.ui.dashboard import update_provider_status
-                    update_provider_status(provider_id, False, str(e))
-                except Exception: pass
+                from services.common.events import emit_provider_status
+                emit_provider_status(provider_id, False, str(e))
 
             except Exception as e:
+                elapsed_ms = (time.monotonic() - start_time) * 1000
                 self._failure_counts[provider_id] = self._failure_counts.get(provider_id, 0) + 1
+                self._call_counts[provider_id] = self._call_counts.get(provider_id, 0) + 1
+                self._record_usage(provider_id, channel_type.value, method_name, False, elapsed_ms, str(e))
                 last_error = DataProviderError(provider_id, str(e), e)
-                logger.warning("channel_error", f"Provider {provider_id} 异常: {method_name}({kwargs}): {e}")
-                try:
-                    from services.ui.dashboard import update_provider_status
-                    update_provider_status(provider_id, False, str(e))
-                except Exception: pass
+                logger.warning("channel_error", f"Provider {provider_id} 异常: {method_name}: {e}")
+                from services.common.events import emit_provider_status
+                emit_provider_status(provider_id, False, str(e))
 
         # 所有 Provider 均失败
         failed_list = ", ".join(tried)
@@ -187,6 +202,87 @@ class ChannelRouter:
     def get_failure_count(self, provider_id: str) -> int:
         """获取 Provider 的连续失败次数"""
         return self._failure_counts.get(provider_id, 0)
+
+    def get_call_stats(self) -> Dict[str, Dict[str, int]]:
+        """获取所有 Provider 的调用统计（内存）"""
+        return {
+            pid: {
+                "calls": self._call_counts.get(pid, 0),
+                "successes": self._success_counts.get(pid, 0),
+                "failures": self._failure_counts.get(pid, 0),
+            }
+            for pid in self._providers.keys()
+        }
+
+    def _record_usage(self, provider_id: str, channel_type: str, method: str,
+                      success: bool, elapsed_ms: float, error: str = None):
+        """异步记录数据源使用统计到数据库"""
+        try:
+            db = get_db_manager()
+            today = get_china_time().strftime("%Y-%m-%d")
+            # 更新每日统计（增量）
+            import asyncio
+            loop = asyncio.get_running_loop()
+            asyncio.create_task(self._async_record(db, provider_id, channel_type, method, success, elapsed_ms, error, today))
+        except Exception:
+            pass  # 统计失败不影响主流程
+
+    async def _async_record(self, db, provider_id: str, channel_type: str, method: str,
+                             success: bool, elapsed_ms: float, error: str, date: str):
+        """异步写入统计"""
+        try:
+            # 检查今日是否已有记录
+            existing = await db.fetchone(
+                """SELECT id, call_count, success_count, failure_count, avg_latency_ms
+                   FROM data_source_usage_stats
+                   WHERE provider_id = ? AND date = ?""",
+                (provider_id, date)
+            )
+
+            if existing:
+                # 更新增量
+                new_calls = existing["call_count"] + 1
+                new_success = existing["success_count"] + (1 if success else 0)
+                new_failure = existing["failure_count"] + (1 if not success else 0)
+                # 计算平均延迟
+                old_avg = existing["avg_latency_ms"] or 0
+                new_avg = (old_avg * existing["call_count"] + elapsed_ms) / new_calls
+
+                await db.execute(
+                    """UPDATE data_source_usage_stats
+                       SET call_count = ?, success_count = ?, failure_count = ?, avg_latency_ms = ?
+                       WHERE id = ?""",
+                    (new_calls, new_success, new_failure, new_avg, existing["id"])
+                )
+            else:
+                # 新增记录
+                await db.execute(
+                    """INSERT INTO data_source_usage_stats
+                       (provider_id, date, channel_type, method, call_count, success_count, failure_count, avg_latency_ms, last_error)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (provider_id, date, channel_type, method, 1, 1 if success else 0, 1 if not success else 0, elapsed_ms, error)
+                )
+        except Exception as e:
+            logger.warning("usage_record", f"记录统计失败: {e}")
+
+    async def get_usage_stats(self, provider_id: str = None, days: int = 7) -> List[Dict]:
+        """查询数据源使用统计"""
+        db = get_db_manager()
+        if provider_id:
+            rows = await db.fetchall(
+                """SELECT * FROM data_source_usage_stats
+                   WHERE provider_id = ? AND date >= date('now', ?)
+                   ORDER BY date DESC""",
+                (provider_id, f'-{days} days')
+            )
+        else:
+            rows = await db.fetchall(
+                """SELECT * FROM data_source_usage_stats
+                   WHERE date >= date('now', ?)
+                   ORDER BY date DESC, provider_id""",
+                (f'-{days} days',)
+            )
+        return [dict(r) for r in rows]
 
 
 # ============================================================

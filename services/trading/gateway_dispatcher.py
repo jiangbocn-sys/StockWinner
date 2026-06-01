@@ -306,12 +306,9 @@ class GatewayDispatcher:
                 self._sdk_error_time = None
                 self._sdk_error_msg = ""
                 self._consecutive_errors = 0
-            # 数据流驱动：SDK kline 正常工作 → 标记 AmazingData 已连接
-            try:
-                from services.ui.dashboard import update_provider_status
-                update_provider_status("amazingdata", True)
-            except Exception:
-                pass
+            # 数据流驱动：SDK kline 正常工作 → 发布状态事件
+            from services.common.events import emit_provider_status
+            emit_provider_status("amazingdata", True)
         elif len(codes) > 0:
             self._data_stale = True
             self._sdk_healthy = False
@@ -583,7 +580,11 @@ class GatewayDispatcher:
 
     @staticmethod
     def _write_to_price_cache(results: Dict[str, Any]):
-        """将 MarketData 结果写入 PriceCache（source 由 MarketData.source 决定）"""
+        """将 MarketData 结果写入 PriceCache（source 由 MarketData.source 决定）
+
+        注意：prev_close 不从 SDK 数据获取，保留缓存中预热时设置的正确值（前一天实际收盘价）。
+        SDK kline 的 pre_close 字段可能是"当日开盘参考价"，而非前一天实际收盘价。
+        """
         from services.common.price_cache import get_price_cache
         from services.common.structured_logger import get_logger
 
@@ -592,6 +593,7 @@ class GatewayDispatcher:
         written_count = 0
         for code, md in results.items():
             if md and md.current_price > 0:
+                # 不传入 prev_close，让 update_ohlcv 保留缓存中已有的 prev_close（预热时设置）
                 cache.update_ohlcv(
                     code,
                     open=md.open_price or md.current_price,
@@ -601,6 +603,7 @@ class GatewayDispatcher:
                     volume=md.volume or 0,
                     amount=md.amount or 0,
                     change_pct=md.change_percent or 0.0,
+                    # prev_close 不传入，保留预热时的正确值
                     source=md.source if hasattr(md, 'source') else "",
                 )
                 written_count += 1

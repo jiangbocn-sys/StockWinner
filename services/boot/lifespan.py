@@ -65,6 +65,11 @@ def create_lifespan():
         await dispatcher.start()
         log.log_event("dispatcher_started", "行情调度器已启动")
 
+        # 初始化事件订阅（解耦 UI 与底层模块）
+        from services.ui.dashboard import init_dashboard_events
+        init_dashboard_events()
+        log.log_event("events_initialized", "事件订阅已初始化")
+
         # 初始化 PriceCache TTL
         try:
             from services.common.price_cache import get_price_cache
