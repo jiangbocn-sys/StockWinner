@@ -68,13 +68,11 @@ def calculate_and_save_factors_for_dates(
 
     # 获取日期范围内的所有股票
     if stock_codes is None:
-        # K线表中 trade_date 是整数格式（YYYYMMDD），需转换
-        start_date_int = int(start_date.replace('-', ''))
-        end_date_int = int(end_date.replace('-', ''))
+        # K线表中 trade_date 是字符串格式 'YYYY-MM-DD'
         cursor.execute("""
             SELECT DISTINCT stock_code FROM kline_data
             WHERE trade_date >= ? AND trade_date <= ?
-        """, (start_date_int, end_date_int))
+        """, (start_date, end_date))
         stock_codes = [row[0] for row in cursor.fetchall()]
 
     if not stock_codes:
@@ -159,15 +157,15 @@ def calculate_and_save_factors_for_dates(
                 calc_days = (calc_end_dt - calc_start_dt).days + 1
                 # 估算交易日数（约 5/7），加上 MA250 需要的 250 条，再加 10 条缓冲
                 kline_limit = int(calc_days * 5 / 7) + 260
-                # K线表中 trade_date 是整数格式（YYYYMMDD），需转换
-                kline_end_int = int(kline_end.replace('-', ''))
+                # K线表中 trade_date 现在主要是字符串格式 'YYYY-MM-DD'
+                # 为了兼容新旧两种格式，使用字符串比较
                 cursor.execute("""
                     SELECT trade_date, open, high, low, close, volume, amount
                     FROM kline_data
                     WHERE stock_code = ? AND trade_date <= ?
                     ORDER BY trade_date DESC
                     LIMIT ?
-                """, (stock_code, kline_end_int, kline_limit))
+                """, (stock_code, kline_end, kline_limit))
                 rows_desc = cursor.fetchall()
                 if rows_desc:
                     # 反转为正序（从旧到新）
@@ -226,9 +224,8 @@ def calculate_and_save_factors_for_dates(
                 insert_count = 0
                 insert_start = calc_start if only_new_dates else start_date
                 insert_end = calc_end if only_new_dates else end_date
-                # 转换为整数格式进行比较（K线trade_date是整数）
-                insert_start_int = int(insert_start.replace('-', ''))
-                insert_end_int = int(insert_end.replace('-', ''))
+                # trade_date 从 K 线查询返回，现在主要是字符串格式 'YYYY-MM-DD'
+                # 直接使用字符串格式比较
 
                 if show_progress and insert_count == 0:
                     log.debug("factor", f"{stock_code}: insert范围 {insert_start} ~ {insert_end}, df日期 {df['trade_date'].min()} ~ {df['trade_date'].max()}",
@@ -248,7 +245,12 @@ def calculate_and_save_factors_for_dates(
 
                 for _, row in df.iterrows():
                     trade_date = row['trade_date']
-                    if trade_date < insert_start_int or trade_date > insert_end_int:
+                    # 兼容两种格式：字符串 'YYYY-MM-DD' 和整数 YYYYMMDD
+                    if isinstance(trade_date, int):
+                        trade_date_str = f"{trade_date // 10000}-{(trade_date % 10000) // 100:02d}-{trade_date % 100:02d}"
+                    else:
+                        trade_date_str = str(trade_date)
+                    if trade_date_str < insert_start or trade_date_str > insert_end:
                         continue
 
                     close_price = row['close']
@@ -264,7 +266,7 @@ def calculate_and_save_factors_for_dates(
                     if ipo_date:
                         try:
                             ipo_dt = datetime.strptime(ipo_date, '%Y-%m-%d')
-                            trade_dt = datetime.strptime(trade_date, '%Y-%m-%d')
+                            trade_dt = datetime.strptime(trade_date_str, '%Y-%m-%d')
                             days_since_ipo = (trade_dt - ipo_dt).days
                         except:
                             pass
@@ -299,7 +301,7 @@ def calculate_and_save_factors_for_dates(
                         """, (
                             stock_code,
                             stock_name,
-                            trade_date,
+                            trade_date_str,
                             circ_market_cap,
                             total_market_cap,
                             days_since_ipo,
@@ -865,6 +867,8 @@ def smart_update_factors(
 
                 # 处理缺失记录（INSERT）
                 for trade_date in missing_dates:
+                    # trade_date 来自 missing_dates，已经是字符串格式 'YYYY-MM-DD'
+                    trade_date_str = trade_date
                     row_data = df[df['trade_date'] == trade_date]
                     if row_data.empty:
                         continue
@@ -883,7 +887,7 @@ def smart_update_factors(
                     if ipo_date:
                         try:
                             ipo_dt = datetime.strptime(ipo_date, '%Y-%m-%d')
-                            trade_dt = datetime.strptime(trade_date, '%Y-%m-%d')
+                            trade_dt = datetime.strptime(trade_date_str, '%Y-%m-%d')
                             days_since_ipo = (trade_dt - ipo_dt).days
                         except:
                             pass
