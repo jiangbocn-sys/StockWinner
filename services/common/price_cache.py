@@ -27,11 +27,11 @@ PRICE_CACHE_MAX_SIZE = 10000  # 最多缓存 10000 只股票
 # 数据格式 — 存储完整 OHLCV
 class PriceEntry:
     __slots__ = ('price', 'open', 'high', 'low', 'close', 'volume', 'amount',
-                 'change_pct', 'timestamp', 'source')
+                 'change_pct', 'prev_close', 'timestamp', 'source')
 
     def __init__(self, price: float, open: float = 0, high: float = 0, low: float = 0,
                  close: float = 0, volume: float = 0, amount: float = 0, change_pct: float = 0.0,
-                 source: str = ""):
+                 prev_close: float = 0.0, source: str = ""):
         self.price = price
         self.open = open or price
         self.high = high or price
@@ -40,6 +40,7 @@ class PriceEntry:
         self.volume = volume or 0
         self.amount = amount or 0
         self.change_pct = change_pct
+        self.prev_close = prev_close
         self.timestamp = time.time()
         self.source = source  # "snapshot" / "kline" / "kline_db" / ""(unknown)
 
@@ -47,10 +48,10 @@ class PriceEntry:
 class PriceCache:
     """线程安全的内存行情缓存（全局共享，不按账户隔离）
 
-    容量管理：
-    - MAX_SIZE = 10000 条股票上限
-    - 添加新条目时检查容量，超出则清理最旧的 100 条
-    - 清理在 update 方法中自动触发
+    prev_close 管理：
+    - 前一天收盘价是固定历史数据，启动时从 kline.db 预加载
+    - 新增股票时自动从 kline.db 补充 prev_close
+    - 实时行情刷新不覆盖 prev_close（保留预热/补充的正确值）
     """
 
     def __init__(self):
@@ -61,6 +62,54 @@ class PriceCache:
         self._last_flush = time.time()
         self._ttl = 600  # 缓存过期时间（秒），默认 10 分钟
         self._max_size = PRICE_CACHE_MAX_SIZE
+
+    def _load_prev_close_from_db(self, stock_code: str) -> float:
+        """从 kline.db 加载上一个交易日收盘价（考虑除权调整）
+
+        查询逻辑：使用上一个交易日日期查询 close，然后检查今天是否有除权。
+        若今天有除权（复权因子变化），需调整 prev_close 为除权基准价。
+        """
+        try:
+            from services.common.database import get_sync_connection
+            from services.trading.trading_hours import get_previous_trading_day, get_china_time
+
+            prev_date = get_previous_trading_day()
+            today = get_china_time().strftime('%Y-%m-%d')
+
+            conn = get_sync_connection("kline")
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT close FROM kline_data
+                WHERE stock_code = ? AND trade_date = ?
+            """, (stock_code, prev_date))
+            row = cursor.fetchone()
+            if not row or not row['close']:
+                return 0.0
+
+            prev_close = float(row['close'])
+
+            # 检查今天是否有除权（复权因子变化）
+            try:
+                import pandas as pd
+                h5_path = '/home/bobo/StockWinner/data/adj_factor/basedata/adj_factor/adj_factor.h5'
+                with pd.HDFStore(h5_path, 'r') as store:
+                    df = store['/adj_factor']
+                    if stock_code in df.columns:
+                        col = df[stock_code]
+                        today_factor = col.get(today, 1.0) if today in col.index else 1.0
+                        prev_factor = col.get(prev_date, 1.0) if prev_date in col.index else 1.0
+                        # 若因子变化（除权），调整 prev_close 为除权基准价
+                        if today_factor > 0 and prev_factor > 0 and abs(today_factor - prev_factor) > 0.001:
+                            # 除权基准价 = 前收盘 / (今日因子 / 前日因子)
+                            adj_ratio = today_factor / prev_factor
+                            prev_close = prev_close / adj_ratio
+            except Exception:
+                pass  # 无复权因子文件时跳过调整
+
+            return prev_close
+        except Exception:
+            pass
+        return 0.0
 
     def _prune_if_exceeded(self):
         """清理超限条目：按 timestamp 清理最旧的 100 条"""
@@ -114,12 +163,14 @@ class PriceCache:
     def update_ohlcv(self, stock_code: str,
                      open: float, high: float, low: float, close: float,
                      volume: float, amount: float, change_pct: float = 0.0,
-                     source: str = ""):
+                     prev_close: float = 0.0, source: str = ""):
         """更新完整 OHLCV 行情（线程安全）
 
         保护机制：当新数据某字段为 0 但缓存中已有有效值时，保留旧值，避免用 0 覆盖。
         source 优先级：snapshot > kline > kline_db。新数据 source 优先级低于已有数据时保留旧 source。
         容量管理：新条目添加后检查是否超限。
+        自动计算涨跌幅：如果 change_pct=0 但有 prev_close，自动计算。
+        新增股票时自动从 kline.db 补充 prev_close。
         """
         _source_rank = {"snapshot": 3, "kline": 2, "kline_db": 1}
         with self._lock:
@@ -132,13 +183,28 @@ class PriceCache:
                 close = close if close > 0 else existing.close
                 volume = volume if volume > 0 else existing.volume
                 amount = amount if amount > 0 else existing.amount
+                # prev_close: 新值 > 0 用新值，否则用旧值或从数据库补充
+                if prev_close == 0:
+                    prev_close = existing.prev_close
+                    if prev_close == 0:
+                        # 缓存中也没有，从数据库补充
+                        prev_close = self._load_prev_close_from_db(stock_code)
                 # source 优先级保护：低优先级不能覆盖高优先级
                 if _source_rank.get(source, 0) < _source_rank.get(existing.source, 0):
                     source = existing.source
+            else:
+                # 新增股票：自动从 kline.db 补充 prev_close
+                if prev_close == 0:
+                    prev_close = self._load_prev_close_from_db(stock_code)
+
+            # 自动计算涨跌幅
+            if change_pct == 0 and prev_close > 0 and close > 0:
+                change_pct = (close - prev_close) / prev_close * 100
+
             self._prices[stock_code] = PriceEntry(
                 price=close, open=open, high=high, low=low,
                 close=close, volume=volume, amount=amount, change_pct=change_pct,
-                source=source,
+                prev_close=prev_close, source=source,
             )
             # 新条目添加后检查容量
             if not existing:
@@ -224,7 +290,7 @@ class PriceCache:
 
     def get_ohlcv(self, stock_code: str, max_age: int = None) -> Optional[Dict[str, float]]:
         """获取完整 OHLCV 行情，未找到或过期返回 None
-        Returns: {open, high, low, close, volume, amount, change_pct}
+        Returns: {open, high, low, close, volume, amount, change_pct, prev_close}
         """
         with self._lock:
             entry = self._prices.get(stock_code)
@@ -235,7 +301,7 @@ class PriceCache:
             return {
                 'open': entry.open, 'high': entry.high, 'low': entry.low,
                 'close': entry.close, 'volume': entry.volume, 'amount': entry.amount,
-                'change_pct': entry.change_pct,
+                'change_pct': entry.change_pct, 'prev_close': entry.prev_close,
             }
 
     def get_ohlcv_with_ttl(self, stock_code: str, max_age: int = None) -> Optional[Dict[str, Any]]:
@@ -253,7 +319,7 @@ class PriceCache:
                 'data': {
                     'open': entry.open, 'high': entry.high, 'low': entry.low,
                     'close': entry.close, 'volume': entry.volume, 'amount': entry.amount,
-                    'change_pct': entry.change_pct,
+                    'change_pct': entry.change_pct, 'prev_close': entry.prev_close,
                 },
                 'is_fresh': is_fresh,
                 'source': entry.source or "",
@@ -261,7 +327,7 @@ class PriceCache:
 
     def get_all(self, max_age: int = None) -> Dict[str, Dict[str, float]]:
         """获取所有股票的完整 OHLCV 行情
-        Returns: {stock_code: {open, high, low, close, volume, amount, change_pct}}
+        Returns: {stock_code: {open, high, low, close, volume, amount, change_pct, prev_close}}
         """
         with self._lock:
             result = {}
@@ -272,13 +338,13 @@ class PriceCache:
                     result[code] = {
                         'open': entry.open, 'high': entry.high, 'low': entry.low,
                         'close': entry.close, 'volume': entry.volume, 'amount': entry.amount,
-                        'change_pct': entry.change_pct,
+                        'change_pct': entry.change_pct, 'prev_close': entry.prev_close,
                     }
             return result
 
     def get_all_for_codes(self, codes: Set[str], max_age: int = None) -> Dict[str, Dict[str, float]]:
         """获取指定股票列表的 OHLCV 行情（过滤过期条目）
-        Returns: {stock_code: {open, high, low, close, volume, amount, change_pct, source}}
+        Returns: {stock_code: {open, high, low, close, volume, amount, change_pct, prev_close, source}}
         """
         with self._lock:
             result = {}

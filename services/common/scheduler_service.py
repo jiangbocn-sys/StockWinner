@@ -1136,57 +1136,67 @@ class SchedulerService:
 
                     monitor = get_trading_monitor()
 
-                    # ① 检查监控是否运行
+                    # ① 检查监控是否运行（等待自动启动任务执行）
                     if not monitor._running:
-                        # 交易时段内监控未运行，尝试自动重启
-                        logger.warning("交易监控在交易时段内未运行，尝试自动重启")
+                        # 13:00/9:15 时心跳检查与自动启动任务同时执行，等待其完成
+                        import time
+                        for wait_sec in [3, 5, 10]:
+                            time.sleep(wait_sec)
+                            if monitor._running:
+                                logger.info(f"监控已自动启动（等待{wait_sec}秒），跳过中断检查")
+                                break
 
-                        # 检查是否有持仓
-                        positions_conn = get_sync_connection(
-                            path=Path(__file__).parent.parent.parent / "data" / "stockwinner.db"
-                        )
-                        position_count = positions_conn.execute(
-                            "SELECT COUNT(*) FROM stock_positions WHERE quantity > 0"
-                        ).fetchone()[0]
-                        acct_rows = positions_conn.execute(
-                            "SELECT DISTINCT account_id FROM stock_positions WHERE quantity > 0"
-                        ).fetchall()
-                        positions_conn.close()
+                        # 等待后仍未运行，才执行重启逻辑
+                        if not monitor._running:
+                            # 交易时段内监控未运行，尝试自动重启
+                            logger.warning("交易监控在交易时段内未运行，尝试自动重启")
+
+                            # 检查是否有持仓
+                            positions_conn = get_sync_connection(
+                                path=Path(__file__).parent.parent.parent / "data" / "stockwinner.db"
+                            )
+                            position_count = positions_conn.execute(
+                                "SELECT COUNT(*) FROM stock_positions WHERE quantity > 0"
+                            ).fetchone()[0]
+                            acct_rows = positions_conn.execute(
+                                "SELECT DISTINCT account_id FROM stock_positions WHERE quantity > 0"
+                            ).fetchall()
+                            positions_conn.close()
 
                         # 使用主事件循环重启监控
-                        result = self._run_in_main_loop(monitor.start_monitoring(interval=60), timeout=30.0) or {}
-                        if result.get("success"):
-                            logger.info(f"交易监控已自动重启: {result.get('message')}")
-                        else:
-                            logger.warning(f"交易监控重启失败: {result.get('message')}")
-                            # 重启失败才发通知
-                            if position_count > 0:
-                                notification = get_notification_service()
-                                main_loop = _get_fastapi_loop()
-                                if main_loop and not main_loop.is_closed():
-                                    for acct_id in [r["account_id"] for r in acct_rows]:
-                                        future = asyncio.run_coroutine_threadsafe(
-                                            notification.emit(
-                                                event_type="monitor_interrupted",
-                                                account_id=acct_id,
-                                                payload={
-                                                    "detected_at": now_str,
-                                                    "account_id": acct_id,
-                                                    "position_count": position_count,
-                                                    "restart_result": result.get("message"),
-                                                },
-                                            ),
-                                            main_loop
-                                        )
-                                        try:
-                                            future.result(timeout=5.0)
-                                        except Exception:
-                                            pass
-                                    logger.warning(f"已发送交易监控中断飞书通知（{position_count} 只持仓，重启失败）")
-                                else:
-                                    logger.warning("主事件循环不可用，跳过监控中断通知")
+                            result = self._run_in_main_loop(monitor.start_monitoring(interval=60), timeout=30.0) or {}
+                            if result.get("success"):
+                                logger.info(f"交易监控已自动重启: {result.get('message')}")
                             else:
-                                logger.info("交易监控未运行，但无持仓，不发通知")
+                                logger.warning(f"交易监控重启失败: {result.get('message')}")
+                                # 重启失败才发通知
+                                if position_count > 0:
+                                    notification = get_notification_service()
+                                    main_loop = _get_fastapi_loop()
+                                    if main_loop and not main_loop.is_closed():
+                                        for acct_id in [r["account_id"] for r in acct_rows]:
+                                            future = asyncio.run_coroutine_threadsafe(
+                                                notification.emit(
+                                                    event_type="monitor_interrupted",
+                                                    account_id=acct_id,
+                                                    payload={
+                                                        "detected_at": now_str,
+                                                        "account_id": acct_id,
+                                                        "position_count": position_count,
+                                                        "restart_result": result.get("message"),
+                                                    },
+                                                ),
+                                                main_loop
+                                            )
+                                            try:
+                                                future.result(timeout=5.0)
+                                            except Exception:
+                                                pass
+                                        logger.warning(f"已发送交易监控中断飞书通知（{position_count} 只持仓，重启失败）")
+                                    else:
+                                        logger.warning("主事件循环不可用，跳过监控中断通知")
+                                else:
+                                    logger.info("交易监控未运行，但无持仓，不发通知")
 
                     # ② 检查数据是否过期（监控活着但 SDK 取不到数据）
                     elif monitor._data_stale:
@@ -1380,6 +1390,16 @@ class SchedulerService:
             )
             logger.info(f"  注册收盘失效当日单任务 (cron=5 15 * * mon-fri)")
 
+            # 每日盘前更新复权因子（9:15）
+            self._scheduler.add_job(
+                self._update_adj_factor_job,
+                CronTrigger.from_crontab("15 9 * * mon-fri", timezone=CHINA_TZ),
+                id="update_adj_factor",
+                name="每日盘前更新复权因子",
+                replace_existing=True,
+            )
+            logger.info(f"  注册复权因子更新任务 (cron=15 9 * * mon-fri)")
+
         except Exception as e:
             logger.error(f"注册监控任务失败: {e}", exc_info=True)
 
@@ -1526,6 +1546,51 @@ class SchedulerService:
                     logger.info(f"重置 pending→watching: {row['account_id']}: {reset_count} 只股票")
             except Exception as e:
                 logger.warning(f"T+1 解冻失败 ({row['account_id']}): {e}")
+
+    def _update_adj_factor_job(self):
+        """每日盘前更新复权因子数据（9:15）
+
+        通过 SDK 获取最新复权因子并保存到本地 h5 文件。
+        用于计算除权后的涨跌幅。
+        """
+        logger.info("开始每日复权因子更新任务")
+        try:
+            from services.common.sdk_proxy_client import SDKProxyClient
+            from services.common.database import get_sync_connection
+            import pandas as pd
+
+            # 获取持仓+watchlist股票代码
+            db_path = Path(__file__).parent.parent.parent / "data" / "stockwinner.db"
+            conn = get_sync_connection(path=db_path)
+            positions = conn.execute(
+                "SELECT DISTINCT stock_code FROM stock_positions WHERE quantity > 0"
+            ).fetchall()
+            watchlist = conn.execute(
+                "SELECT DISTINCT stock_code FROM watchlist WHERE status IN ('pending', 'watching', 'bought')"
+            ).fetchall()
+            conn.close()
+
+            codes = [p[0] for p in positions] + [w[0] for w in watchlist]
+            codes = list(set(codes))
+
+            if not codes:
+                logger.info("无持仓和watchlist股票，跳过复权因子更新")
+                return
+
+            # 调用 SDK 获取复权因子
+            proxy = SDKProxyClient.get_instance()
+            if proxy.connect_to_subprocess(timeout=10.0):
+                result = proxy._call_ipc("get_adj_factor", {"stock_codes": codes}, priority=1, timeout=300.0)
+
+                if result is not None and isinstance(result, pd.DataFrame) and not result.empty:
+                    logger.info(f"复权因子更新完成，覆盖 {len(result.columns)} 只股票")
+                else:
+                    logger.warning("复权因子更新返回空数据")
+            else:
+                logger.warning("SDK 子进程连接失败，跳过复权因子更新")
+
+        except Exception as e:
+            logger.error(f"复权因子更新失败: {e}", exc_info=True)
 
     def _execute_strategy_task_job(self, task_id: int):
         """执行策略任务（根据任务类型选择执行方式）"""

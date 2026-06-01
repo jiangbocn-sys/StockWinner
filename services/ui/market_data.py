@@ -292,7 +292,7 @@ async def get_stock_quote(
                 "high": data.get('high'),
                 "low": data.get('low'),
                 "open_price": data.get('open'),
-                "prev_close": None,
+                "prev_close": data.get('prev_close'),
                 "volume": data.get('volume'),
                 "amount": data.get('amount'),
                 "bid": [],
@@ -398,7 +398,7 @@ async def get_batch_quotes(
                     "high": ohlcv.get('high'),
                     "low": ohlcv.get('low'),
                     "open_price": ohlcv.get('open'),
-                    "prev_close": None,
+                    "prev_close": ohlcv.get('prev_close'),
                     "volume": ohlcv.get('volume'),
                     "amount": ohlcv.get('amount'),
                 })
@@ -577,6 +577,8 @@ async def get_local_kline(
     months: int = Query(12, ge=0, le=60, description="回溯月数，默认 12 个月（1年），0 表示不限制"),
     period: str = Query("day", description="周期: day/week/month"),
     adjust: str = Query("none", description="复权: none/forward"),
+    include_factors: bool = Query(False, description="是否包含因子数据（技术指标）"),
+    factor_fields: Optional[str] = Query(None, description="因子字段，逗号分隔，默认主要技术指标"),
 ):
     """
     从本地 kline.db 读取 K 线数据（快速，不占用 SDK 连接）
@@ -590,6 +592,8 @@ async def get_local_kline(
         adjust: 复权类型
             - none: 不复权（原始价格）
             - forward: 前复权（历史价格调整，以当前价格为基准）
+        include_factors: 是否同时返回因子数据（用于技术指标叠加）
+        factor_fields: 指定因子字段，如 "ma5,ma10,boll_upper"
     """
     db = get_db_manager()
     account = await db.fetchone(
@@ -650,28 +654,32 @@ async def get_local_kline(
                 })
 
             # 拼接当日实时 K 线（从 PriceCache 取，不调 SDK）
-            # 仅在交易日拼接，非交易日 PriceCache 数据为上一交易日收盘价
+            # 交易日过了开盘时间（9:30）就拼接当日数据（包括盘后时间）
+            # 非交易日不拼接
             if not seen_today:
                 try:
                     from services.common.price_cache import get_price_cache
-                    from services.trading.trading_hours import is_today_trading_day
+                    from services.trading.trading_hours import is_today_trading_day, get_trading_phase
+                    from services.common.timezone import get_china_time
 
-                    # 非交易日不拼接当日数据，避免重复
-                    if not is_today_trading_day():
-                        pass
-                    else:
-                        cache = get_price_cache()
-                        ohlcv = cache.get_ohlcv(stock_code)
-                        if ohlcv and ohlcv.get('close', 0) > 0:
-                            kline.append({
-                                "trade_date": today_str.replace("-", ""),
-                                "open": ohlcv.get('open', ohlcv.get('close', 0)),
-                                "close": ohlcv.get('close', 0),
-                                "low": ohlcv.get('low', ohlcv.get('close', 0)),
-                                "high": ohlcv.get('high', ohlcv.get('close', 0)),
-                                "volume": ohlcv.get('volume', 0),
-                                "amount": ohlcv.get('amount', 0),
-                            })
+                    # 交易日且过了开盘时间（9:30之后）才拼接当日数据
+                    if is_today_trading_day():
+                        now = get_china_time()
+                        # 开盘时间是 9:30，过了这个时间点就有当日数据
+                        market_open_time = now.replace(hour=9, minute=30, second=0, microsecond=0)
+                        if now >= market_open_time:
+                            cache = get_price_cache()
+                            ohlcv = cache.get_ohlcv(stock_code)
+                            if ohlcv and ohlcv.get('close', 0) > 0:
+                                kline.append({
+                                    "trade_date": today_str.replace("-", ""),
+                                    "open": ohlcv.get('open', ohlcv.get('close', 0)),
+                                    "close": ohlcv.get('close', 0),
+                                    "low": ohlcv.get('low', ohlcv.get('close', 0)),
+                                    "high": ohlcv.get('high', ohlcv.get('close', 0)),
+                                    "volume": ohlcv.get('volume', 0),
+                                    "amount": ohlcv.get('amount', 0),
+                                })
                 except Exception:
                     pass
 
@@ -813,7 +821,55 @@ async def get_local_kline(
                 # 复权失败，返回未复权数据（不影响主流程）
                 pass
 
-        return {"success": True, "stock_code": stock_code, "period": period, "adjust": adjust, "kline": kline, "count": len(kline)}
+        # 并行查询因子数据（如果需要）
+        factors = None
+        if include_factors and period == "day" and kline:
+            import asyncio
+            # 确定日期范围
+            dates = [k['trade_date'][:8] for k in kline]
+            start_date_raw = dates[0]
+            end_date_raw = dates[-1]
+            start_date_factor = f"{start_date_raw[:4]}-{start_date_raw[4:6]}-{start_date_raw[6:8]}"
+            end_date_factor = f"{end_date_raw[:4]}-{end_date_raw[4:6]}-{end_date_raw[6:8]}"
+
+            # 因子字段
+            default_factor_fields = [
+                "trade_date", "ma5", "ma10", "ma20", "ma60", "ma120", "ma250",
+                "ema12", "ema26", "boll_upper", "boll_middle", "boll_lower"
+            ]
+            if factor_fields:
+                requested_fields = factor_fields.split(",")
+                if "trade_date" not in requested_fields:
+                    requested_fields.insert(0, "trade_date")
+                query_fields = requested_fields
+            else:
+                query_fields = default_factor_fields
+
+            # 并行查询因子（使用线程池）
+            def query_factors_sync():
+                try:
+                    conn = get_sync_connection("kline")
+                    cursor = conn.cursor()
+                    sql = f"SELECT {', '.join(query_fields)} FROM stock_daily_factors WHERE stock_code = ? AND trade_date >= ? AND trade_date <= ? ORDER BY trade_date ASC"
+                    cursor.execute(sql, (stock_code, start_date_factor, end_date_factor))
+                    rows = cursor.fetchall()
+                    conn.close()
+                    return [dict(row) for row in rows]
+                except Exception:
+                    return []
+
+            factors = await asyncio.to_thread(query_factors_sync)
+
+        return {
+            "success": True,
+            "stock_code": stock_code,
+            "period": period,
+            "adjust": adjust,
+            "kline": kline,
+            "count": len(kline),
+            "factors": factors,
+            "factor_count": len(factors) if factors else 0
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"读取本地 K 线数据失败：{str(e)}")
 
@@ -924,3 +980,82 @@ async def get_stock_info(
         pass
 
     return {"success": False, "message": "未找到股票信息"}
+
+
+@router.get("/api/v1/ui/{account_id}/factors/{stock_code}")
+async def get_stock_factors(
+    account_id: str = Path(..., description="账户 ID"),
+    stock_code: str = Path(..., description="股票代码"),
+    start_date: Optional[str] = Query(None, description="开始日期 YYYY-MM-DD"),
+    end_date: Optional[str] = Query(None, description="结束日期 YYYY-MM-DD"),
+    fields: Optional[str] = Query(None, description="指定字段，逗号分隔"),
+):
+    """获取股票因子数据（用于 K 线指标叠加）"""
+    db = get_db_manager()
+
+    # 验证账户
+    account = await db.fetchone("SELECT * FROM accounts WHERE account_id = ? AND is_active = 1", (account_id,))
+    if not account:
+        raise HTTPException(status_code=404, detail=f"账户不存在或未激活：{account_id}")
+
+    conn = get_sync_connection("kline")
+    cursor = conn.cursor()
+
+    # 构建查询
+    try:
+        # 默认字段：主要技术指标
+        default_fields = [
+            "trade_date", "ma5", "ma10", "ma20", "ma60", "ma120", "ma250",
+            "ema12", "ema26", "boll_upper", "boll_middle", "boll_lower"
+        ]
+
+        if fields:
+            # 用户指定字段
+            requested_fields = fields.split(",")
+            # 确保 trade_date 在列表中
+            if "trade_date" not in requested_fields:
+                requested_fields.insert(0, "trade_date")
+            query_fields = requested_fields
+        else:
+            query_fields = default_fields
+
+        # 构建 SQL
+        sql = f"SELECT {', '.join(query_fields)} FROM stock_daily_factors WHERE stock_code = ?"
+        params = [stock_code]
+
+        # 日期格式转换：支持 YYYYMMDD 和 YYYY-MM-DD
+        def normalize_date(d: str) -> str:
+            if d and len(d) == 8 and d.isdigit():
+                return f"{d[:4]}-{d[4:6]}-{d[6:8]}"
+            return d
+
+        if start_date:
+            sql += " AND trade_date >= ?"
+            params.append(normalize_date(start_date))
+        if end_date:
+            sql += " AND trade_date <= ?"
+            params.append(normalize_date(end_date))
+
+        sql += " ORDER BY trade_date ASC"
+
+        cursor.execute(sql, params)
+        rows = cursor.fetchall()
+
+        factors = []
+        for row in rows:
+            factor_dict = {}
+            for field in query_fields:
+                factor_dict[field] = row[field]
+            factors.append(factor_dict)
+
+        return {
+            "success": True,
+            "stock_code": stock_code,
+            "count": len(factors),
+            "factors": factors
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"查询因子数据失败: {str(e)}")
+    finally:
+        conn.close()

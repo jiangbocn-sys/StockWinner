@@ -50,8 +50,12 @@ from services.common.structured_logger import get_logger
 # SDK 登录
 # ============================================================
 
-def sdk_login() -> bool:
-    """SDK 登录（子进程启动时调用）"""
+def sdk_login(timeout: float = 20.0) -> bool:
+    """SDK 登录（子进程启动时调用，带超时）
+
+    timeout 默认 20 秒，加上其他初始化操作（约 5 秒），
+    总启动时间控制在 25 秒内，留出 5 秒缓冲给主进程等待（30 秒）。
+    """
     logger = get_logger("sdk_subprocess")
     username = os.environ.get("SDK_USERNAME", "")
     password = os.environ.get("SDK_PASSWORD", "")
@@ -62,17 +66,36 @@ def sdk_login() -> bool:
         logger.error("sdk_subprocess", "SDK 凭证未配置")
         return False
 
-    try:
-        from AmazingData import login
-        result = login(username, password, host, port)
-        if result:
-            logger.log_event("sdk_subprocess_login_ok", "SDK 登录成功")
-            return True
-        else:
-            logger.warn("sdk_subprocess_login_fail", "SDK 登录失败（返回 False）")
-            return False
-    except Exception as e:
-        logger.error("sdk_subprocess_login_error", f"SDK 登录异常: {e}")
+    login_result = [None]  # 使用列表存储结果（线程间共享）
+    login_error = [None]
+
+    def _do_login():
+        try:
+            from AmazingData import login
+            login_result[0] = login(username, password, host, port)
+        except Exception as e:
+            login_error[0] = e
+
+    # 启动登录线程
+    login_thread = threading.Thread(target=_do_login, daemon=True)
+    login_thread.start()
+    login_thread.join(timeout=timeout)
+
+    if login_thread.is_alive():
+        # 登录超时
+        logger.log_event("sdk_login_timeout", f"SDK 登录超时 ({timeout}s)")
+        print(json.dumps({"event": "sdk_login_timeout"}), flush=True)
+        return False
+
+    if login_error[0]:
+        logger.error("sdk_subprocess_login_error", f"SDK 登录异常: {login_error[0]}")
+        return False
+
+    if login_result[0]:
+        logger.log_event("sdk_subprocess_login_ok", "SDK 登录成功")
+        return True
+    else:
+        logger.warn("sdk_subprocess_login_fail", "SDK 登录失败（返回 False）")
         return False
 
 
@@ -151,6 +174,9 @@ SDK_METHODS = {
     "get_industry_constituent",
     "get_index_constituent",
     "get_adj_factor",      # 复权因子（前复权/后复权）
+    "get_etf_pcf",         # ETF 申赎数据
+    "get_fund_share",      # ETF 基金份额
+    "get_fund_iopv",       # ETF IOPV 净值
     "connect",        # 等效于确保登录
     "disconnect",     # 清理实例
     "is_connected",   # 返回 True（如果已登录）
@@ -324,6 +350,32 @@ def execute_sdk_method(method: str, kwargs: dict):
                 code_list=kwargs.get("stock_codes", []),
                 local_path=local_path,
                 is_local=False  # 从服务端获取最新数据
+            )
+
+        elif method == "get_etf_pcf":
+            # ETF 申赎数据（BaseData.get_etf_pcf）
+            # 返回 (etf_pcf_info, etf_pcf_constituent_dict)
+            # 注意：PCF 数据可能只在盘前公布，盘中查询可能返回 None
+            result = get_base_data().get_etf_pcf(
+                code_list=kwargs.get("etf_codes", [])
+            )
+            # 处理 SDK 返回 None 的情况（非盘前时间或无数据）
+            if result is None:
+                logger.log_event("etf_pcf_empty", "PCF 数据为空（可能非盘前时间）")
+                return {"pcf_info": pd.DataFrame(), "constituents": {}}
+            pcf_info, constituents = result
+            return {"pcf_info": pcf_info, "constituents": constituents}
+
+        elif method == "get_fund_share":
+            # ETF 基金份额（InfoData.get_fund_share）
+            return get_info().get_fund_share(
+                code_list=kwargs.get("etf_codes", []), is_local=False
+            )
+
+        elif method == "get_fund_iopv":
+            # ETF IOPV 净值（InfoData.get_fund_iopv）
+            return get_info().get_fund_iopv(
+                code_list=kwargs.get("etf_codes", []), is_local=False
             )
 
         else:

@@ -708,9 +708,9 @@ async def _run_migrations(db_manager, log, migration_version: int):
 
     # v7 数据源配置 seed
     try:
-        from services.data.channel.config_manager import seed_provider_configs, add_account_role_column
+        from services.data.channel.config_manager import seed_provider_configs
         await seed_provider_configs()
-        await add_account_role_column()
+        # add_account_role_column 已完成，role 列已存在
         log.log_event("db_migration_v7", "数据源配置已初始化")
     except Exception as e:
         log.error("db_migration_v7", f"数据源初始化失败: {e}")
@@ -800,6 +800,10 @@ async def _preload_price_cache(log, db_manager):
     """启动时预热 PriceCache：持仓 + 活跃 watchlist + 候选股
 
     后台异步执行，不阻塞应用启动。SDK 不可用时跳过。
+    步骤：
+    1. 更新复权因子数据（每日盘前）
+    2. 从 kline.db 加载上一交易日收盘价（用于计算涨跌幅，考虑除权）
+    3. 通过 gateway 批量拉取当日行情
     """
     import asyncio
     from services.common.price_cache import get_price_cache
@@ -826,6 +830,8 @@ async def _preload_price_cache(log, db_manager):
             if w.get("stock_code"):
                 stock_codes.add(w["stock_code"])
 
+        # 复权因子更新由定时任务处理，预热时不调用（避免覆盖已有数据）
+
         if not stock_codes:
             log.log_event("price_cache_preload", "无需预热的股票，跳过")
             return
@@ -833,14 +839,58 @@ async def _preload_price_cache(log, db_manager):
         stock_codes = list(stock_codes)
         log.log_event("price_cache_preload", f"开始预热 {len(stock_codes)} 只股票的行情", total=len(stock_codes))
 
-        # 3. 通过 gateway 批量拉取
+        # 3. 从 kline.db 加载上一个交易日收盘价（用于计算涨跌幅）
+        from services.common.database import get_sync_connection
+        from services.trading.trading_hours import get_previous_trading_day, get_china_time
+        try:
+            prev_date = get_previous_trading_day()
+            today = get_china_time().strftime('%Y-%m-%d')
+            conn = get_sync_connection("kline")
+            cursor = conn.cursor()
+            placeholders = ','.join(['?'] * len(stock_codes))
+            cursor.execute(f"""
+                SELECT stock_code, close as prev_close
+                FROM kline_data
+                WHERE stock_code IN ({placeholders}) AND trade_date = ?
+            """, stock_codes + [prev_date])
+            prev_closes = {row['stock_code']: float(row['prev_close'] or 0) for row in cursor.fetchall()}
+
+            # 检查今天是否有除权（复权因子变化）
+            try:
+                import pandas as pd
+                h5_path = '/home/bobo/StockWinner/data/adj_factor/basedata/adj_factor/adj_factor.h5'
+                with pd.HDFStore(h5_path, 'r') as store:
+                    df = store['/adj_factor']
+                    for code in prev_closes:
+                        if code in df.columns:
+                            col = df[code]
+                            today_factor = col.get(today, 1.0) if today in col.index else 1.0
+                            prev_factor = col.get(prev_date, 1.0) if prev_date in col.index else 1.0
+                            if today_factor > 0 and prev_factor > 0 and abs(today_factor - prev_factor) > 0.001:
+                                adj_ratio = today_factor / prev_factor
+                                prev_closes[code] = prev_closes[code] / adj_ratio
+            except Exception:
+                pass  # 无复权因子文件时跳过调整
+
+            log.log_event("prev_close_preload", f"加载上一交易日({prev_date})收盘价 {len(prev_closes)} 只")
+        except Exception as e:
+            log.debug(f"加载上一交易日收盘价失败: {e}")
+            prev_closes = {}
+
+        # 4. 不预热 prev_close，让 gateway 刷新时自动从 _load_prev_close_from_db 获取
+        # 这样可以确保 adj_factor.h5 文件已更新后再读取复权因子
+        # 预热时只初始化空 entry，source='startup_preload'
+        for code in stock_codes:
+            cache.update_ohlcv(code, 0, 0, 0, 0, 0, 0, 0.0, 0.0, "startup_preload")
+
+        # 5. 通过 gateway 批量拉取当日行情
         from services.trading.gateway import get_gateway
         gw = await get_gateway()
         gw.subscribe("_startup_preload", set(stock_codes), refresh_interval=0, priority=1)
         results = await gw.refresh_now("_startup_preload")
         gw.unsubscribe("_startup_preload")
 
-        # 4. 统计
+        # 6. 统计
         valid = sum(1 for v in results.values() if v is not None and getattr(v, 'current_price', 0) > 0)
         log.log_event("price_cache_preload_done", f"预热完成: 总计 {len(stock_codes)} 只, 有效行情 {valid} 只", total=len(stock_codes), valid=valid)
 
