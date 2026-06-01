@@ -72,6 +72,7 @@ class PriceCache:
         try:
             from services.common.database import get_sync_connection
             from services.trading.trading_hours import get_previous_trading_day, get_china_time
+            from services.data.adj_factor_service import get_adj_factor_for_stock
 
             prev_date = get_previous_trading_day()
             today = get_china_time().strftime('%Y-%m-%d')
@@ -88,23 +89,25 @@ class PriceCache:
 
             prev_close = float(row['close'])
 
-            # 检查今天是否有除权（复权因子变化）
+            # 从数据库检查今天是否有除权
             try:
-                import pandas as pd
-                h5_path = '/home/bobo/StockWinner/data/adj_factor/basedata/adj_factor/adj_factor.h5'
-                with pd.HDFStore(h5_path, 'r') as store:
-                    df = store['/adj_factor']
-                    if stock_code in df.columns:
-                        col = df[stock_code]
-                        today_factor = col.get(today, 1.0) if today in col.index else 1.0
-                        prev_factor = col.get(prev_date, 1.0) if prev_date in col.index else 1.0
-                        # 若因子变化（除权），调整 prev_close 为除权基准价
-                        if today_factor > 0 and prev_factor > 0 and abs(today_factor - prev_factor) > 0.001:
-                            # 除权基准价 = 前收盘 / (今日因子 / 前日因子)
-                            adj_ratio = today_factor / prev_factor
-                            prev_close = prev_close / adj_ratio
+                factors = get_adj_factor_for_stock(stock_code, start_date=prev_date, end_date=today)
+                if factors:
+                    # 找到 prev_date 和 today 的累计因子
+                    prev_cum = None
+                    today_cum = None
+                    for f in factors:
+                        if f['trade_date'] == prev_date:
+                            prev_cum = f.get('cumulative_factor', 1.0)
+                        elif f['trade_date'] == today:
+                            today_cum = f.get('cumulative_factor', 1.0)
+
+                    # 若今天有除权（累计因子变化），调整 prev_close
+                    if prev_cum and today_cum and abs(today_cum - prev_cum) > 0.001:
+                        adj_ratio = today_cum / prev_cum
+                        prev_close = prev_close / adj_ratio
             except Exception:
-                pass  # 无复权因子文件时跳过调整
+                pass  # 无复权因子数据时跳过调整
 
             return prev_close
         except Exception:

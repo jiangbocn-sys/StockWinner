@@ -166,10 +166,114 @@ class LocalKlineDataService:
                 stock_code TEXT PRIMARY KEY,
                 stock_name TEXT,
                 market TEXT,
+                security_type TEXT DEFAULT 'stock',
                 last_update_time TIMESTAMP,
                 kline_count INTEGER DEFAULT 0
             )
         ''')
+
+        # 检查是否需要添加 security_type 字段（兼容已有数据库）
+        cursor.execute("PRAGMA table_info(stock_metadata)")
+        columns = [col[1] for col in cursor.fetchall()]
+        if 'security_type' not in columns:
+            cursor.execute("ALTER TABLE stock_metadata ADD COLUMN security_type TEXT DEFAULT 'stock'")
+            print("[LocalData] 已添加 security_type 字段到 stock_metadata 表")
+
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_security_type ON stock_metadata(security_type)')
+
+        # 创建 ETF 专项数据表
+        # ETF 申赎信息表
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS etf_pcf_info (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                etf_code TEXT NOT NULL,
+                trade_date DATE NOT NULL,
+                creation_redemption_unit INTEGER,
+                max_cash_ratio TEXT,
+                publish TEXT,
+                creation TEXT,
+                redemption TEXT,
+                estimate_cash_component INTEGER,
+                cash_component INTEGER,
+                nav_per_cu REAL,
+                nav REAL,
+                dividend_per_cu REAL,
+                creation_limit INTEGER,
+                redemption_limit INTEGER,
+                updated_at TIMESTAMP,
+                UNIQUE(etf_code, trade_date)
+            )
+        ''')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_etf_pcf_code ON etf_pcf_info(etf_code)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_etf_pcf_date ON etf_pcf_info(trade_date)')
+
+        # ETF 成分股表
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS etf_pcf_constituent (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                etf_code TEXT NOT NULL,
+                trade_date DATE NOT NULL,
+                underlying_symbol TEXT,
+                component_share INTEGER,
+                substitute_flag TEXT,
+                premium_ratio REAL,
+                discount_ratio REAL,
+                UNIQUE(etf_code, trade_date, underlying_symbol)
+            )
+        ''')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_etf_const_code ON etf_pcf_constituent(etf_code)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_etf_const_date ON etf_pcf_constituent(trade_date)')
+
+        # ETF 基金份额表
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS etf_fund_share (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                etf_code TEXT NOT NULL,
+                trade_date DATE NOT NULL,
+                fund_share REAL,
+                change_reason TEXT,
+                is_consolidated_data INTEGER,
+                updated_at TIMESTAMP,
+                UNIQUE(etf_code, trade_date)
+            )
+        ''')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_etf_share_code ON etf_fund_share(etf_code)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_etf_share_date ON etf_fund_share(trade_date)')
+
+        # ETF IOPV 净值表
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS etf_iopv (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                etf_code TEXT NOT NULL,
+                trade_date DATE NOT NULL,
+                iopv REAL,
+                nav REAL,
+                premium_discount REAL,
+                premium_discount_pct REAL,
+                updated_at TIMESTAMP,
+                UNIQUE(etf_code, trade_date)
+            )
+        ''')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_etf_iopv_code ON etf_iopv(etf_code)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_etf_iopv_date ON etf_iopv(trade_date)')
+
+        # 复权因子表（用于前复权计算）
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS stock_adj_factor (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                stock_code TEXT NOT NULL,
+                trade_date TEXT NOT NULL,
+                adj_factor REAL NOT NULL DEFAULT 1.0,
+                cumulative_factor REAL,
+                source TEXT DEFAULT 'sdk',
+                created_at TEXT,
+                updated_at TEXT,
+                UNIQUE(stock_code, trade_date)
+            )
+        ''')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_adj_factor_stock ON stock_adj_factor(stock_code)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_adj_factor_date ON stock_adj_factor(trade_date)')
+        cursor.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_adj_factor_stock_date ON stock_adj_factor(stock_code, trade_date)')
 
         conn.commit()
         print(f"[LocalData] 数据库初始化完成：{self.db_path}")
@@ -263,14 +367,18 @@ class LocalKlineDataService:
         kline_count = cursor.fetchone()[0]
 
         # 更新股票元数据
+        from services.common.security_type import get_security_type
+        security_type = get_security_type(stock_code)
+        market = 'SI' if '.SI' in stock_code else ('SH' if '.SH' in stock_code else 'SZ')
         cursor.execute('''
             INSERT OR REPLACE INTO stock_metadata
-            (stock_code, stock_name, market, last_update_time, kline_count)
-            VALUES (?, ?, ?, ?, ?)
+            (stock_code, stock_name, market, security_type, last_update_time, kline_count)
+            VALUES (?, ?, ?, ?, ?, ?)
         ''', (
             stock_code,
             stock_name,
-            'SH' if '.SH' in stock_code else 'SZ',
+            market,
+            security_type,
             get_china_time().isoformat(),
             kline_count
         ))
@@ -374,19 +482,23 @@ class LocalKlineDataService:
             conn.commit()
 
             # 批量更新股票元数据
+            from services.common.security_type import get_security_type
             for stock_code, stock_name, df in kline_batch:
                 if df is None or len(df) == 0:
                     continue
                 cursor.execute('SELECT COUNT(*) FROM kline_data WHERE stock_code = ?', (stock_code,))
                 kline_count = cursor.fetchone()[0]
+                security_type = get_security_type(stock_code)
+                market = 'SI' if '.SI' in stock_code else ('SH' if '.SH' in stock_code else 'SZ')
                 cursor.execute('''
                     INSERT OR REPLACE INTO stock_metadata
-                    (stock_code, stock_name, market, last_update_time, kline_count)
-                    VALUES (?, ?, ?, ?, ?)
+                    (stock_code, stock_name, market, security_type, last_update_time, kline_count)
+                    VALUES (?, ?, ?, ?, ?, ?)
                 ''', (
                     stock_code,
                     stock_name,
-                    'SI' if '.SI' in stock_code else ('SH' if '.SH' in stock_code else 'SZ'),
+                    market,
+                    security_type,
                     get_china_time().isoformat(),
                     kline_count
                 ))

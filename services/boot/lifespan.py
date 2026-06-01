@@ -18,7 +18,7 @@ def create_lifespan():
     import os
     import json
 
-    MIGRATION_VERSION = 16
+    MIGRATION_VERSION = 17
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -706,6 +706,41 @@ async def _run_migrations(db_manager, log, migration_version: int):
         "CREATE INDEX IF NOT EXISTS idx_usage_stats_provider_date ON data_source_usage_stats(provider_id, date)",
     ])
 
+    # v16: 复权因子表（用于前复权计算）- 在 kline.db 中创建
+    # 注意：此表在 kline.db，不使用 run_migration 默认的 stockwinner.db
+    try:
+        from services.common.database import get_sync_connection, configure_kline_connection, KLINE_DB_PATH
+        import sqlite3
+        kline_conn = sqlite3.connect(str(KLINE_DB_PATH))
+        configure_kline_connection(kline_conn)
+        kline_cursor = kline_conn.cursor()
+
+        # 检查是否已创建
+        kline_cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='stock_adj_factor'")
+        if not kline_cursor.fetchone():
+            log.log_event("db_migration_start", "复权因子表 (kline.db)", version=16)
+            kline_cursor.execute("""
+                CREATE TABLE stock_adj_factor (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    stock_code TEXT NOT NULL,
+                    trade_date TEXT NOT NULL,
+                    adj_factor REAL NOT NULL DEFAULT 1.0,
+                    cumulative_factor REAL,
+                    source TEXT DEFAULT 'sdk',
+                    created_at TEXT,
+                    updated_at TEXT,
+                    UNIQUE(stock_code, trade_date)
+                )
+            """)
+            kline_cursor.execute("CREATE INDEX idx_adj_factor_stock ON stock_adj_factor(stock_code)")
+            kline_cursor.execute("CREATE INDEX idx_adj_factor_date ON stock_adj_factor(trade_date)")
+            kline_cursor.execute("CREATE UNIQUE INDEX idx_adj_factor_stock_date ON stock_adj_factor(stock_code, trade_date)")
+            kline_conn.commit()
+            log.log_event("db_migration_complete", "复权因子表 (kline.db)", version=16)
+        kline_conn.close()
+    except Exception as e:
+        log.error("db_migration_v16", f"复权因子表创建失败: {e}")
+
     # v7 数据源配置 seed
     try:
         from services.data.channel.config_manager import seed_provider_configs
@@ -855,22 +890,25 @@ async def _preload_price_cache(log, db_manager):
             """, stock_codes + [prev_date])
             prev_closes = {row['stock_code']: float(row['prev_close'] or 0) for row in cursor.fetchall()}
 
-            # 检查今天是否有除权（复权因子变化）
+            # 检查今天是否有除权（从数据库读取复权因子）
             try:
-                import pandas as pd
-                h5_path = '/home/bobo/StockWinner/data/adj_factor/basedata/adj_factor/adj_factor.h5'
-                with pd.HDFStore(h5_path, 'r') as store:
-                    df = store['/adj_factor']
-                    for code in prev_closes:
-                        if code in df.columns:
-                            col = df[code]
-                            today_factor = col.get(today, 1.0) if today in col.index else 1.0
-                            prev_factor = col.get(prev_date, 1.0) if prev_date in col.index else 1.0
-                            if today_factor > 0 and prev_factor > 0 and abs(today_factor - prev_factor) > 0.001:
-                                adj_ratio = today_factor / prev_factor
-                                prev_closes[code] = prev_closes[code] / adj_ratio
+                from services.data.adj_factor_service import get_adj_factor_batch
+                adj_factors = get_adj_factor_batch(list(prev_closes.keys()), today)
+
+                for code, factor_data in adj_factors.items():
+                    if factor_data and code in prev_closes:
+                        # 获取累计因子判断是否有除权
+                        today_cum = factor_data.get('cumulative_factor', 1.0)
+
+                        # 获取前一交易日的累计因子
+                        prev_factors = get_adj_factor_batch([code], prev_date)
+                        prev_cum = prev_factors.get(code, {}).get('cumulative_factor', 1.0)
+
+                        if abs(today_cum - prev_cum) > 0.001:
+                            adj_ratio = today_cum / prev_cum
+                            prev_closes[code] = prev_closes[code] / adj_ratio
             except Exception:
-                pass  # 无复权因子文件时跳过调整
+                pass  # 无复权因子数据时跳过调整
 
             log.log_event("prev_close_preload", f"加载上一交易日({prev_date})收盘价 {len(prev_closes)} 只")
         except Exception as e:

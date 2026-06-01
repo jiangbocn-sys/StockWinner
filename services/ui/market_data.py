@@ -781,34 +781,26 @@ async def get_local_kline(
                 adj_factors = await gateway.get_adj_factor([stock_code])
 
                 if adj_factors:
-                    # SDK 返回单次复权因子（只有除权除息日才不为 1.0）
-                    # 需要先计算累计复权因子：cumprod(single_factor)
-                    # 按日期升序排列
-                    sorted_factors = sorted(adj_factors, key=lambda x: str(x.get('trade_date', '')))
-
-                    # 计算累计因子
-                    cumulative = 1.0
-                    cumulative_map = {}  # 日期 → 累计因子
-                    for f in sorted_factors:
-                        td = str(f.get('trade_date', '')).replace("-", "")[:8]  # YYYYMMDD
-                        single_factor = float(f.get('adj_factor', 1.0))
-                        cumulative *= single_factor
-                        cumulative_map[td] = cumulative
-
-                    # 最新累计因子（用于前复权基准）
-                    latest_cumulative = cumulative
+                    # 已有 cumulative_factor 字段，直接使用
+                    # 构建日期 → 累计因子映射
+                    cumulative_map = {}
+                    latest_cumulative = 1.0
+                    for f in adj_factors:
+                        td = str(f.get('trade_date', ''))[:8]  # YYYYMMDD
+                        cum_factor = float(f.get('cumulative_factor', 1.0))
+                        cumulative_map[td] = cum_factor
+                        latest_cumulative = cum_factor  # 最后一个就是最新的
 
                     # 应用前复权公式
                     # 前复权价格 = 原价 × (当日累计因子 / 最新累计因子)
                     for k in kline:
                         td = k['trade_date'][:8]  # YYYYMMDD
 
-                        # 找到该日期的累计因子（如果没有精确匹配，找最近的早期日期）
-                        # 因为累计因子是单调递增的，没有除权的日子因子与前一交易日相同
+                        # 找到该日期的累计因子
                         if td in cumulative_map:
                             factor = cumulative_map[td]
                         else:
-                            # 找该日期之前最近的累计因子（因子在此期间不变）
+                            # 找该日期之前最近的累计因子
                             earlier_dates = [d for d in cumulative_map.keys() if d <= td]
                             factor = cumulative_map[max(earlier_dates)] if earlier_dates else latest_cumulative
 

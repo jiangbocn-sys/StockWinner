@@ -215,6 +215,38 @@ class TradingGateway(TradingGatewayInterface):
         df = await asyncio.to_thread(sdk_mgr.get_backward_factor, stock_codes, priority)
         return df.to_dict('records') if df is not None and not df.empty else []
 
+    async def get_adj_factor(self, stock_codes: List[str], priority: int = 2) -> List[Dict]:
+        """获取复权因子（从数据库读取）
+
+        前复权公式：前复权价格 = 原价 × 当日累计因子 / 最新累计因子
+
+        返回格式：[{trade_date, adj_factor, cumulative_factor}, ...]
+        """
+        from services.data.adj_factor_service import get_adj_factor_for_stock, update_adj_factor_if_needed
+
+        if not stock_codes:
+            return []
+
+        stock_code = stock_codes[0]
+
+        # 检查新鲜度并按需更新
+        update_adj_factor_if_needed([stock_code])
+
+        # 从数据库读取
+        factors = get_adj_factor_for_stock(stock_code)
+
+        # 转换为原有格式（trade_date YYYYMMDD）
+        result = []
+        for f in factors:
+            trade_date = f['trade_date'].replace('-', '')[:8]
+            result.append({
+                'trade_date': trade_date,
+                'adj_factor': float(f.get('adj_factor', 1.0)),
+                'cumulative_factor': float(f.get('cumulative_factor', 1.0))
+            })
+
+        return result
+
     async def get_stock_basic(self, stock_codes: List[str] = None, priority: int = 2) -> List[Dict]:
         """获取股票基础信息（上市日期、退市日期、板块）"""
         from services.common.sdk_manager import get_sdk_manager
@@ -349,42 +381,56 @@ class TradingGateway(TradingGatewayInterface):
 
     # ── 列表查询 ──
 
-    async def get_stock_list(self) -> List[Dict[str, str]]:
+    async def get_stock_list(self, security_type: str = 'EXTRA_STOCK_A') -> List[Dict[str, str]]:
+        """获取证券列表
+
+        Args:
+            security_type: 证券类型，可选值：
+                - EXTRA_STOCK_A: 沪深北A股（默认）
+                - EXTRA_ETF: 沪深ETF
+                - EXTRA_INDEX_A: 沪深北指数
+                - EXTRA_KZZ: 沪深可转债
+        """
         if not self.connected:
             raise Exception("网关未连接")
         try:
             import asyncio
-            stock_list = await asyncio.to_thread(self._query_stock_list_sync)
+            stock_list = await asyncio.to_thread(self._query_stock_list_sync, security_type)
             return stock_list
         except Exception as e:
-            logger.error(f"获取股票列表失败：{e}")
-            raise Exception(f"获取股票列表失败 - {str(e)}")
+            logger.error(f"获取证券列表失败：{e}")
+            raise Exception(f"获取证券列表失败 - {str(e)}")
 
-    def _query_stock_list_sync(self) -> List[Dict[str, str]]:
+    def _query_stock_list_sync(self, security_type: str = 'EXTRA_STOCK_A') -> List[Dict[str, str]]:
         from services.common.sdk_manager import get_sdk_manager
         from services.common.database import get_sync_connection
+        from services.common.security_type import get_security_type
 
         stock_list = []
-        try:
-            conn = get_sync_connection("kline")
-            cursor = conn.cursor()
-            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='kline_data'")
-            if cursor.fetchone():
-                cursor.execute("SELECT DISTINCT stock_code FROM kline_data")
-                stock_codes = [row[0] for row in cursor.fetchall()]
-                if stock_codes:
-                    for code in stock_codes:
-                        parts = code.split('.')
-                        if len(parts) == 2:
-                            stock_list.append({"code": parts[0], "name": "", "market": parts[1]})
-                    logger.info(f"从本地数据库获取到 {len(stock_list)} 只股票")
-                    return stock_list
-        except Exception as e:
-            logger.warning(f"从本地数据库获取股票列表失败：{e}")
+        # ETF/指数不从本地数据库读取，直接走 SDK
+        if security_type in ('EXTRA_STOCK_A',):
+            try:
+                conn = get_sync_connection("kline")
+                cursor = conn.cursor()
+                cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='kline_data'")
+                if cursor.fetchone():
+                    cursor.execute("SELECT DISTINCT stock_code FROM kline_data")
+                    stock_codes = [row[0] for row in cursor.fetchall()]
+                    if stock_codes:
+                        for code in stock_codes:
+                            # 过滤：只返回股票类型的代码
+                            if get_security_type(code) == 'stock':
+                                parts = code.split('.')
+                                if len(parts) == 2:
+                                    stock_list.append({"code": parts[0], "name": "", "market": parts[1]})
+                        logger.info(f"从本地数据库获取到 {len(stock_list)} 只股票")
+                        return stock_list
+            except Exception as e:
+                logger.warning(f"从本地数据库获取股票列表失败：{e}")
 
         try:
             sdk_mgr = get_sdk_manager()
-            code_info = sdk_mgr.get_code_info(security_type='EXTRA_STOCK_A')
+            code_info = sdk_mgr.get_code_info(security_type=security_type)
             if code_info is not None and len(code_info) > 0:
                 for idx, row in code_info.iterrows():
                     code = str(idx)
@@ -396,11 +442,12 @@ class TradingGateway(TradingGatewayInterface):
                         "code": code_without_suffix, "name": symbol or code_without_suffix,
                         "market": market, "status": security_status
                     })
+                logger.info(f"从 SDK 获取到 {len(stock_list)} 只证券（类型: {security_type})")
                 return stock_list
         except Exception as e:
-            logger.warning(f"SDK获取股票列表失败：{e}")
+            logger.warning(f"SDK获取证券列表失败：{e}")
 
-        raise Exception("无法获取股票列表，请先下载基础数据或检查SDK连接")
+        raise Exception("无法获取证券列表，请先下载基础数据或检查SDK连接")
 
     async def get_index_list(self) -> List[Dict[str, str]]:
         if not self.connected:

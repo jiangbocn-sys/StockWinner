@@ -82,6 +82,7 @@ async def get_agent_spec():
             "description": "多账户智能股票交易系统。支持选股、策略管理、交易执行、持仓监控、信号推送。",
             "version": "v7.8.9",
             "architecture": "FastAPI 后端 + Vue 3 前端 + SQLite 双库（stockwinner.db 业务 / kline.db 行情）",
+            "agent_api_spec": "/api/v1/agent/spec/agent-api",  # 完整 API 规范文档（Markdown）
         },
         "capabilities": {
             "market_data": "实时行情（SDK 直连银河证券）、日/周/月 K 线、技术指标",
@@ -480,6 +481,37 @@ async def get_agent_spec():
             "audit": "所有写操作（POST/PUT/DELETE）自动记录到 agent_audit_log 表",
         },
     }
+
+
+@router.get("/spec/agent-api")
+async def get_agent_api_spec():
+    """Agent API 完整规范文档
+
+    返回 AGENT_API_SPEC.md 的完整内容，包含：
+    - 核心变量命名与类型规范（trade_date vs date）
+    - K线数据结构
+    - 因子字段完整列表（62字段）
+    - 策略沙盒上下文
+    - 回测系统使用方法
+    - Agent API 端点
+    - 常见错误与修复
+    """
+    from services.common.database import SPEC_DIR
+
+    spec_path = SPEC_DIR / "AGENT_API_SPEC.md"
+    if spec_path.exists():
+        content = spec_path.read_text(encoding="utf-8")
+        return {
+            "success": True,
+            "document": content,
+            "format": "markdown",
+        }
+    else:
+        return {
+            "success": False,
+            "error": "AGENT_API_SPEC.md not found",
+            "fallback_url": "/spec",
+        }
 
 
 @router.get("/me")
@@ -3675,4 +3707,111 @@ async def get_health_status(
         "pending_signals": pending_signals.get("cnt", 0) if pending_signals else 0,
         "sdk_connected": sdk_connected,
         "available_cash": float(account.get("available_cash", 0) if account else 0),
+    }
+
+
+# ================================================================
+# 复权因子管理端点（operator 权限）
+# ================================================================
+
+@router.post("/manage/adj-factor/update-full")
+async def update_adj_factor_full(
+    request: Request,
+    agent: dict = Depends(verify_agent_key),
+    _: None = Depends(require_role(AgentRole.OPERATOR)),
+):
+    """手动全量更新复权因子（所有 A 股）"""
+    import asyncio
+    from services.common.sdk_manager import get_sdk_manager
+    from services.data.adj_factor_service import save_adj_factor_batch, get_adj_factor_count
+
+    sdk = get_sdk_manager()
+
+    # 获取全部 A 股代码
+    codes = sdk.get_code_list('EXTRA_STOCK_A')
+
+    if not codes:
+        return {"success": False, "message": "获取股票列表失败"}
+
+    # 分批更新（每批 200 只）
+    batch_size = 200
+    total_saved = 0
+    total_stocks = 0
+
+    for i in range(0, len(codes), batch_size):
+        batch = codes[i:i+batch_size]
+        try:
+            df = sdk.get_adj_factor(batch)
+            if not df.empty:
+                saved = save_adj_factor_batch(df)
+                total_saved += saved
+                total_stocks += len(batch)
+        except Exception:
+            pass
+
+    count = get_adj_factor_count()
+
+    return {
+        "success": True,
+        "message": f"全量更新完成",
+        "stocks_updated": total_stocks,
+        "records_saved": total_saved,
+        "database_stats": count
+    }
+
+
+@router.post("/manage/adj-factor/update-single")
+async def update_adj_factor_single(
+    request: Request,
+    stock_code: str = Body(..., embed=True),
+    agent: dict = Depends(verify_agent_key),
+    _: None = Depends(require_role(AgentRole.OPERATOR)),
+):
+    """手动更新单只股票的复权因子"""
+    from services.common.sdk_manager import get_sdk_manager
+    from services.data.adj_factor_service import save_adj_factor_batch, get_adj_factor_for_stock
+
+    sdk = get_sdk_manager()
+
+    try:
+        df = sdk.get_adj_factor([stock_code])
+        if df.empty:
+            return {"success": False, "message": "SDK 返回空数据"}
+
+        saved = save_adj_factor_batch(df)
+        factors = get_adj_factor_for_stock(stock_code)
+
+        return {
+            "success": True,
+            "message": f"更新完成，保存 {saved} 条除权记录",
+            "stock_code": stock_code,
+            "records_saved": saved,
+            "factor_count": len(factors)
+        }
+    except Exception as e:
+        return {"success": False, "message": str(e)}
+
+
+@router.get("/manage/adj-factor/status")
+async def get_adj_factor_status(
+    request: Request,
+    agent: dict = Depends(verify_agent_key),
+):
+    """获取复权因子数据状态"""
+    from services.data.adj_factor_service import get_adj_factor_count
+    from services.common.database import get_sync_connection
+
+    count = get_adj_factor_count()
+
+    # 获取最近更新时间
+    conn = get_sync_connection("kline")
+    cursor = conn.cursor()
+    cursor.execute("SELECT MAX(updated_at) as last_update FROM stock_adj_factor")
+    row = cursor.fetchone()
+    last_update = row['last_update'] if row else None
+
+    return {
+        "success": True,
+        "stats": count,
+        "last_update": last_update
     }
