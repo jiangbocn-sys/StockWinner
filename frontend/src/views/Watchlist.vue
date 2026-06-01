@@ -173,6 +173,13 @@
                   </span>
                 </template>
               </el-table-column>
+              <el-table-column prop="change_pct" label="涨跌" width="85" align="right" sortable>
+                <template #default="{ row }">
+                  <span :style="{ color: row.change_pct > 0 ? '#f56c6c' : row.change_pct < 0 ? '#67c23a' : '' }">
+                    {{ row.change_pct ? (row.change_pct > 0 ? '+' : '') + row.change_pct.toFixed(2) + '%' : '-' }}
+                  </span>
+                </template>
+              </el-table-column>
               <el-table-column prop="stop_loss_price" label="止损价" width="90" align="right">
                 <template #default="{ row }">¥{{ row.stop_loss_price?.toFixed(2) }}</template>
               </el-table-column>
@@ -195,9 +202,6 @@
                   <el-tag v-else-if="row.signal_type === 'sell'" type="success" size="small">卖出</el-tag>
                   <span v-else>-</span>
                 </template>
-              </el-table-column>
-              <el-table-column prop="updated_at" label="更新时间" width="170" sortable>
-                <template #default="{ row }">{{ formatTime(row.updated_at) }}</template>
               </el-table-column>
             </el-table>
 
@@ -566,7 +570,56 @@
             下一只 <el-icon><ArrowRight /></el-icon>
           </el-button>
         </div>
-        <KlineChart ref="klineChartRef" :data="klineData" height="550px" />
+        <div class="kline-controls" style="margin-bottom: 12px; display: flex; align-items: center; gap: 16px; flex-wrap: wrap">
+          <el-radio-group v-model="klinePeriod" size="small" @change="reloadKline">
+            <el-radio-button label="day">日线</el-radio-button>
+            <el-radio-button label="week">周线</el-radio-button>
+            <el-radio-button label="month">月线</el-radio-button>
+          </el-radio-group>
+          <el-radio-group v-model="klineAdjust" size="small" @change="reloadKline">
+            <el-radio-button label="none">不复权</el-radio-button>
+            <el-radio-button label="forward">前复权</el-radio-button>
+          </el-radio-group>
+          <!-- 技术指标选择器 -->
+          <el-dropdown trigger="click" @command="toggleIndicator" style="margin-left: 8px">
+            <el-button size="small">
+              <el-icon><Setting /></el-icon> 技术指标
+              <el-icon class="el-icon--right"><ArrowDown /></el-icon>
+            </el-button>
+            <template #dropdown>
+              <el-dropdown-menu>
+                <el-dropdown-item :class="{ 'is-active': selectedIndicators.includes('ma5') }" command="ma5">
+                  MA5 均线 <el-tag v-if="selectedIndicators.includes('ma5')" size="small" type="success">已选</el-tag>
+                </el-dropdown-item>
+                <el-dropdown-item :class="{ 'is-active': selectedIndicators.includes('ma10') }" command="ma10">
+                  MA10 均线 <el-tag v-if="selectedIndicators.includes('ma10')" size="small" type="success">已选</el-tag>
+                </el-dropdown-item>
+                <el-dropdown-item :class="{ 'is-active': selectedIndicators.includes('ma20') }" command="ma20">
+                  MA20 均线 <el-tag v-if="selectedIndicators.includes('ma20')" size="small" type="success">已选</el-tag>
+                </el-dropdown-item>
+                <el-dropdown-item :class="{ 'is-active': selectedIndicators.includes('ma60') }" command="ma60">
+                  MA60 均线 <el-tag v-if="selectedIndicators.includes('ma60')" size="small" type="success">已选</el-tag>
+                </el-dropdown-item>
+                <el-dropdown-item divided :class="{ 'is-active': selectedIndicators.includes('boll') }" command="boll">
+                  布林带 (BOLL) <el-tag v-if="selectedIndicators.includes('boll')" size="small" type="success">已选</el-tag>
+                </el-dropdown-item>
+                <el-dropdown-item :class="{ 'is-active': selectedIndicators.includes('ema12') }" command="ema12">
+                  EMA12 <el-tag v-if="selectedIndicators.includes('ema12')" size="small" type="success">已选</el-tag>
+                </el-dropdown-item>
+                <el-dropdown-item :class="{ 'is-active': selectedIndicators.includes('ema26') }" command="ema26">
+                  EMA26 <el-tag v-if="selectedIndicators.includes('ema26')" size="small" type="success">已选</el-tag>
+                </el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
+          <el-button size="small" @click="loadMoreKline" :disabled="klinePeriod === 'month' || klineLoadingMore" v-if="klinePeriod !== 'month'">
+            <el-icon><Download /></el-icon> 加载更多
+          </el-button>
+          <span v-if="klinePeriod === 'month'" style="color: #909399; font-size: 12px">月线已显示全部数据</span>
+        </div>
+        <KlineChart ref="klineChartRef" :data="klineData" height="550px"
+          :indicators="klineIndicators"
+          :indicatorConfig="klineIndicatorConfig" />
       </el-dialog>
     </el-main>
   </div>
@@ -576,7 +629,7 @@
 import { ref, reactive, onMounted, onUnmounted, computed, watch, nextTick } from 'vue'
 import { storeToRefs } from 'pinia'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Search, Refresh, Plus, MoreFilled, Upload, Loading, WarningFilled, Edit, Delete, ArrowLeft, ArrowRight, Download } from '@element-plus/icons-vue'
+import { Search, Refresh, Plus, MoreFilled, Upload, Loading, WarningFilled, Edit, Delete, ArrowLeft, ArrowRight, Download, Setting, ArrowDown } from '@element-plus/icons-vue'
 import { useAccountStore } from '../stores/account'
 import { useWatchlistStore } from '../stores/watchlist'
 import NavBar from '../components/NavBar.vue'
@@ -664,6 +717,109 @@ const klineStockInfo = ref({ code: '', name: '' })
 const klineStockIndex = ref(-1)
 const klineData = ref([])
 
+// 技术指标叠加功能
+const selectedIndicators = ref([])
+const klineIndicators = ref({})
+const klineIndicatorConfig = computed(() => {
+  const config = []
+  const indicatorColors = {
+    ma5: '#FF6B6B',      // 红色
+    ma10: '#4ECDC4',     // 青色
+    ma20: '#FFD93D',     // 黄色
+    ma60: '#96CEB4',     // 绿色
+    boll_upper: '#FF8C00',   // 深橙色（上轨）
+    boll_middle: '#FF1493',  // 深粉色（中轨）
+    boll_lower: '#9370DB',   // 紫色（下轨）
+    ema12: '#00CED1',    // 深青色
+    ema26: '#8B4513',    // 棕色
+  }
+
+  for (const key of selectedIndicators.value) {
+    if (key === 'boll') {
+      config.push({ key: 'boll_upper', name: 'BOLL上轨', color: indicatorColors.boll_upper, width: 1 })
+      config.push({ key: 'boll_middle', name: 'BOLL中轨', color: indicatorColors.boll_middle, width: 1 })
+      config.push({ key: 'boll_lower', name: 'BOLL下轨', color: indicatorColors.boll_lower, width: 1 })
+    } else {
+      const name = key.toUpperCase()
+      config.push({ key, name, color: indicatorColors[key] || '#999', width: 1 })
+    }
+  }
+  return config
+})
+
+// 切换指标选择
+const toggleIndicator = (key) => {
+  console.log('[Watchlist] toggleIndicator:', key)
+  const idx = selectedIndicators.value.indexOf(key)
+  if (idx >= 0) {
+    selectedIndicators.value.splice(idx, 1)
+  } else {
+    selectedIndicators.value.push(key)
+  }
+  console.log('[Watchlist] 当前选中指标:', selectedIndicators.value)
+  // 加载指标数据
+  loadIndicatorData()
+}
+
+// 加载指标数据（从因子数据表）
+const loadIndicatorData = async () => {
+  console.log('[Watchlist] loadIndicatorData called, code:', klineStockInfo.value.code, 'selectedIndicators:', selectedIndicators.value)
+  if (!klineStockInfo.value.code || selectedIndicators.value.length === 0) {
+    klineIndicators.value = {}
+    console.log('[Watchlist] 跳过加载：无代码或无选中指标')
+    return
+  }
+
+  // 只在日线模式下支持指标叠加（因子数据是日频）
+  if (klinePeriod.value !== 'day') {
+    console.log('[Watchlist] 跳过加载：非日线模式')
+    return
+  }
+
+  const code = klineStockInfo.value.code
+  const dates = klineData.value.map(d => d.trade_date)
+  if (dates.length === 0) {
+    console.log('[Watchlist] 跳过加载：无K线数据')
+    return
+  }
+
+  const startDate = dates[0]
+  const endDate = dates[dates.length - 1]
+  console.log('[Watchlist] 加载指标数据:', code, '日期范围:', startDate, '-', endDate)
+
+  // 构建需要获取的指标字段列表
+  const fields = []
+  for (const key of selectedIndicators.value) {
+    if (key === 'boll') {
+      fields.push('boll_upper', 'boll_middle', 'boll_lower')
+    } else {
+      fields.push(key)
+    }
+  }
+
+  console.log('[Watchlist] 请求字段:', fields)
+
+  try {
+    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/factors/${code}?start_date=${startDate}&end_date=${endDate}&fields=${fields.join(',')}`)
+    const data = await res.json()
+    console.log('[Watchlist] API 返回:', data.success, 'count:', data.count)
+
+    if (data.success && data.factors) {
+      const indicators = {}
+      for (const field of fields) {
+        indicators[field] = data.factors.map(f => ({
+          trade_date: f.trade_date,
+          value: f[field]
+        }))
+      }
+      klineIndicators.value = indicators
+      console.log('[Watchlist] 指标数据已设置:', Object.keys(indicators), '数据条数:', indicators[fields[0]]?.length)
+    }
+  } catch (e) {
+    console.error('[Watchlist] 加载指标数据失败:', e)
+  }
+}
+
 const hasPrevStock = computed(() => klineStockIndex.value > 0)
 const hasNextStock = computed(() => klineStockIndex.value >= 0 && klineStockIndex.value < sortedCurrentStocks.value.length - 1)
 const klineNavText = computed(() => {
@@ -682,12 +838,12 @@ const watchlistColumns = [
   { label: '入选原因', prop: 'reason' },
   { label: '触发价', prop: 'trigger_price' },
   { label: '现价', prop: 'current_price' },
+  { label: '涨跌', prop: 'change_pct' },
   { label: '止损价', prop: 'stop_loss_price' },
   { label: '止盈价', prop: 'take_profit_price' },
   { label: '目标数量', prop: 'target_quantity' },
   { label: '信号', prop: 'signal_type' },
   { label: '状态', prop: 'status' },
-  { label: '更新时间', prop: 'updated_at' },
 ]
 
 const handleExportWatchlist = (format) => {
@@ -1037,24 +1193,102 @@ const loadCurrentGroupStocks = async () => {
 
 // ========== K 线图 ==========
 
+const klinePeriod = ref('day')
+const klineAdjust = ref('forward')
+const klineMonths = ref(12)  // 当前加载的月数（日线）/ 根数（周线）
+const klineLoadingMore = ref(false)
+
 const showKline = async (row) => {
   const idx = sortedCurrentStocks.value.findIndex(s => s.stock_code === row.stock_code)
   klineStockIndex.value = idx
   klineVisible.value = true
+  // 初始化加载量
+  if (klinePeriod.value === 'day') {
+    klineMonths.value = 12  // 日线初始 1 年
+  } else if (klinePeriod.value === 'week') {
+    klineMonths.value = 60  // 周线初始 60 个月参数（约 250 根）
+  }
   await loadKlineData(row.stock_code, row.stock_name)
 }
 
+const reloadKline = () => {
+  if (klineStockInfo.value.code) {
+    // 切换周期时重置加载量
+    if (klinePeriod.value === 'day') {
+      klineMonths.value = 12
+    } else if (klinePeriod.value === 'week') {
+      klineMonths.value = 60
+    }
+    loadKlineData(klineStockInfo.value.code, klineStockInfo.value.name)
+  }
+}
+
+const loadMoreKline = async () => {
+  if (klinePeriod.value === 'month') return  // 月线不支持加载更多
+  klineLoadingMore.value = true
+  klineMonths.value += 12  // 每次增加 1 年
+  try {
+    await loadKlineData(klineStockInfo.value.code, klineStockInfo.value.name)
+  } finally {
+    klineLoadingMore.value = false
+  }
+}
+
 const loadKlineData = async (code, name) => {
+  console.log('[Watchlist] loadKlineData called, code:', code, 'selectedIndicators:', selectedIndicators.value)
   klineStockInfo.value = { code, name }
   klineData.value = []
+  klineIndicators.value = {}  // 清空旧指标数据
 
-  // 优先从本地 kline.db 读取（避免 SDK 串行锁竞争导致越切越慢）
+  // 从本地 kline.db 读取（支持日线/周线/月线 + 前复权）
+  // 日线: months 参数控制月数
+  // 周线: months 参数转为根数（months * 5，默认至少 250 根）
+  // 月线: 不限制，取全部
+  const monthsParam = klinePeriod.value === 'month' ? 0 : klineMonths.value
+
+  // 构建因子字段（用于合并请求）
+  let factorFieldsParam = ''
+  if (selectedIndicators.value.length > 0 && klinePeriod.value === 'day') {
+    const fields = []
+    for (const key of selectedIndicators.value) {
+      if (key === 'boll') {
+        fields.push('boll_upper', 'boll_middle', 'boll_lower')
+      } else {
+        fields.push(key)
+      }
+    }
+    factorFieldsParam = `&include_factors=true&factor_fields=${fields.join(',')}`
+    console.log('[Watchlist] 合并请求因子字段:', fields)
+  }
+
   try {
-    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/stocks/${code}/kline-local?months=6`)
+    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/stocks/${code}/kline-local?months=${monthsParam}&period=${klinePeriod.value}&adjust=${klineAdjust.value}${factorFieldsParam}`)
     if (res.ok) {
       const data = await res.json()
       if (data.success && data.kline && data.kline.length > 0) {
         klineData.value = data.kline
+        // 处理合并返回的因子数据
+        if (data.factors && data.factors.length > 0) {
+          console.log('[Watchlist] API 返回因子数据:', data.factor_count, '条')
+          const indicators = {}
+          // 解析因子字段
+          const fields = []
+          for (const key of selectedIndicators.value) {
+            if (key === 'boll') {
+              fields.push('boll_upper', 'boll_middle', 'boll_lower')
+            } else {
+              fields.push(key)
+            }
+          }
+          for (const field of fields) {
+            indicators[field] = data.factors.map(f => ({
+              trade_date: f.trade_date,
+              value: f[field]
+            }))
+          }
+          klineIndicators.value = indicators
+          console.log('[Watchlist] 因子数据已设置:', Object.keys(indicators))
+        }
         return
       }
     }
@@ -1062,10 +1296,16 @@ const loadKlineData = async (code, name) => {
     console.warn('本地 K 线数据读取失败，回退 SDK:', e.message)
   }
 
-  // 回退：SDK 查询
+  // 回退：SDK 查询（仅日线）
+  if (klinePeriod.value !== 'day') {
+    // 周线/月线只能从本地数据库读取，不支持 SDK fallback
+    console.warn('周线/月线数据加载失败')
+    return
+  }
+
   const endDt = new Date()
   const startDt = new Date()
-  startDt.setMonth(startDt.getMonth() - 6)
+  startDt.setMonth(startDt.getMonth() - klineMonths.value)
   const start = startDt.toISOString().slice(0, 10).replace(/-/g, '')
   const end = endDt.toISOString().slice(0, 10).replace(/-/g, '')
 
@@ -1073,6 +1313,10 @@ const loadKlineData = async (code, name) => {
     const res = await fetch(`/api/v1/ui/${currentAccountId.value}/market/kline?stock_code=${code}&period=day&start_date=${start}&end_date=${end}`)
     const data = await res.json()
     klineData.value = data.data?.kline || []
+    // 加载技术指标数据（如果有选中的指标）
+    if (selectedIndicators.value.length > 0) {
+      await loadIndicatorData()
+    }
   } catch (e) {
     console.error('加载 K 线数据失败:', e)
   }
@@ -1083,7 +1327,9 @@ const prevStock = async () => {
   const idx = klineStockIndex.value - 1
   const row = sortedCurrentStocks.value[idx]
   if (!row) return
+  console.log('[Watchlist] prevStock: switching to', row.stock_code, 'selectedIndicators:', selectedIndicators.value)
   klineStockIndex.value = idx
+  klineIndicators.value = {}  // 清空旧指标数据
   await loadKlineData(row.stock_code, row.stock_name)
 }
 
@@ -1092,7 +1338,9 @@ const nextStock = async () => {
   const idx = klineStockIndex.value + 1
   const row = sortedCurrentStocks.value[idx]
   if (!row) return
+  console.log('[Watchlist] nextStock: switching to', row.stock_code, 'selectedIndicators:', selectedIndicators.value)
   klineStockIndex.value = idx
+  klineIndicators.value = {}  // 清空旧指标数据
   await loadKlineData(row.stock_code, row.stock_name)
 }
 
