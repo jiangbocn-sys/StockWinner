@@ -15,7 +15,7 @@ async def validate_account_active(account_id: str) -> dict:
         account_id: 账户 ID
 
     Returns:
-        账户基本信息 {'account_id', 'account_name', 'broker', 'is_active'}
+        账户完整信息（包含 available_cash, max_single_position_pct 等）
 
     Raises:
         HTTPException(404): 贡献不存在
@@ -23,7 +23,7 @@ async def validate_account_active(account_id: str) -> dict:
     """
     db = await get_db_manager()
     account = await db.fetchone(
-        "SELECT account_id, name, display_name, broker, is_active FROM accounts WHERE account_id = ?",
+        "SELECT * FROM accounts WHERE account_id = ?",
         (account_id,)
     )
     if not account:
@@ -40,14 +40,14 @@ async def validate_account_exists(account_id: str) -> dict:
         account_id: 账户 ID
 
     Returns:
-        账户基本信息
+        账户完整信息
 
     Raises:
         HTTPException(404): 账户不存在
     """
     db = await get_db_manager()
     account = await db.fetchone(
-        "SELECT account_id, name, display_name, broker, is_active FROM accounts WHERE account_id = ?",
+        "SELECT * FROM accounts WHERE account_id = ?",
         (account_id,)
     )
     if not account:

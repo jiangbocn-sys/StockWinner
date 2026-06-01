@@ -538,7 +538,7 @@ async def submit_manual_order(
     """提交手动委托订单 → 创建 trading_signals 记录，由监控程序扫描执行"""
     db = get_db_manager()
 
-    await validate_account_active(account_id)
+    account = await validate_account_active(account_id)
 
     if trade_type not in ("buy", "sell"):
         return {"success": False, "message": "trade_type 必须为 buy 或 sell"}

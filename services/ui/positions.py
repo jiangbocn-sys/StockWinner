@@ -254,9 +254,7 @@ async def get_strategy_position_stats(
     """按策略分组统计持仓（含策略现金）"""
     db = get_db_manager()
 
-    
-    await validate_account_active(account_id)
-
+    account = await validate_account_active(account_id)
     available_cash = account.get("available_cash", 0)
 
     # 查询总资产（持仓市值 + 可用资金）
