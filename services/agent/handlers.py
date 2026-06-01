@@ -234,21 +234,40 @@ async def get_agent_spec():
                     {"method": "GET", "path": "/api/v1/agent/query/data/margin/detail?stock_code=600000.SH&start_date=20250101&end_date=20250512", "desc": "融资融券明细（日期必填 YYYYMMDD）"},
                     {"method": "GET", "path": "/api/v1/agent/query/data/block-trading?stock_code=600000.SH&start_date=20250101&end_date=20250512", "desc": "大宗交易（日期必填 YYYYMMDD）"},
                     {"method": "GET", "path": "/api/v1/agent/query/data/treasury-yield", "desc": "国债收益率曲线"},
+                    {"method": "GET", "path": "/api/v1/agent/query/data/etf/pcf?etf_codes=510050.SH,510300.SH", "desc": "ETF申赎数据（PCF清单+成分股）"},
+                    {"method": "GET", "path": "/api/v1/agent/query/data/etf/share?etf_codes=510050.SH,510300.SH", "desc": "ETF基金份额"},
+                    {"method": "GET", "path": "/api/v1/agent/query/data/etf/iopv?etf_codes=510050.SH,510300.SH", "desc": "ETF IOPV实时净值"},
                 ],
             },
             "backtest_endpoints": {
-                "description": "回测相关操作，strategist 及以上角色可用",
+                "description": "回测相关操作。回测API在UI路由下，Agent需通过 /api/v1/ui/ 路径调用",
+                "path_params": {
+                    "account_id": "账户ID（必填），如 'bobo'，需替换路径中的 {account_id}",
+                    "run_id": "回测任务ID（必填），整数类型，如 119，需替换路径中的 {run_id}",
+                },
+                "query_params": {
+                    "status": "状态过滤：pending/running/completed/failed",
+                    "stock_code": "按股票代码过滤交易记录",
+                    "trade_date": "按交易日期过滤持仓快照",
+                    "page": "页码（默认1）",
+                    "page_size": "每页数量（默认10，最大200）",
+                },
                 "endpoints": [
-                    {"method": "POST", "path": "/api/v1/ui/{account_id}/backtest/runs", "desc": "创建并执行回测任务", "body": '{"name":"回测名称","mode":"simulated","start_date":"2024-01-01","end_date":"2024-12-31","initial_capital":1000000,"stop_loss_pct":0.05,"take_profit_pct":0.15,"trailing_stop_pct":0.03,"stop_execution_price":"close","commission_rate":0.0001,"slippage_pct":0,"markets":["SH","SZ"],"group_ids":[1,2],"config":{}}'},
-                    {"method": "GET", "path": "/api/v1/ui/{account_id}/backtest/runs?limit=50&status=", "desc": "回测任务列表（status可选：pending/running/completed/failed）"},
-                    {"method": "GET", "path": "/api/v1/ui/{account_id}/backtest/runs/{run_id}", "desc": "回测任务详情（含 result_summary 绩效指标）"},
-                    {"method": "GET", "path": "/api/v1/ui/{account_id}/backtest/runs/{run_id}/trades", "desc": "回测交易记录（可加 ?stock_code=xxx 过滤）"},
-                    {"method": "GET", "path": "/api/v1/ui/{account_id}/backtest/runs/{run_id}/nav", "desc": "回测每日净值序列（用于绘制净值曲线）"},
-                    {"method": "GET", "path": "/api/v1/ui/{account_id}/backtest/runs/{run_id}/positions", "desc": "回测每日持仓快照（可加 ?trade_date=xxx 过滤）"},
-                    {"method": "DELETE", "path": "/api/v1/ui/{account_id}/backtest/runs/{run_id}", "desc": "删除回测任务及关联数据"},
-                    {"method": "POST", "path": "/api/v1/ui/{account_id}/backtest/check-data", "desc": "数据完整性检查（不执行回测）", "body": '{"start_date":"2024-01-01","end_date":"2024-12-31","group_ids":[1,2]}'},
+                    {"method": "POST", "path": "/api/v1/ui/{account_id}/backtest/runs", "desc": "创建并执行回测任务", "body_example": '{"name":"回测名称","mode":"simulated","start_date":"2024-01-01","end_date":"2024-12-31","initial_capital":1000000}', "required_params": ["name", "start_date", "end_date"]},
+                    {"method": "GET", "path": "/api/v1/ui/{account_id}/backtest/runs", "desc": "回测任务列表（分页）", "example": "/api/v1/ui/bobo/backtest/runs?page=1&page_size=10&status=completed"},
+                    {"method": "GET", "path": "/api/v1/ui/{account_id}/backtest/runs/{run_id}", "desc": "回测任务详情（含result_summary绩效指标）", "example": "/api/v1/ui/bobo/backtest/runs/119"},
+                    {"method": "GET", "path": "/api/v1/ui/{account_id}/backtest/runs/{run_id}/trades", "desc": "回测交易记录", "example": "/api/v1/ui/bobo/backtest/runs/119/trades?stock_code=600000.SH"},
+                    {"method": "GET", "path": "/api/v1/ui/{account_id}/backtest/runs/{run_id}/nav", "desc": "回测每日净值序列（用于绘制净值曲线）", "example": "/api/v1/ui/bobo/backtest/runs/119/nav"},
+                    {"method": "GET", "path": "/api/v1/ui/{account_id}/backtest/runs/{run_id}/positions", "desc": "回测每日持仓快照", "example": "/api/v1/ui/bobo/backtest/runs/119/positions?trade_date=2024-01-15"},
+                    {"method": "DELETE", "path": "/api/v1/ui/{account_id}/backtest/runs/{run_id}", "desc": "删除回测任务及关联数据", "example": "/api/v1/ui/bobo/backtest/runs/119"},
+                    {"method": "POST", "path": "/api/v1/ui/{account_id}/backtest/check-data", "desc": "数据完整性检查（不执行回测）", "body_example": '{"start_date":"2024-01-01","end_date":"2024-12-31","group_ids":[1,2]}'},
                 ],
-                "note": "回测API在UI路由下，Agent需通过 /api/v1/ui/ 路径调用（不经过 /api/v1/agent/ 鉴权中间件），但受 account_id 账户范围限制。stop_execution_price: 'close'=收盘价成交, 'trigger'=触发价成交",
+                "notes": [
+                    "路径参数 {account_id} 和 {run_id} 必须替换为实际值，不能保留花括号",
+                    "run_id 是整数类型，从创建回测返回或任务列表获取",
+                    "回测详情返回 result_summary 包含：total_return, annualized_return, max_drawdown, sharpe_ratio, win_rate, profit_loss_ratio 等",
+                    "stop_execution_price: 'close'=收盘价成交, 'trigger'=触发价成交",
+                ],
             },
             "submit_endpoints": {
                 "description": "策略创建，strategist 及以上角色可用",
@@ -366,6 +385,9 @@ async def get_agent_spec():
                 "get_kline_local(code, limit, start_date)": "本地 K 线（同步）",
                 "query_db(sql, params)": "同步只读 SQL 查询，返回 list[dict]",
                 "kronos_predict(df_hist, pred_len)": "Kronos 时间序列预测",
+                "get_etf_pcf(etf_codes)": "ETF 申赎数据，返回 {pcf_info, constituents}",
+                "get_etf_share(etf_codes)": "ETF 基金份额，返回 {etf_code: list[dict]}",
+                "get_etf_iopv(etf_codes)": "ETF IOPV 实时净值，返回 {etf_code: list[dict]}",
             },
             "allowed_imports": ["pandas", "numpy", "datetime", "statistics", "json", "math", "re", "collections", "itertools", "functools", "dataclasses", "typing", "time", "calendar", "decimal", "copy", "string"],
             "prohibited_imports": ["os", "sys", "subprocess", "socket", "http", "requests", "urllib", "sqlite3", "torch", "safetensors"],
@@ -717,7 +739,13 @@ async def query_market(
 
         code = stock_code
         if '.' not in code:
-            code = f"{code}.SH" if code.startswith('6') else f"{code}.SZ"
+            # ETF + 股票代码规则
+            if code.startswith('6') or code.startswith('51') or code.startswith('58'):
+                code = f"{code}.SH"
+            elif code.startswith('0') or code.startswith('3') or code.startswith('159'):
+                code = f"{code}.SZ"
+            else:
+                code = f"{code}.SH"
 
         market_data = None
         # 优先 price_cache
@@ -840,7 +868,17 @@ async def query_factors(
 
     code = stock_code
     if '.' not in code:
-        code = f"{code}.SH" if code.startswith('6') else f"{code}.SZ"
+        # 代码后缀规则：
+        # - 上交所股票: 6xxxxx → .SH
+        # - 上交所ETF: 51xxxx, 58xxxx → .SH
+        # - 深交所股票: 0xxxxx, 3xxxxx → .SZ
+        # - 深交所ETF: 159xxx → .SZ
+        if code.startswith('6') or code.startswith('51') or code.startswith('58'):
+            code = f"{code}.SH"
+        elif code.startswith('0') or code.startswith('3') or code.startswith('159'):
+            code = f"{code}.SZ"
+        else:
+            code = f"{code}.SH"  # 默认上交所
 
     conn = get_sync_connection("kline")
     if date:
@@ -1004,7 +1042,13 @@ async def query_stock_code(
         if '.' not in code:
             code_sh = f"{code}.SH"
             code_sz = f"{code}.SZ"
-            inferred = code_sh if code.startswith('6') else code_sz
+            # ETF + 股票代码规则
+            if code.startswith('6') or code.startswith('51') or code.startswith('58'):
+                inferred = code_sh
+            elif code.startswith('0') or code.startswith('3') or code.startswith('159'):
+                inferred = code_sz
+            else:
+                inferred = code_sh  # 默认上交所
 
             # 先查推测的市场
             result = _lookup_local(inferred)
@@ -1419,6 +1463,113 @@ async def query_data_treasury_yield(
         priority = get_priority_for_role(agent["role"])
         records = await gateway.get_treasury_yield(priority=priority)
         return {"success": True, "data": {"records": records, "count": len(records)}}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+# ================================================================
+# ETF 专项数据
+# ================================================================
+
+@router.get("/query/data/etf/pcf")
+async def query_data_etf_pcf(
+    request: Request,
+    etf_codes: str = Query(..., description="ETF代码列表，逗号分隔，如 510050.SH,510300.SH"),
+    agent: dict = Depends(verify_agent_key),
+):
+    """ETF 申赎数据（PCF清单+成分股）
+
+    返回:
+    - pcf_info: ETF 基本信息（申购赎回代码、最小申购单位等）
+    - constituents: 各 ETF 的成分股清单
+    """
+    await log_action(
+        agent_id=agent["agent_id"], action="query.data.etf_pcf", risk_level="low",
+        ip_address=request.client.host if request.client else None,
+    )
+    try:
+        from services.common.sdk_manager import get_sdk_manager
+        codes_list = [c.strip() for c in etf_codes.split(",") if c.strip()]
+        sdk = get_sdk_manager()
+        pcf_info, constituents = sdk.get_etf_pcf(codes_list)
+        # 处理 NaN 值：先转 object 类型，再替换 NaN 为 None
+        pcf_records = pcf_info.astype(object).where(pcf_info.notnull(), None).to_dict('records') if not pcf_info.empty else []
+        constituents_data = {}
+        for k, v in constituents.items():
+            if not v.empty:
+                constituents_data[k] = v.astype(object).where(v.notnull(), None).to_dict('records')
+            else:
+                constituents_data[k] = []
+        return {
+            "success": True,
+            "data": {
+                "pcf_info": pcf_records,
+                "constituents": constituents_data,
+                "etf_count": len(codes_list)
+            }
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@router.get("/query/data/etf/share")
+async def query_data_etf_share(
+    request: Request,
+    etf_codes: str = Query(..., description="ETF代码列表，逗号分隔"),
+    agent: dict = Depends(verify_agent_key),
+):
+    """ETF 基金份额
+
+    返回各 ETF 的历史份额变动数据
+    """
+    await log_action(
+        agent_id=agent["agent_id"], action="query.data.etf_share", risk_level="low",
+        ip_address=request.client.host if request.client else None,
+    )
+    try:
+        from services.common.sdk_manager import get_sdk_manager
+        codes_list = [c.strip() for c in etf_codes.split(",") if c.strip()]
+        sdk = get_sdk_manager()
+        result = sdk.get_fund_share(codes_list)
+        # 处理 NaN 值：先转 object 类型，再替换 NaN 为 None
+        data = {}
+        for k, v in result.items():
+            if not v.empty:
+                data[k] = v.astype(object).where(v.notnull(), None).to_dict('records')
+            else:
+                data[k] = []
+        return {"success": True, "data": data, "etf_count": len(codes_list)}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@router.get("/query/data/etf/iopv")
+async def query_data_etf_iopv(
+    request: Request,
+    etf_codes: str = Query(..., description="ETF代码列表，逗号分隔"),
+    agent: dict = Depends(verify_agent_key),
+):
+    """ETF IOPV 实时净值（盘中计算）
+
+    返回各 ETF 的 IOPV（Indicative Optimized Portfolio Value）净值数据
+    """
+    await log_action(
+        agent_id=agent["agent_id"], action="query.data.etf_iopv", risk_level="low",
+        ip_address=request.client.host if request.client else None,
+    )
+    try:
+        from services.common.sdk_manager import get_sdk_manager
+        codes_list = [c.strip() for c in etf_codes.split(",") if c.strip()]
+        sdk = get_sdk_manager()
+        result = sdk.get_fund_iopv(codes_list)
+        # 处理 NaN 值：先转 object 类型，再替换 NaN 为 None
+        data = {}
+        for k, v in result.items():
+            if not v.empty:
+                data[k] = v.astype(object).where(v.notnull(), None).to_dict('records')
+            else:
+                data[k] = []
+        return {"success": True, "data": data, "etf_count": len(codes_list)}
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -1974,6 +2125,37 @@ async def submit_strategy_code(
             return _get_kline_spliced(codes, lookback=lookback)
         return lds.get_batch_kline(codes, limit=lookback)
 
+    # ── ETF 专项数据 ──
+    def _get_etf_pcf(etf_codes):
+        """ETF 申赎数据（pcf_info, constituents）
+        返回: {'pcf_info': DataFrame, 'constituents': {etf_code: DataFrame}}
+        """
+        from services.common.sdk_manager import get_sdk_manager
+        sdk = get_sdk_manager()
+        pcf_info, constituents = sdk.get_etf_pcf(etf_codes)
+        return {
+            'pcf_info': pcf_info.to_dict('records') if not pcf_info.empty else [],
+            'constituents': {k: v.to_dict('records') if not v.empty else [] for k, v in constituents.items()}
+        }
+
+    def _get_etf_share(etf_codes):
+        """ETF 基金份额
+        返回: {etf_code: list[dict]}
+        """
+        from services.common.sdk_manager import get_sdk_manager
+        sdk = get_sdk_manager()
+        result = sdk.get_fund_share(etf_codes)
+        return {k: v.to_dict('records') if not v.empty else [] for k, v in result.items()}
+
+    def _get_etf_iopv(etf_codes):
+        """ETF IOPV 净值（盘中实时）
+        返回: {etf_code: list[dict]}
+        """
+        from services.common.sdk_manager import get_sdk_manager
+        sdk = get_sdk_manager()
+        result = sdk.get_fund_iopv(etf_codes)
+        return {k: v.to_dict('records') if not v.empty else [] for k, v in result.items()}
+
     test_run_result = None
     test_run_error = None
     test_run_output = ""
@@ -2002,6 +2184,10 @@ async def submit_strategy_code(
         "get_factors_batch": _get_factors_batch,
         "get_kline_spliced": _get_kline_spliced,
         "get_kline_smart": _get_kline_smart,
+        # ETF 专项数据
+        "get_etf_pcf": _get_etf_pcf,
+        "get_etf_share": _get_etf_share,
+        "get_etf_iopv": _get_etf_iopv,
     }
 
     old_stdout = __import__("sys").stdout
@@ -2510,6 +2696,28 @@ async def strategy_execute(
         """获取预取的当日实时 OHLCV — 从 price_cache 取"""
         return _get_market_data(stock_code)
 
+    # ── ETF 专项数据 ──
+    def _get_etf_pcf(etf_codes):
+        from services.common.sdk_manager import get_sdk_manager
+        sdk = get_sdk_manager()
+        pcf_info, constituents = sdk.get_etf_pcf(etf_codes)
+        return {
+            'pcf_info': pcf_info.to_dict('records') if not pcf_info.empty else [],
+            'constituents': {k: v.to_dict('records') if not v.empty else [] for k, v in constituents.items()}
+        }
+
+    def _get_etf_share(etf_codes):
+        from services.common.sdk_manager import get_sdk_manager
+        sdk = get_sdk_manager()
+        result = sdk.get_fund_share(etf_codes)
+        return {k: v.to_dict('records') if not v.empty else [] for k, v in result.items()}
+
+    def _get_etf_iopv(etf_codes):
+        from services.common.sdk_manager import get_sdk_manager
+        sdk = get_sdk_manager()
+        result = sdk.get_fund_iopv(etf_codes)
+        return {k: v.to_dict('records') if not v.empty else [] for k, v in result.items()}
+
     context = {
         "stocks": stocks,
         "account_id": account_id,
@@ -2523,6 +2731,10 @@ async def strategy_execute(
         "get_kline_spliced": lambda codes, lookback=100: {c: _get_kline(c, limit=lookback) for c in codes},
         "get_market_data": _get_market_data,
         "get_realtime_quote": _get_realtime_quote,
+        # ETF 专项数据
+        "get_etf_pcf": _get_etf_pcf,
+        "get_etf_share": _get_etf_share,
+        "get_etf_iopv": _get_etf_iopv,
     }
 
     engine = get_strategy_engine()
