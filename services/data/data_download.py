@@ -414,12 +414,9 @@ def download_all_kline_data_sync(
             download_etf=download_etf
         )
 
-    loop = asyncio.new_event_loop()
-    try:
-        asyncio.set_event_loop(loop)
-        return loop.run_until_complete(_async_download())
-    finally:
-        loop.close()
+    # 使用 async_helper 模块统一处理事件循环冲突
+    from services.common.async_helper import run_async_safe
+    return run_async_safe(_async_download)
 
 
 # ================================================================
@@ -507,12 +504,9 @@ def download_incremental_kline_data_sync(
             download_etf=download_etf
         )
 
-    loop = asyncio.new_event_loop()
-    try:
-        asyncio.set_event_loop(loop)
-        return loop.run_until_complete(_async_download())
-    finally:
-        loop.close()
+    # 使用 async_helper 模块统一处理事件循环冲突
+    from services.common.async_helper import run_async_safe
+    return run_async_safe(_async_download)
 
 
 # ================================================================
