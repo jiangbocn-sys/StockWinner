@@ -636,7 +636,7 @@ async def get_watchlist(
                         item["current_price"] = ohlcv['close']
                         item["change_pct"] = ohlcv.get('change_pct', 0)
                         price_injected += 1
-        logger.info("watchlist_price_done", f"cached_prices_in_cache={len(cached_prices)}, injected={price_injected}/{len(watchlist)}, cache_sample={list(cached_prices.items())[:3]}")
+        logger.info("watchlist_price_done", f"cached_ohlcv={len(cached_ohlcv)}, injected={price_injected}/{len(watchlist)}")
     except Exception as e:
         import logging
         logging.getLogger("watchlist").error(f"watchlist 价格刷新失败: {e}", exc_info=True)

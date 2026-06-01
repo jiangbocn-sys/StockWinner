@@ -21,7 +21,7 @@ async def validate_account_active(account_id: str) -> dict:
         HTTPException(404): 贡献不存在
         HTTPException(403): 贡献已禁用
     """
-    db = await get_db_manager()
+    db = get_db_manager()
     account = await db.fetchone(
         "SELECT * FROM accounts WHERE account_id = ?",
         (account_id,)
@@ -45,7 +45,7 @@ async def validate_account_exists(account_id: str) -> dict:
     Raises:
         HTTPException(404): 账户不存在
     """
-    db = await get_db_manager()
+    db = get_db_manager()
     account = await db.fetchone(
         "SELECT * FROM accounts WHERE account_id = ?",
         (account_id,)
