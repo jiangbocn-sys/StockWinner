@@ -856,6 +856,13 @@ class SchedulerService:
         thread.start()
         return {'success': True, 'message': '周K线下载任务已启动'}
 
+    def run_manual_weekly_kline_check(self) -> Dict:
+        """手动触发周K线检查（先检查覆盖度，再按需下载）"""
+        logger.info("手动触发周K线检查")
+        thread = threading.Thread(target=self._weekly_kline_check_job)
+        thread.start()
+        return {'success': True, 'message': '周K线检查任务已启动'}
+
     def run_manual_monthly_check(self) -> Dict:
         """手动触发月频因子更新"""
         logger.info("手动触发月频因子更新")
@@ -1583,7 +1590,10 @@ class SchedulerService:
                 result = proxy._call_ipc("get_adj_factor", {"stock_codes": codes}, priority=1, timeout=300.0)
 
                 if result is not None and isinstance(result, pd.DataFrame) and not result.empty:
-                    logger.info(f"复权因子更新完成，覆盖 {len(result.columns)} 只股票")
+                    # 保存到数据库
+                    from services.data.adj_factor_service import save_adj_factor_batch
+                    saved = save_adj_factor_batch(result)
+                    logger.info(f"复权因子更新完成，覆盖 {len(result.columns)} 只股票，保存 {saved} 条除权记录")
                 else:
                     logger.warning("复权因子更新返回空数据")
             else:

@@ -2,6 +2,7 @@
 信号评估器 — 策略评估、卖出决策、watchlist 监控。
 """
 import time
+from collections import defaultdict
 from typing import Dict, List, Optional, Any
 
 from services.common.database import get_db_manager
@@ -18,8 +19,12 @@ class SignalEvaluator:
         self._strategy_cache: Dict[int, Any] = {}
 
     async def evaluate_trading_strategies(self, account_id: str):
-        """评估交易策略配置中的触发条件"""
+        """评估交易策略配置中的触发条件
+
+        改进：同一策略多个买入信号时，按配置分配资金
+        """
         from services.trading.strategy_executor import get_strategy_executor
+        from services.monitoring.signal_allocator import get_signal_allocator
 
         executor = get_strategy_executor(account_id)
         strategies = await executor.load_strategies(enabled_only=True)
@@ -36,6 +41,11 @@ class SignalEvaluator:
             return
 
         decisions = await executor.evaluate_all(strategies, stock_codes)
+
+        # 按策略分组买入信号
+        buy_signals_by_strategy: Dict[int, List[Dict]] = defaultdict(list)
+        sell_signals: List[Dict] = []
+
         for decision in decisions:
             strategy_id = decision["strategy_id"]
             cooldown_seconds = await self._get_cooldown_for_strategy(strategy_id)
@@ -44,25 +54,58 @@ class SignalEvaluator:
             if time.time() - last_trigger < cooldown_seconds:
                 continue
 
-            self._cooldown[cooldown_key] = time.time()
-
             if decision["action"] == "buy":
-                await self._executor.execute_buy_signal(
-                    account_id,
-                    {"stock_code": decision["stock_code"], "stock_name": decision["stock_name"]},
-                    decision["trigger_data"]["current_price"],
-                    100,
-                    trigger_source=decision["strategy_name"],
-                )
+                buy_signals_by_strategy[strategy_id].append({
+                    "stock_code": decision["stock_code"],
+                    "stock_name": decision["stock_name"],
+                    "current_price": decision["trigger_data"]["current_price"],
+                    "score": decision["trigger_data"].get("change_pct", 0),  # 用涨幅作为默认评分
+                    "strategy_name": decision["strategy_name"],
+                })
             elif decision["action"] == "sell":
-                await self._executor.execute_sell_signal(
-                    account_id,
-                    {"stock_code": decision["stock_code"], "stock_name": decision["stock_name"]},
-                    decision["trigger_data"]["current_price"],
-                    f"strategy_{decision['strategy_type']}",
-                    0,
-                    trigger_source=decision["strategy_name"],
-                )
+                sell_signals.append(decision)
+
+        # 使用信号分配器分配资金并执行买入
+        allocator = get_signal_allocator()
+        for strategy_id, signals in buy_signals_by_strategy.items():
+            if not signals:
+                continue
+
+            # 标记 cooldown
+            self._cooldown[(account_id, strategy_id)] = time.time()
+
+            # 构建行情数据字典
+            market_data = {s["stock_code"]: s for s in signals}
+
+            # 分配资金
+            allocated_signals = await allocator.allocate_signals(
+                account_id, strategy_id, signals, market_data
+            )
+
+            # 执行买入
+            strategy_name = signals[0].get("strategy_name", f"策略#{strategy_id}")
+            for signal in allocated_signals:
+                if signal.get("quantity", 0) > 0:
+                    await self._executor.execute_buy_signal(
+                        account_id,
+                        {"stock_code": signal["stock_code"], "stock_name": signal["stock_name"]},
+                        signal["current_price"],
+                        signal["quantity"],
+                        trigger_source=strategy_name,
+                    )
+
+        # 执行卖出信号
+        for decision in sell_signals:
+            strategy_id = decision["strategy_id"]
+            self._cooldown[(account_id, strategy_id)] = time.time()
+            await self._executor.execute_sell_signal(
+                account_id,
+                {"stock_code": decision["stock_code"], "stock_name": decision["stock_name"]},
+                decision["trigger_data"]["current_price"],
+                f"strategy_{decision['strategy_type']}",
+                0,
+                trigger_source=decision["strategy_name"],
+            )
 
     async def _get_cooldown_for_strategy(self, strategy_id: int) -> int:
         try:
@@ -156,14 +199,8 @@ class SignalEvaluator:
                         get_logger("monitor").error("monitor", f"策略 #{sid} 编译失败: {e}")
                         self._strategy_cache[sid] = None
 
-        # 批量预加载 K 线缓存
+        # K 线缓存：监控循环不预加载，由卖出代码策略按需获取（_get_kline_local）
         kline_cache: Dict[str, Any] = {}
-        try:
-            from services.data.local_data_service import get_local_data_service
-            lds = get_local_data_service()
-            kline_cache = lds.get_batch_kline(stock_codes, limit=60)
-        except Exception:
-            pass
 
         # 逐个检查
         for stock in watchlist:
@@ -371,6 +408,18 @@ class SignalEvaluator:
 
             # 将持仓信息合并到 stock 对象（用于止损止盈计算）
             stock = {**stock, "avg_cost": position.get("avg_cost"), "highest_price": position.get("highest_price")}
+
+            # 检测并更新 highest_price（盘中创新高时）
+            old_highest = position.get("highest_price", 0) or 0
+            if current_price > old_highest:
+                await db.execute(
+                    "UPDATE stock_positions SET highest_price = ? WHERE account_id = ? AND stock_code = ?",
+                    (current_price, account_id, stock_code)
+                )
+                stock["highest_price"] = current_price
+                # 触发 trailing_stop 策略的止损价同步
+                from services.monitoring.sl_tp_sync import sync_on_highest_price_update
+                await sync_on_highest_price_update(account_id, stock_code, current_price)
 
             ts_config = ts_map.get(stock_code) if ts_map else None
             sell_sid = sell_strategy_map.get(stock_code) if sell_strategy_map else None

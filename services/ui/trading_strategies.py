@@ -9,6 +9,7 @@ from typing import Optional, List
 from datetime import datetime
 from services.common.database import get_db_manager
 from services.common.timezone import get_china_time, format_china_time
+from services.auth.account_validator import validate_account_active, validate_account_exists
 
 router = APIRouter()
 
@@ -145,30 +146,10 @@ async def upsert_stock_trading_strategy(
         )
         message = "交易策略创建成功"
 
-    # 同步到 watchlist：计算有效止损止盈价
+    # 同步到 watchlist：使用统一的同步服务
     try:
-        pos = await db.fetchone(
-            "SELECT avg_cost FROM stock_positions WHERE account_id = ? AND stock_code = ? AND quantity > 0",
-            (account_id, stock_code)
-        )
-        avg_cost = float(pos["avg_cost"]) if pos and pos.get("avg_cost", 0) > 0 else 0
-
-        sl = stop_loss_price if (stop_loss_price and stop_loss_price > 0) else (
-            round(avg_cost * (1 - (stop_loss_pct or 0)), 2) if avg_cost > 0 and (stop_loss_pct or 0) > 0 else 0
-        )
-        tp = take_profit_price if (take_profit_price and take_profit_price > 0) else (
-            round(avg_cost * (1 + (take_profit_pct or 0)), 2) if avg_cost > 0 and (take_profit_pct or 0) > 0 else 0
-        )
-
-        existing_wl = await db.fetchone(
-            "SELECT id FROM watchlist WHERE account_id = ? AND stock_code = ? AND status IN ('pending', 'watching', 'bought')",
-            (account_id, stock_code)
-        )
-        if existing_wl and (sl > 0 or tp > 0):
-            await db.execute(
-                "UPDATE watchlist SET stop_loss_price = ?, take_profit_price = ?, updated_at = ? WHERE id = ?",
-                (sl, tp, format_china_time(), existing_wl["id"])
-            )
+        from services.monitoring.sl_tp_sync import sync_on_strategy_change
+        await sync_on_strategy_change(account_id, stock_code)
     except Exception:
         pass
 

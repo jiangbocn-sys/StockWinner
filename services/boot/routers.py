@@ -8,12 +8,13 @@ from services.ui import (
     screening, monitoring, market_data, data_explorer,
     position_rules, factors, scheduler, notifications,
     trading_strategies, strategy_performance, data_service, data_sources,
-    capital, system_config,
+    capital, system_config, signal_allocation, sl_tp_sync,
 )
 from services.backtest.api import router as backtest_router
 from services.strategy.api import router as strategy_v2_router
 from services.account_management.api import router as account_management_router
 from services.auth.api import router as auth_router
+from services.auth.api import get_current_user, get_token_from_header
 from services.llm.api import router as llm_router
 from services.agent.api import register_agent_routers
 
@@ -45,6 +46,14 @@ def register_routers(app: FastAPI):
     app.include_router(backtest_router)
     app.include_router(data_sources.router)
     app.include_router(system_config.router)
+    app.include_router(signal_allocation.router)
+    app.include_router(sl_tp_sync.router)
+
+    # 别名路由：前端调用 /api/me（不带 /auth 前缀）
+    from fastapi import Depends
+    app.add_api_route("/api/me", get_current_user, methods=["GET"],
+                      dependencies=[Depends(get_token_from_header)],
+                      include_in_schema=False)
 
     # Agent API（独立路径，不影响 UI）
     register_agent_routers(app)

@@ -80,6 +80,36 @@ from services.common.timezone import get_china_time, CHINA_TZ
 
 `day_of_week` 必须用命名格式 `mon-fri`，禁止数字（与标准 cron 不一致）。
 
+### 规则 7：长时间任务线程隔离（禁止阻塞事件循环）
+
+**问题根源**：在 async 函数中直接调用同步方法会阻塞 FastAPI 主事件循环，导致 API 响应超时、前端假死。
+
+**正确做法**：
+- 任务插件 (`services/tasks/*.py`) 必须通过 `scheduler.run_manual_xxx()` 方法调用
+- 这些方法内部使用 `threading.Thread(target=self._xxx_job)` 创建独立线程
+- **禁止**在 async 函数中直接调用 `scheduler._xxx_job()` 同步方法
+
+**错误示例**：
+```python
+async def execute(task_id: int = None, **kwargs):
+    scheduler = get_scheduler()
+    scheduler._daily_kline_check_job()  # ❌ 直接调用同步方法，阻塞事件循环
+```
+
+**正确示例**：
+```python
+async def execute(task_id: int = None, **kwargs):
+    scheduler = get_scheduler()
+    result = scheduler.run_manual_kline_check()  # ✅ 通过线程隔离方法调用
+```
+
+**适用范围**：
+- K 线下载任务 (`kline_check.py`)
+- 周K线下载任务 (`weekly_kline.py`)
+- 行业指数下载 (`industry_download.py`)
+- 月频因子更新 (`monthly_factors.py`)
+- 其他涉及 SDK 调用或数据库批量操作的长任务
+
 ## Key Patterns
 
 ### Gateway 使用

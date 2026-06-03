@@ -36,12 +36,12 @@ async def execute(task_id: int = None, **kwargs):
     if not codes:
         return {'success': True, 'message': '无持仓和watchlist股票，跳过更新', 'count': 0}
 
-    log.info(f"开始更新 {len(codes)} 只股票的复权因子")
+    log.info("adj_factor", f"开始更新 {len(codes)} 只股票的复权因子")
 
     # 调用新服务：从 SDK 获取并保存到数据库
     result = update_adj_factor_from_sdk(codes)
 
-    log.info(f"复权因子更新完成：{result['message']}")
+    log.info("adj_factor", f"复权因子更新完成：{result['message']}")
 
     return {
         'success': result['success'],

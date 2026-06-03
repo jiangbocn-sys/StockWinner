@@ -121,6 +121,21 @@ def create_lifespan():
         # 初始化多数据源 ChannelRouter
         await _init_channel_router(db_manager, log)
 
+        # ========== 启动时同步所有持仓止盈止损 ==========
+        try:
+            from services.monitoring.sl_tp_sync import batch_sync_positions
+            accounts = await db_manager.fetchall(
+                "SELECT account_id FROM accounts WHERE is_active = 1"
+            )
+            total_synced = 0
+            for row in accounts:
+                result = await batch_sync_positions(row["account_id"])
+                total_synced += result["synced"]
+            if total_synced > 0:
+                log.log_event("sl_tp_startup_sync", f"启动时同步 {total_synced} 只持仓止盈止损")
+        except Exception as e:
+            log.error("sl_tp_startup_sync", f"启动同步止盈止损失败: {e}")
+
         yield
 
         # ========== 关闭流程 ==========

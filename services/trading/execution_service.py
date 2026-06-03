@@ -258,6 +258,8 @@ class TradeExecutionService:
         订单流转：pending → submitted → filled
         若任何环节失败，订单标记为 rejected
 
+        资金检查优先：所有资金/风控检查在订单创建前完成，避免无效委托
+
         Returns:
             交易结果
         """
@@ -270,7 +272,43 @@ class TradeExecutionService:
                 "fees": {"commission": 0, "transfer_fee": 0, "stamp_tax": 0, "total_fee": 0}
             }
 
-        # 计算可买数量和费用
+        # ========== 资金预检查（订单创建前）==========
+        # 1. 获取账户可用资金
+        account = await self.get_account_info()
+        available_cash = account.get("available_cash", 0) if account else 0
+
+        # 2. 如果有策略，获取策略现金
+        strategy_cash = 0
+        if strategy_id:
+            strategy = await self.db.fetchone(
+                "SELECT strategy_cash FROM strategies WHERE id = ? AND account_id = ?",
+                (strategy_id, self.account_id)
+            )
+            strategy_cash = strategy.get("strategy_cash", 0) if strategy else 0
+
+        # 3. 计算最小买入金额（一手 + 最低手续费）
+        fees_cfg = await self._get_fee_config()
+        min_buy_amount = price * 100 + fees_cfg["min_commission"]
+
+        # 4. 检查账户资金是否足够买一手
+        if available_cash < min_buy_amount:
+            return {
+                "success": False,
+                "message": f"账户资金不足：需 ¥{min_buy_amount:.2f}（最低一手），可用 ¥{available_cash:.2f}",
+                "quantity": 0,
+                "fees": {"commission": 0, "transfer_fee": 0, "stamp_tax": 0, "total_fee": 0}
+            }
+
+        # 5. 策略买入时检查策略现金是否足够买一手
+        if strategy_id and strategy_cash < min_buy_amount:
+            return {
+                "success": False,
+                "message": f"策略现金不足：需 ¥{min_buy_amount:.2f}（最低一手），现有 ¥{strategy_cash:.2f}",
+                "quantity": 0,
+                "fees": {"commission": 0, "transfer_fee": 0, "stamp_tax": 0, "total_fee": 0}
+            }
+
+        # ========== 计算可买数量 ==========
         quantity, total_amount, fees = await self.calculate_buy_quantity(
             stock_code, price, target_quantity, strategy_id=strategy_id
         )
@@ -278,12 +316,51 @@ class TradeExecutionService:
         if quantity <= 0:
             return {
                 "success": False,
-                "message": "可用资金不足",
+                "message": "可用资金不足（计算后可买数量为0）",
                 "quantity": 0,
                 "fees": {"commission": 0, "transfer_fee": 0, "stamp_tax": 0, "total_fee": 0}
             }
 
-        # 创建订单（pending 状态）
+        # ========== 风控检查（订单创建前）==========
+        try:
+            from services.trading.risk_service import get_risk_service
+            risk = get_risk_service(self.account_id)
+            passed, reason = await risk.check_buy(stock_code, price, quantity)
+            if not passed:
+                return {
+                    "success": False,
+                    "message": f"风控拦截: {reason}",
+                    "quantity": 0,
+                    "fees": {"commission": 0, "transfer_fee": 0, "stamp_tax": 0, "total_fee": 0}
+                }
+
+            # 策略级仓位上限检查
+            if strategy_id:
+                passed, reason = await risk.check_strategy_position(stock_code, price, quantity, strategy_id)
+                if not passed:
+                    return {
+                        "success": False,
+                        "message": f"策略仓位超限: {reason}",
+                        "quantity": 0,
+                        "fees": {"commission": 0, "transfer_fee": 0, "stamp_tax": 0, "total_fee": 0}
+                    }
+        except Exception as e:
+            print(f"[RiskService] 风控检查异常: {e}，放行")
+
+        # ========== 策略现金检查（订单创建前）==========
+        if strategy_id:
+            from services.trading.strategy_cash_service import get_strategy_cash_service
+            cash_svc = get_strategy_cash_service(self.account_id)
+            passed, reason = await cash_svc.check_strategy_buy(strategy_id, total_amount)
+            if not passed:
+                return {
+                    "success": False,
+                    "message": f"策略现金不足: {reason}",
+                    "quantity": 0,
+                    "fees": fees
+                }
+
+        # ========== 所有检查通过，创建订单 ==========
         from services.trading.order_service import get_order_service
         order_svc = get_order_service(self.account_id)
         db_order_id = await order_svc.create_order(
@@ -296,48 +373,6 @@ class TradeExecutionService:
             stop_loss_price=None,
             take_profit_price=None,
         )
-
-        # 风控检查
-        try:
-            from services.trading.risk_service import get_risk_service
-            risk = get_risk_service(self.account_id)
-            passed, reason = await risk.check_buy(stock_code, price, quantity)
-            if not passed:
-                await order_svc.update_status(db_order_id, "rejected", reject_reason=reason)
-                return {
-                    "success": False,
-                    "message": f"风控拦截: {reason}",
-                    "quantity": 0,
-                    "fees": {"commission": 0, "transfer_fee": 0, "stamp_tax": 0, "total_fee": 0}
-                }
-
-            # 策略级仓位上限检查
-            if strategy_id:
-                passed, reason = await risk.check_strategy_position(stock_code, price, quantity, strategy_id)
-                if not passed:
-                    await order_svc.update_status(db_order_id, "rejected", reject_reason=reason)
-                    return {
-                        "success": False,
-                        "message": f"策略仓位超限: {reason}",
-                        "quantity": 0,
-                        "fees": {"commission": 0, "transfer_fee": 0, "stamp_tax": 0, "total_fee": 0}
-                    }
-        except Exception as e:
-            print(f"[RiskService] 风控检查异常: {e}，放行")
-
-        # 策略现金检查（虚拟账户）
-        if strategy_id:
-            from services.trading.strategy_cash_service import get_strategy_cash_service
-            cash_svc = get_strategy_cash_service(self.account_id)
-            passed, reason = await cash_svc.check_strategy_buy(strategy_id, total_amount)
-            if not passed:
-                await order_svc.update_status(db_order_id, "rejected", reject_reason=reason)
-                return {
-                    "success": False,
-                    "message": f"策略现金不足: {reason}",
-                    "quantity": 0,
-                    "fees": fees
-                }
 
         # 更新订单为 submitted
         await order_svc.update_status(db_order_id, "submitted")

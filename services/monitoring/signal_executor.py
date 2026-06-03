@@ -134,6 +134,14 @@ class SignalExecutor:
             await self._update_watchlist_status(account_id, stock_code, 'bought')
             await self._update_signal_status(account_id, stock_code, 'executed', result['quantity'])
 
+            # 买入成功后同步止盈止损（基于实际成交价重新计算）
+            from services.monitoring.sl_tp_sync import sync_on_buy_success
+            await sync_on_buy_success(
+                account_id, stock_code,
+                buy_price=result['price'],
+                quantity=result['quantity']
+            )
+
             from services.notifications import get_notification_service
             notification = get_notification_service()
             await notification.emit(
@@ -154,6 +162,25 @@ class SignalExecutor:
             get_logger("monitor").warn("monitor", f"买入失败: {result['message']}",
                                         stock_code=stock_code, reason=result['message'])
             await self._update_signal_status(account_id, stock_code, 'cancelled', target_quantity)
+
+            # 资金不足等失败时，更新 watchlist 状态避免反复触发
+            if "资金不足" in result['message'] or "现金不足" in result['message'] or "可用资金不足" in result['message']:
+                # 回退到 watching 状态，等待资金恢复后可再次触发
+                await self._update_watchlist_status(account_id, stock_code, 'watching')
+                get_logger("monitor").log_event("buy_failed_fund",
+                    f"资金不足回退: {stock_code} pending → watching",
+                    stock_code=stock_code, reason=result['message'])
+            elif "风控拦截" in result['message'] or "仓位超限" in result['message']:
+                # 风控拦截，标记为 failed，不再触发
+                await db.update(
+                    "watchlist",
+                    {"status": "failed", "updated_at": get_china_time()},
+                    "account_id = ? AND stock_code = ?",
+                    (account_id, stock_code)
+                )
+                get_logger("monitor").log_event("buy_failed_risk",
+                    f"风控拦截终止: {stock_code} pending → failed",
+                    stock_code=stock_code, reason=result['message'])
 
             from services.notifications import get_notification_service
             notification = get_notification_service()

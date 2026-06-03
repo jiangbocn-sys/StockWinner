@@ -43,6 +43,19 @@ class TradingMonitor:
         self._price_mgr = PriceCacheManager()
         self._health = HealthTracker()
 
+    # 健康状态属性委托（供 scheduler heartbeat 检查）
+    @property
+    def _data_stale(self) -> bool:
+        return self._health._data_stale
+
+    @property
+    def _last_data_time(self) -> Optional[str]:
+        return self._health._last_data_time
+
+    @property
+    def _sdk_error_msg(self) -> str:
+        return self._health._sdk_error_msg
+
     async def start_monitoring(self, account_ids: Optional[list[str]] = None, interval: int = 60):
         """启动交易监控服务"""
         if self._running:
@@ -137,86 +150,200 @@ class TradingMonitor:
         log.log_event("monitor_loop_stop", "交易监控服务已停止")
 
     async def _run_monitoring_global(self, account_ids: list[str]):
-        """全局监控：刷新所有活跃 watchlist + 持仓股行情，统一通过 dispatcher 批量获取"""
+        """全局监控：按交易需求分优先级刷新股票
+
+        优先级：
+        - highest (0): pending 信号股票（需立即判断是否执行交易）
+        - high (1): 持仓止损止盈股票
+        - medium (2): 策略任务股票池
+        - low (3): Watchlist 纯观察
+        """
         db = get_db_manager()
         log = get_logger("monitor")
 
-        # 收集所有需要刷新的股票：全账户去重，不按用户区分
-        monitoring_codes: set = set()
-        account_stocks: Dict[str, set] = {}
-        try:
-            # 全部活跃 watchlist 股票（跨账户去重）
-            wl = await db.fetchall("SELECT DISTINCT stock_code FROM watchlist WHERE status IN ('pending', 'watching', 'bought')")
-            all_wl_codes = {r["stock_code"] for r in wl}
-            # 全部持仓股
-            pos = await db.fetchall("SELECT DISTINCT stock_code FROM stock_positions WHERE quantity > 0")
-            all_pos_codes = {r["stock_code"] for r in pos}
-            monitoring_codes = all_wl_codes | all_pos_codes
-        except Exception:
-            pass
+        # 按交易需求分类股票
+        stocks_by_priority = await self._classify_stocks_by_priority(account_ids, db)
 
-        # 每个账户分发时只传该账户实际有持仓/watchlist的股票
-        for acct_id in account_ids:
-            if not self._running:
-                return
-            codes = set()
-            try:
-                wl = await db.fetchall(
-                    "SELECT DISTINCT stock_code FROM watchlist WHERE account_id = ? AND status IN ('pending', 'watching', 'bought')",
-                    (acct_id,),
-                )
-                codes.update(r["stock_code"] for r in wl)
-                pos = await db.fetchall(
-                    "SELECT stock_code FROM stock_positions WHERE account_id = ? AND quantity > 0",
-                    (acct_id,),
-                )
-                codes.update(r["stock_code"] for r in pos)
-            except Exception:
-                pass
-            account_stocks[acct_id] = codes
+        # 收集所有需要刷新的股票（用于 dispatcher 订阅）
+        all_codes: set = set()
+        for codes in stocks_by_priority.values():
+            all_codes.update(codes)
 
-        if not monitoring_codes:
+        if not all_codes:
             return
 
-        # 通过 dispatcher 批量获取行情（一次订阅，批量 kline 查询）
+        # 记录分类结果
+        log.info("monitor",
+            f"股票分类: pending={len(stocks_by_priority.get('pending', []))}, "
+            f"positions_stop={len(stocks_by_priority.get('positions_stop', []))}, "
+            f"strategy_pool={len(stocks_by_priority.get('strategy_pool', []))}, "
+            f"watch_only={len(stocks_by_priority.get('watch_only', []))}")
+
         market_data_cache: Dict[str, Any] = {}
+
         try:
             gw = await get_gateway()
-            gw.subscribe("monitor", monitoring_codes, refresh_interval=120, priority=1)
-            # 添加超时保护：SDK 调用最多等待 90 秒（考虑 984 只股票分批查询）
-            try:
-                market_data_cache = await asyncio.wait_for(gw.refresh_now("monitor"), timeout=90.0)
-            except asyncio.TimeoutError:
-                log.log_event("monitor_sdk_timeout", "SDK 刷新超时（90秒），跳过本轮监控")
-                self._health.record_sdk_error(Exception("SDK refresh timeout"))
-                return
-            self._health.record_sdk_success()
 
+            # ① highest: pending 信号股票（立即判断）
+            pending_codes = stocks_by_priority.get('pending', [])
+            if pending_codes:
+                gw.subscribe("monitor_pending", set(pending_codes), refresh_interval=60, priority=0)
+                pending_data = await asyncio.wait_for(gw.refresh_now("monitor_pending"), timeout=30.0)
+                market_data_cache.update(pending_data)
+                # 立即评估 pending 信号
+                for acct_id in account_ids:
+                    if self._running:
+                        await self._executor.scan_pending_signals(acct_id, market_data_cache=pending_data)
+                gw.unsubscribe("monitor_pending")
+
+            # ② high: 持仓止损止盈
+            positions_stop_codes = stocks_by_priority.get('positions_stop', [])
+            if positions_stop_codes:
+                gw.subscribe("monitor_positions", set(positions_stop_codes), refresh_interval=60, priority=1)
+                positions_data = await asyncio.wait_for(gw.refresh_now("monitor_positions"), timeout=30.0)
+                market_data_cache.update(positions_data)
+                # 立即评估止损止盈
+                for acct_id in account_ids:
+                    if self._running:
+                        await self._evaluator.evaluate_positions_stop_loss(acct_id, market_data_cache=positions_data)
+                gw.unsubscribe("monitor_positions")
+
+            # ③ medium: 策略任务股票池（分批刷新）
+            strategy_codes = stocks_by_priority.get('strategy_pool', [])
+            if strategy_codes:
+                # 分批刷新，每批 100 只，批次间让用户请求插队
+                batch_size = 100
+                for i in range(0, len(strategy_codes), batch_size):
+                    if not self._running:
+                        return
+                    batch = strategy_codes[i:i + batch_size]
+                    gw.subscribe("monitor_strategy", set(batch), refresh_interval=60, priority=2)
+                    batch_data = await asyncio.wait_for(gw.refresh_now("monitor_strategy"), timeout=20.0)
+                    market_data_cache.update(batch_data)
+                    gw.unsubscribe("monitor_strategy")
+                    # 策略条件评估（每批后执行）
+                    for acct_id in account_ids:
+                        if self._running:
+                            await self._evaluator.evaluate_trading_strategies(acct_id)
+                    await asyncio.sleep(0.05)  # 让用户请求插队
+
+            # ④ low: Watchlist 纯观察（分批刷新）
+            watch_only_codes = stocks_by_priority.get('watch_only', [])
+            if watch_only_codes:
+                batch_size = 100
+                for i in range(0, len(watch_only_codes), batch_size):
+                    if not self._running:
+                        return
+                    batch = watch_only_codes[i:i + batch_size]
+                    gw.subscribe("monitor_watch", set(batch), refresh_interval=120, priority=3)
+                    batch_data = await asyncio.wait_for(gw.refresh_now("monitor_watch"), timeout=20.0)
+                    market_data_cache.update(batch_data)
+                    gw.unsubscribe("monitor_watch")
+                    # watchlist 止损止盈评估
+                    for acct_id in account_ids:
+                        if self._running:
+                            acct_codes = set(batch)  # 简化：每批全局评估
+                            acct_market = {code: batch_data.get(code) for code in acct_codes if code in batch_data}
+                            await self._evaluator.monitor_watchlist(acct_id, market_data_cache=acct_market)
+                    await asyncio.sleep(0.1)  # 让用户请求插队
+
+            self._health.record_sdk_success()
             valid_count = sum(1 for md in market_data_cache.values() if md and getattr(md, 'current_price', 0) > 0)
             self._health.record_data_valid(valid_count, len(market_data_cache))
 
-            # 全局更新 PriceCache（一次写入，所有用户共享）
+            # 全局更新 PriceCache
             self._price_mgr.update_price_cache(market_data_cache)
+
+        except asyncio.TimeoutError:
+            log.log_event("monitor_sdk_timeout", "SDK 刷新超时，跳过本轮监控")
+            self._health.record_sdk_error(Exception("SDK refresh timeout"))
+            return
         except Exception as e:
             self._health.record_sdk_error(e)
             return
 
-        # 分发到各账户
+        # 刷新持仓盈亏（可接受任何数据源）
         for acct_id in account_ids:
-            if not self._running:
-                return
-            acct_codes = account_stocks.get(acct_id, set())
-            if not acct_codes:
-                continue
-            acct_market = {code: market_data_cache.get(code) for code in acct_codes if code in market_data_cache}
-            if not acct_market:
-                continue
-            await self._run_per_account(acct_id, acct_market)
+            if self._running:
+                await self._price_mgr.refresh_positions_pnl(acct_id, market_data_cache=market_data_cache)
 
         # 价格刷盘
         if self._price_mgr.should_flush():
             for acct_id in account_ids:
                 await self._price_mgr.flush_to_db(acct_id)
+
+    async def _classify_stocks_by_priority(self, account_ids: list[str], db) -> Dict[str, list]:
+        """按交易需求分类股票
+
+        Returns:
+            {
+                'pending': [],       # highest - pending 信号股票
+                'positions_stop': [], # high - 持仓且有止损止盈设置
+                'strategy_pool': [],  # medium - 策略任务股票池
+                'watch_only': [],     # low - Watchlist 无交易计划
+            }
+        """
+        result = {
+            'pending': [],
+            'positions_stop': [],
+            'strategy_pool': [],
+            'watch_only': [],
+        }
+        all_codes: set = set()
+
+        try:
+            # pending 信号股票
+            pending = await db.fetchall(
+                "SELECT DISTINCT stock_code FROM trading_signals WHERE status = 'pending'"
+            )
+            result['pending'] = [r['stock_code'] for r in pending]
+            all_codes.update(result['pending'])
+        except Exception:
+            pass
+
+        try:
+            # 持仓且有止损止盈设置（排除已在 watchlist 中的，由 monitor_watchlist 处理）
+            positions_stop = await db.fetchall(
+                "SELECT DISTINCT sp.stock_code FROM stock_positions sp "
+                "JOIN trading_strategies ts ON sp.stock_code = ts.stock_code "
+                "WHERE sp.quantity > 0 AND (ts.stop_loss_pct > 0 OR ts.take_profit_pct > 0 OR ts.stop_loss_price > 0 OR ts.take_profit_price > 0) "
+                "AND sp.stock_code NOT IN (SELECT stock_code FROM watchlist WHERE status IN ('pending', 'watching', 'bought'))"
+            )
+            result['positions_stop'] = [r['stock_code'] for r in positions_stop]
+            all_codes.update(result['positions_stop'])
+        except Exception:
+            pass
+
+        try:
+            # 策略任务股票池
+            strategy_tasks = await db.fetchall(
+                "SELECT stock_pool FROM strategy_tasks WHERE enabled = 1"
+            )
+            import json
+            for task in strategy_tasks:
+                pool = task.get('stock_pool') or []
+                if isinstance(pool, str):
+                    pool = json.loads(pool)
+                result['strategy_pool'].extend(pool)
+            result['strategy_pool'] = list(set(result['strategy_pool']))  # 去重
+            all_codes.update(result['strategy_pool'])
+        except Exception:
+            pass
+
+        try:
+            # Watchlist 无交易计划
+            watchlist = await db.fetchall(
+                "SELECT stock_code FROM watchlist WHERE status IN ('pending', 'watching', 'bought')"
+            )
+            for r in watchlist:
+                code = r['stock_code']
+                if code not in all_codes:
+                    result['watch_only'].append(code)
+            result['watch_only'] = list(set(result['watch_only']))  # 去重
+        except Exception:
+            pass
+
+        return result
 
     async def _run_per_account(self, account_id: str, market_data_cache: Dict[str, Any]):
         """单个账户的监控逻辑"""
