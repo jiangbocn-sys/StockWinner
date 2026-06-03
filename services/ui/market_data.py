@@ -8,6 +8,7 @@ from typing import List, Optional, Dict, Any
 from datetime import timedelta
 from services.common.database import get_db_manager, get_sync_connection
 from services.trading.gateway import get_gateway
+from services.auth.account_validator import validate_account_active, validate_account_exists
 
 router = APIRouter()
 
@@ -625,7 +626,7 @@ async def get_local_kline(
                 if td == today_str:
                     seen_today = True
                 kline.append({
-                    "trade_date": td.replace("-", ""),
+                    "trade_date": td,  # 保持 YYYY-MM-DD 格式，与 SDK API 一致
                     "open": float(r["open"]),
                     "close": float(r["close"]),
                     "low": float(r["low"]),
@@ -653,7 +654,7 @@ async def get_local_kline(
                             ohlcv = cache.get_ohlcv(stock_code)
                             if ohlcv and ohlcv.get('close', 0) > 0:
                                 kline.append({
-                                    "trade_date": today_str.replace("-", ""),
+                                    "trade_date": today_str,  # YYYY-MM-DD 格式，统一
                                     "open": ohlcv.get('open', ohlcv.get('close', 0)),
                                     "close": ohlcv.get('close', 0),
                                     "low": ohlcv.get('low', ohlcv.get('close', 0)),
@@ -798,12 +799,10 @@ async def get_local_kline(
         factors = None
         if include_factors and period == "day" and kline:
             import asyncio
-            # 确定日期范围
-            dates = [k['trade_date'][:8] for k in kline]
-            start_date_raw = dates[0]
-            end_date_raw = dates[-1]
-            start_date_factor = f"{start_date_raw[:4]}-{start_date_raw[4:6]}-{start_date_raw[6:8]}"
-            end_date_factor = f"{end_date_raw[:4]}-{end_date_raw[4:6]}-{end_date_raw[6:8]}"
+            # 确定日期范围（日线数据 trade_date 已统一为 YYYY-MM-DD 格式）
+            dates = [k['trade_date'][:10] for k in kline]  # 取 YYYY-MM-DD
+            start_date_factor = dates[0]
+            end_date_factor = dates[-1]
 
             # 因子字段
             default_factor_fields = [

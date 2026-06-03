@@ -618,6 +618,9 @@
           <span v-if="klinePeriod === 'month'" style="color: #909399; font-size: 12px">月线已显示全部数据</span>
         </div>
         <KlineChart ref="klineChartRef" :data="klineData" height="550px"
+          :stockCode="klineStockInfo.code"
+          :accountId="currentAccountId"
+          :enableDrillDown="true"
           :indicators="klineIndicators"
           :indicatorConfig="klineIndicatorConfig" />
       </el-dialog>

@@ -18,19 +18,27 @@ class KlineDataService:
         self.sdk_available = sdk_available
         self.constant = constant
 
-    def _query_kline_via_sdk(self, code_list: list, begin_date: int, end_date: int, period: int, task_type: str = "query") -> dict:
-        """通过 SDKManager 查询K线数据（自动排队）"""
+    def _query_kline_via_sdk(self, code_list: list, begin_date: int, end_date: int, period: int, task_type: str = "query", priority: int = 1) -> dict:
+        """通过 SDKManager 查询K线数据（自动排队）
+
+        Args:
+            priority: 优先级 (0=highest, 1=high, 2=medium, 3=low)
+        """
         from services.common.sdk_manager import get_sdk_manager
         sdk_mgr = get_sdk_manager()
         return sdk_mgr.query_kline(code_list=code_list, begin_date=begin_date,
-                                   end_date=end_date, period=period, task_type=task_type)
+                                   end_date=end_date, period=period, task_type=task_type, priority=priority)
 
     async def get_kline_data(
         self, stock_code: str, period: str = "day",
         start_date: Optional[str] = None, end_date: Optional[str] = None,
-        limit: int = 100, task_type: str = "query", connected: bool = True
+        limit: int = 100, task_type: str = "query", priority: int = 1, connected: bool = True
     ) -> List[Dict[str, Any]]:
-        """获取 K 线历史数据 — SDK 优先，失败回退 ChannelRouter"""
+        """获取 K 线历史数据 — SDK 优先，失败回退 ChannelRouter
+
+        Args:
+            priority: 优先级 (默认 high=1)
+        """
         if not connected:
             raise Exception("网关未连接")
 
@@ -39,7 +47,7 @@ class KlineDataService:
             result = await asyncio.wait_for(
                 asyncio.to_thread(
                     self._query_kline_data_sync,
-                    stock_code, period, start_date, end_date, limit, task_type
+                    stock_code, period, start_date, end_date, limit, task_type, priority
                 ),
                 timeout=10.0
             )
@@ -66,9 +74,13 @@ class KlineDataService:
     async def get_batch_kline_data(
         self, stock_codes: List[str], period: str = "day",
         start_date: Optional[str] = None, end_date: Optional[str] = None,
-        limit: int = 100, task_type: str = "query", connected: bool = True
+        limit: int = 100, task_type: str = "query", priority: int = 1, connected: bool = True
     ) -> Dict[str, Any]:
-        """批量获取 K 线历史数据 — 通过 SDKManager（自带排队 + 超时）"""
+        """批量获取 K 线历史数据 — 通过 SDKManager（自带排队 + 超时）
+
+        Args:
+            priority: 优先级（后台下载用 low=3，用户查询用 high=1）
+        """
         if not connected:
             raise Exception("网关未连接")
 
@@ -88,7 +100,7 @@ class KlineDataService:
         try:
             thread_call = asyncio.to_thread(
                 self._query_batch_kline_data_sync,
-                stock_codes, period, start_date, end_date, limit, task_type
+                stock_codes, period, start_date, end_date, limit, task_type, priority
             )
             return await asyncio.wait_for(thread_call, timeout=batch_timeout)
         except asyncio.TimeoutError:
@@ -98,7 +110,7 @@ class KlineDataService:
     def _query_kline_data_sync(
         self, stock_code: str, period: str = "day",
         start_date: Optional[str] = None, end_date: Optional[str] = None,
-        limit: int = 100, task_type: str = "query"
+        limit: int = 100, task_type: str = "query", priority: int = 1
     ) -> List[Dict[str, Any]]:
         """同步查询 K 线数据（通过 SDKManager）"""
         import datetime as dt
@@ -140,7 +152,7 @@ class KlineDataService:
             code_list=[stock_code],
             begin_date=int(start_dt.strftime("%Y%m%d")),
             end_date=int((end_dt + timedelta(days=1)).strftime("%Y%m%d")),
-            period=actual_period, task_type="query"
+            period=actual_period, task_type="query", priority=priority
         )
 
         if kline_data and stock_code in kline_data:
@@ -151,9 +163,15 @@ class KlineDataService:
                 if 'kline_time' in df.columns:
                     df = df.rename(columns={'kline_time': 'trade_date'})
                 if 'trade_date' in df.columns:
-                    df['trade_date'] = df['trade_date'].apply(
-                        lambda x: x.strftime('%Y-%m-%d') if pd.notnull(x) else ''
-                    )
+                    # 分钟数据保留完整时间，日线只保留日期
+                    if period in ["1m", "3m", "5m", "10m", "15m", "30m", "60m", "120m"]:
+                        df['trade_date'] = df['trade_date'].apply(
+                            lambda x: x.strftime('%Y-%m-%d %H:%M:%S') if pd.notnull(x) else ''
+                        )
+                    else:
+                        df['trade_date'] = df['trade_date'].apply(
+                            lambda x: x.strftime('%Y-%m-%d') if pd.notnull(x) else ''
+                        )
                 return [{
                     "stock_code": stock_code,
                     "trade_date": str(row.get("trade_date", "")),
@@ -170,9 +188,13 @@ class KlineDataService:
     def _query_batch_kline_data_sync(
         self, stock_codes: List[str], period: str = "day",
         start_date: Optional[str] = None, end_date: Optional[str] = None,
-        limit: int = 100, task_type: str = "query"
+        limit: int = 100, task_type: str = "query", priority: int = 1
     ) -> Dict[str, Any]:
-        """同步批量查询 K 线数据（通过 SDKManager）"""
+        """同步批量查询 K 线数据（通过 SDKManager）
+
+        Args:
+            priority: 优先级（后台下载用 low=3）
+        """
         import datetime as dt
         import pandas as pd
 
@@ -203,7 +225,7 @@ class KlineDataService:
 
         kline_data = self._query_kline_via_sdk(
             code_list=stock_codes, begin_date=begin_date_int,
-            end_date=end_date_int, period=period_value, task_type=task_type
+            end_date=end_date_int, period=period_value, task_type=task_type, priority=priority
         )
 
         if kline_data:

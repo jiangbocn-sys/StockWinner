@@ -130,6 +130,20 @@ frontend/src/views/*.vue：
 | `Login.vue` | 登录 |
 | `ChangePassword.vue` | 修改密码 |
 
+### 前端核心组件
+
+**KlineChart.vue**（K 线图表组件）：
+
+| 功能 | 说明 |
+|------|------|
+| 日线渲染 | ECharts candlestick + 成交量 + 技术指标叠加 |
+| **钻取功能** | 双击日线柱 → 显示分钟 K 线（1m/5m/15m/30m/60m） |
+| 周期切换 | 分钟模式下支持 5 个周期切换 |
+| 居中显示 | 双击日期的分钟 K 线居中于 500 条窗口 |
+| 高亮区域 | 目标日期区域淡粉色背景（markArea） |
+| 返回按钮 | 退出钻取返回日线视图 |
+| 复用页面 | Watchlist、Positions、Backtest 共用 |
+
 ### Pinia Stores
 
 | Store | 功能 |
