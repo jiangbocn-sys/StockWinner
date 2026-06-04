@@ -203,9 +203,9 @@
                   <span v-else>-</span>
                 </template>
               </el-table-column>
-              <el-table-column prop="created_at" label="入选日期" width="110" sortable>
+              <el-table-column prop="created_at" label="入选日期" width="100" sortable>
                 <template #default="{ row }">
-                  {{ formatTime(row.created_at) }}
+                  {{ row.created_at ? String(row.created_at).slice(0, 10) : '-' }}
                 </template>
               </el-table-column>
             </el-table>
