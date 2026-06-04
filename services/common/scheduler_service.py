@@ -877,6 +877,22 @@ class SchedulerService:
         thread.start()
         return {'success': True, 'message': '申万行业指数下载任务已启动'}
 
+    def run_manual_daily_factor_calc(self, lookback_days: int = 5) -> Dict:
+        """手动触发日频因子智能补算（前溯 N 天）
+
+        Args:
+            lookback_days: 前溯天数，默认 5 天
+
+        Returns:
+            任务启动状态
+        """
+        logger.info(f"手动触发日频因子智能补算（前溯 {lookback_days} 天）")
+        end_date = get_china_time().strftime('%Y-%m-%d')
+        start_date = (get_china_time() - timedelta(days=lookback_days)).strftime('%Y-%m-%d')
+        thread = threading.Thread(target=self._run_daily_factor_calc, args=(start_date, end_date, False))
+        thread.start()
+        return {'success': True, 'message': f'日频因子计算任务已启动（{start_date} 至 {end_date}）', 'lookback_days': lookback_days}
+
     def _register_strategy_tasks(self):
         """从 strategy_tasks 表读取 enabled 任务，注册到 APScheduler"""
         try:
@@ -1898,6 +1914,29 @@ class SchedulerService:
                     gateway = await get_gateway()
                     return await gateway.get_market_data(stock_code)
 
+                # ⑨ 进度更新函数（策略代码可调用）
+                def _update_progress(percent: float, message: str = "", current_stock: str = ""):
+                    """更新策略执行进度（同步函数，策略代码中调用）
+
+                    Args:
+                        percent: 进度百分比 (0-100)
+                        message: 进度消息
+                        current_stock: 当前处理的股票代码
+                    """
+                    try:
+                        from services.ui.dashboard import update_screening_progress
+                        update_screening_progress(task["account_id"], task["strategy_id"], {
+                            "percent": percent,
+                            "message": message,
+                            "processed": int(percent * len(stocks) / 100) if len(stocks) > 0 else 0,
+                            "total_stocks": len(stocks),
+                            "matched": 0,
+                            "current_stock": current_stock,
+                            "start_time": get_china_time().isoformat(),
+                        })
+                    except Exception as e:
+                        logger.warning(f"进度更新失败: {e}")
+
                 context = {
                     "stocks": [dict(s) for s in stocks],
                     "account_id": task["account_id"],
@@ -1926,6 +1965,7 @@ class SchedulerService:
                     "get_kline_spliced": _get_kline_spliced,          # 同步: 本地历史+预取当日拼接
                     "get_kline_smart": _get_kline_smart,              # 同步: 自动判断盘中/盘后
                     "get_realtime_quote": _get_realtime_quote,        # 同步: 预取当日 OHLCV
+                    "update_progress": _update_progress,              # 同步: 进度更新函数
                 }
 
                 # 交易型策略：注入持仓数据（同步可用）
@@ -1960,22 +2000,24 @@ class SchedulerService:
             )
             logger.info(f"策略任务完成: {result}")
 
-            # 发送通知
-            try:
-                from services.notifications import get_notification_service
-                notification = get_notification_service()
-                await notification.emit(
-                    event_type="task_completed",
-                    account_id=task["account_id"],
-                    payload={
-                        "task_name": f"策略任务 #{task_id}",
-                        "task_type": task_type,
-                        "duration": "N/A",
-                        "output": json.dumps(result, ensure_ascii=False)[:500],
-                    },
-                )
-            except Exception as e:
-                logger.warning(f"发送任务完成通知失败: {e}")
+            # 发送通知（仅 signal_action=trade 时发送）
+            signal_action = task.get("signal_action", "trade")
+            if signal_action == "trade":
+                try:
+                    from services.notifications import get_notification_service
+                    notification = get_notification_service()
+                    await notification.emit(
+                        event_type="task_completed",
+                        account_id=task["account_id"],
+                        payload={
+                            "task_name": f"策略任务 #{task_id}",
+                            "task_type": task_type,
+                            "duration": "N/A",
+                            "output": json.dumps(result, ensure_ascii=False)[:500],
+                        },
+                    )
+                except Exception as e:
+                    logger.warning(f"发送任务完成通知失败: {e}")
 
         except Exception as e:
             logger.error(f"策略任务执行失败: {e}", exc_info=True)
