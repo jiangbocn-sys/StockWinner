@@ -476,6 +476,7 @@ import { exportTable as doExport } from '@/utils/exportHelper'
 import { useAccountStore } from '../stores/account'
 import { usePositionsStore } from '../stores/positions'
 import { switchStockPreservingDrillDown } from '../utils/drillDownHelper'
+import { usePriceChangeHighlight } from '../composables/usePriceChangeHighlight'
 import NavBar from '../components/NavBar.vue'
 import KlineChart from '../components/KlineChart.vue'
 
