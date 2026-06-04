@@ -56,6 +56,27 @@ class HealthTracker:
     def is_healthy(self) -> bool:
         return self._sdk_healthy
 
+    def reset_if_sdk_connected(self) -> bool:
+        """检查 SDK 连接状态，如果正常则重置健康状态
+
+        用于非交易时段恢复状态（监控休眠时调用）。
+        返回 True 表示状态已恢复，False 表示 SDK 仍有问题。
+        """
+        try:
+            from services.common.sdk_manager import get_sdk_manager
+            sdk_mgr = get_sdk_manager()
+            if sdk_mgr.is_connected():
+                self._sdk_healthy = True
+                self._sdk_error_time = None
+                self._sdk_error_msg = ""
+                self._consecutive_errors = 0
+                # 数据状态不自动恢复，需要实际数据刷新验证
+                get_logger("monitor").log_event("health_auto_reset", "SDK 连接正常，健康状态已重置")
+                return True
+        except Exception as e:
+            get_logger("monitor").log_event("health_reset_failed", f"SDK 连接检查失败: {e}")
+        return False
+
     def get_status(self) -> dict:
         return {
             "sdk_healthy": self._sdk_healthy,

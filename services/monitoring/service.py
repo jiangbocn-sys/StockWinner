@@ -131,6 +131,9 @@ class TradingMonitor:
                         log.log_event("monitor_sleep_until", reason,
                                       next_time=next_time.isoformat(),
                                       wait_seconds=round(wait_seconds))
+                        # 非交易时段：尝试恢复 SDK 健康状态
+                        if not self._health.is_healthy():
+                            self._health.reset_if_sdk_connected()
                         max_wait = min(wait_seconds, 300)
                         await asyncio.sleep(max_wait)
             except asyncio.CancelledError:
