@@ -203,6 +203,11 @@
                   <span v-else>-</span>
                 </template>
               </el-table-column>
+              <el-table-column prop="created_at" label="入选日期" width="110" sortable>
+                <template #default="{ row }">
+                  {{ formatTime(row.created_at) }}
+                </template>
+              </el-table-column>
             </el-table>
 
             <div class="pagination-bar" v-if="currentStocks.length > pageSize">
