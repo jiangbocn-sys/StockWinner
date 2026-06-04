@@ -1648,23 +1648,30 @@ class SchedulerService:
             thread.start()
             return
 
-        # 策略任务：提交到主循环执行（避免跨循环竞争）
-        main_loop = _get_fastapi_loop()
-        if main_loop and main_loop.is_running():
-            future = asyncio.run_coroutine_threadsafe(
-                self._execute_strategy_task(task_id, force=False),
-                main_loop
-            )
-            try:
-                result = future.result(timeout=300)
-                logger.info(f"策略任务 {task_id} 完成: {result}")
-            except TimeoutError:
-                logger.error(f"策略任务 {task_id} 超时（300秒）")
-                future.cancel()
-            except Exception as e:
-                logger.error(f"策略任务 {task_id} 执行异常: {e}", exc_info=True)
-        else:
-            logger.warning(f"FastAPI 主循环不可用，跳过策略任务 {task_id}（避免 aiosqlite 事件循环冲突）")
+        # 策略任务：在独立线程创建事件循环执行（避免阻塞主循环）
+        # 策略任务执行时间不可预知，不能阻塞主事件循环
+        thread = threading.Thread(
+            target=self._run_strategy_task_threadsafe,
+            args=(task_id,),
+            daemon=True
+        )
+        thread.start()
+
+    def _run_strategy_task_threadsafe(self, task_id: int):
+        """在独立线程中运行策略任务（创建新事件循环，不阻塞主循环）
+
+        策略任务是async函数，执行时间不可预知：
+        - 在子线程创建独立事件循环
+        - 使用 asyncio.run() 执行async函数
+        - 子线程的 aiosqlite 连接池是独立的，不影响主循环
+        """
+        logger.info(f"策略任务 {task_id} 在独立线程执行")
+        try:
+            # 在子线程创建新事件循环并运行async函数
+            asyncio.run(self._execute_strategy_task(task_id, force=False))
+            logger.info(f"策略任务 {task_id} 线程执行完成")
+        except Exception as e:
+            logger.error(f"策略任务 {task_id} 线程执行异常: {e}", exc_info=True)
 
     def _run_builtin_task_threadsafe(self, task_id: int):
         """在主事件循环中运行内置任务（避免临时循环导致 aiosqlite 问题）"""
