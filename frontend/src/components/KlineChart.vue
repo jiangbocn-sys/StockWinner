@@ -44,6 +44,8 @@ const props = defineProps({
   stockCode: { type: String, default: '' },
   accountId: { type: String, default: '' },
   enableDrillDown: { type: Boolean, default: true },
+  // 复权设置（钻取分钟数据时使用）
+  adjust: { type: String, default: 'forward' },  // none/forward
 })
 
 const chartRef = ref(null)
@@ -289,7 +291,8 @@ const loadMinuteData = async () => {
       `&period=${minutePeriod.value}` +
       `&start_date=${startDateStr}` +
       `&end_date=${endDateStr}` +
-      `&limit=1000`
+      `&limit=1000` +
+      `&adjust=${props.adjust}`
     )
     const data = await res.json()
 
@@ -569,6 +572,17 @@ watch(() => props.data, () => {
       chart = null
     }
     nextTick(renderChart)
+  } else {
+    // 钻取模式下切换股票，重新加载分钟数据
+    if (props.stockCode && props.accountId && drillDownDate.value) {
+      console.log('[KlineChart] 钻取模式切换股票，重新加载分钟数据:', props.stockCode)
+      minuteData.value = []
+      if (chart) {
+        chart.dispose()
+        chart = null
+      }
+      nextTick(loadMinuteData)
+    }
   }
 }, { deep: true })
 
@@ -598,7 +612,23 @@ onBeforeUnmount(() => {
   }
 })
 
-defineExpose({ resize: () => chart?.resize() })
+defineExpose({
+  resize: () => chart?.resize(),
+  // 钻取状态
+  drillDownMode: drillDownMode,
+  drillDownDate: drillDownDate,
+  minutePeriod: minutePeriod,
+  // 方法：进入钻取模式（供父组件调用）
+  enterDrillDown: (date, period) => {
+    if (!props.stockCode || !props.accountId) return
+    drillDownMode.value = true
+    drillDownDate.value = String(date).slice(0, 10)
+    if (period) minutePeriod.value = period
+    loadMinuteData()
+  },
+  // 方法：退出钻取模式
+  exitDrillDown: exitDrillDown,
+})
 </script>
 
 <style scoped>

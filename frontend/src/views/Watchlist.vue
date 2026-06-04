@@ -621,6 +621,7 @@
           :stockCode="klineStockInfo.code"
           :accountId="currentAccountId"
           :enableDrillDown="true"
+          :adjust="klineAdjust"
           :indicators="klineIndicators"
           :indicatorConfig="klineIndicatorConfig" />
       </el-dialog>
@@ -1333,7 +1334,25 @@ const prevStock = async () => {
   console.log('[Watchlist] prevStock: switching to', row.stock_code, 'selectedIndicators:', selectedIndicators.value)
   klineStockIndex.value = idx
   klineIndicators.value = {}  // 清空旧指标数据
+
+  // 保存当前钻取状态
+  const wasDrillDown = klineChartRef.value?.drillDownMode?.value
+  const drillDate = klineChartRef.value?.drillDownDate?.value
+  const drillPeriod = klineChartRef.value?.minutePeriod?.value
+
+  // 先退出钻取模式，让 watch 正常渲染新股票日线
+  if (wasDrillDown) {
+    klineChartRef.value?.exitDrillDown()
+    await new Promise(resolve => setTimeout(resolve, 50))
+  }
+
   await loadKlineData(row.stock_code, row.stock_name)
+
+  // 如果之前处于钻取模式，切换后自动进入新股票的分钟线
+  if (wasDrillDown && drillDate && drillPeriod) {
+    await new Promise(resolve => setTimeout(resolve, 100))
+    klineChartRef.value?.enterDrillDown(drillDate, drillPeriod)
+  }
 }
 
 const nextStock = async () => {
@@ -1344,7 +1363,25 @@ const nextStock = async () => {
   console.log('[Watchlist] nextStock: switching to', row.stock_code, 'selectedIndicators:', selectedIndicators.value)
   klineStockIndex.value = idx
   klineIndicators.value = {}  // 清空旧指标数据
+
+  // 保存当前钻取状态
+  const wasDrillDown = klineChartRef.value?.drillDownMode?.value
+  const drillDate = klineChartRef.value?.drillDownDate?.value
+  const drillPeriod = klineChartRef.value?.minutePeriod?.value
+
+  // 先退出钻取模式，让 watch 正常渲染新股票日线
+  if (wasDrillDown) {
+    klineChartRef.value?.exitDrillDown()
+    await new Promise(resolve => setTimeout(resolve, 50))
+  }
+
   await loadKlineData(row.stock_code, row.stock_name)
+
+  // 如果之前处于钻取模式，切换后自动进入新股票的分钟线
+  if (wasDrillDown && drillDate && drillPeriod) {
+    await new Promise(resolve => setTimeout(resolve, 100))
+    klineChartRef.value?.enterDrillDown(drillDate, drillPeriod)
+  }
 }
 
 // 搜索股票（智能搜索：代码/拼音/名称）

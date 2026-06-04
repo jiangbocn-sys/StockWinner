@@ -262,11 +262,6 @@ class TradingMonitor:
             self._health.record_sdk_error(e)
             return
 
-        # 刷新持仓盈亏（可接受任何数据源）
-        for acct_id in account_ids:
-            if self._running:
-                await self._price_mgr.refresh_positions_pnl(acct_id, market_data_cache=market_data_cache)
-
         # 价格刷盘
         if self._price_mgr.should_flush():
             for acct_id in account_ids:
@@ -373,9 +368,6 @@ class TradingMonitor:
 
         # 扫描手动 pending 信号（需要实时行情）
         await self._executor.scan_pending_signals(account_id, market_data_cache=tradable_data)
-
-        # 刷新持仓盈亏（可接受任何数据源）
-        await self._price_mgr.refresh_positions_pnl(account_id, market_data_cache=market_data_cache)
 
     def get_status(self) -> Dict:
         """获取服务状态"""
