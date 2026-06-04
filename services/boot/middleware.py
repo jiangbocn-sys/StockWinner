@@ -66,6 +66,7 @@ async def ui_token_middleware(request: Request, call_next):
         request.state.auth_token = token
         request.state.account_id = account.get("account_id", "")
         request.state.account_name = account.get("name", "")
+        request.state.account_role = account.get("role", "user")
 
     return await call_next(request)
 
@@ -85,6 +86,11 @@ _AGENT_ACTION_PERMS: dict = {
     ("PUT", "strategies/*"): "strategy:update",
     ("DELETE", "strategies/*"): "strategy:delete",
     ("POST", "strategies/*/execute"): "strategy:execute",
+    # 资金分配管理
+    ("PUT", "capital/strategies/*/allocation"): "strategy:update",
+    ("POST", "capital/strategies/*/adjust-cash"): "strategy:update",
+    ("POST", "capital/strategies/*/recalc"): "strategy:update",
+    ("POST", "capital/borrows/*/return"): "strategy:update",
     ("POST", "screening/*"): "screening:create",
     ("POST", "watchlist"): "watchlist:manage",
     ("POST", "watchlist/batch-add"): "watchlist:manage",
@@ -180,6 +186,12 @@ async def agent_security_middleware(request: Request, call_next):
     method = request.method
     if method in ("POST", "PUT", "DELETE", "PATCH"):
         path = request.url.path.lstrip("/api/v1/")
+        # 去掉 ui/{account_id}/ 前缀，使规则更简洁
+        # 例如 ui/8229DE7E/strategies/123 → strategies/123
+        if path.startswith("ui/"):
+            parts = path.split("/")
+            if len(parts) >= 3:
+                path = "/".join(parts[2:])  # 跳过 ui/{account_id}
         required_perm = _match_agent_action(method, path)
         if required_perm and not has_permission(effective_perms, required_perm):
             return JSONResponse(status_code=403, content={"success": False, "message": f"权限不足：需要 '{required_perm}' 权限"})
