@@ -211,3 +211,45 @@ async def mcp_get_adj_factor_status() -> dict:
         数据统计：股票数、除权记录数、最近更新时间
     """
     return await api.get("/manage/adj-factor/status")
+
+
+# ================================================================
+# 资金分配管理
+# ================================================================
+
+@mcp.tool()
+async def mcp_adjust_strategy_allocation(account_id: str, strategy_id: int, allocated_capital: float) -> dict:
+    """
+    调整策略资金分配上限
+
+    Args:
+        account_id: 账户ID
+        strategy_id: 策略ID
+        allocated_capital: 分配的资金上限金额
+
+    Returns:
+        操作结果
+    """
+    return await api.put(f"/ui/{account_id}/capital/strategies/{strategy_id}/allocation", {
+        "allocated_capital": allocated_capital
+    })
+
+
+@mcp.tool()
+async def mcp_adjust_strategy_cash(account_id: str, strategy_id: int, amount: float, reason: str = "") -> dict:
+    """
+    手动调整策略现金余额
+
+    Args:
+        account_id: 账户ID
+        strategy_id: 策略ID
+        amount: 调整金额（正数增加，负数减少）
+        reason: 调整原因
+
+    Returns:
+        操作结果
+    """
+    return await api.post(f"/ui/{account_id}/capital/strategies/{strategy_id}/adjust-cash", {
+        "amount": amount,
+        "reason": reason
+    })
