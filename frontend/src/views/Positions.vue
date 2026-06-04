@@ -475,6 +475,7 @@ import { ArrowLeft, ArrowRight, Refresh, Download, Setting, ArrowDown } from '@e
 import { exportTable as doExport } from '@/utils/exportHelper'
 import { useAccountStore } from '../stores/account'
 import { usePositionsStore } from '../stores/positions'
+import { switchStockPreservingDrillDown } from '../utils/drillDownHelper'
 import NavBar from '../components/NavBar.vue'
 import KlineChart from '../components/KlineChart.vue'
 
@@ -577,7 +578,8 @@ const dsaResult = ref(null)
 const dsaError = ref('')
 
 const refreshing = ref(false)
-const priceChangeHighlight = ref(new Map())  // 价格变化高亮：stock_code → 'up'/'down'
+// 价格变化高亮（使用 composable）
+const { highlight: priceChangeHighlight, prepareForRefresh, compareAndHighlight } = usePriceChangeHighlight(positions)
 
 // 策略持仓统计
 const loadStrategyStats = async () => {
@@ -787,39 +789,13 @@ const loadPositions = async () => {
 }
 
 const refreshPrices = async () => {
-  // 保存旧价格用于对比
-  const oldPrices = new Map()
-  for (const p of positions.value) {
-    if (p.current_price > 0) {
-      oldPrices.set(p.stock_code, p.current_price)
-    }
-  }
-
+  const oldPrices = prepareForRefresh()
   refreshing.value = true
   try {
     await posStore.refreshPrices(currentAccountId.value)
     posCurrentPage.value = 1
     ElMessage.success('行情已刷新')
-
-    // 对比新旧价格，标记变化
-    const changes = new Map()
-    for (const p of positions.value) {
-      const oldPrice = oldPrices.get(p.stock_code)
-      const newPrice = p.current_price
-      if (oldPrice && newPrice && oldPrice > 0 && newPrice > 0) {
-        if (newPrice > oldPrice) {
-          changes.set(p.stock_code, 'up')
-        } else if (newPrice < oldPrice) {
-          changes.set(p.stock_code, 'down')
-        }
-      }
-    }
-    priceChangeHighlight.value = changes
-
-    // 3秒后清除高亮
-    setTimeout(() => {
-      priceChangeHighlight.value = new Map()
-    }, 3000)
+    compareAndHighlight(oldPrices)
   } catch (error) {
     console.error('刷新行情失败:', error)
     ElMessage.error('刷新行情失败')
@@ -1257,27 +1233,8 @@ const prevStock = async () => {
   const row = positions.value[idx]
   if (!row) return
   klineStockIndex.value = idx
-  klineIndicators.value = {}  // 清空旧指标数据，避免与新K线日期不匹配
-  console.log('[切换] 上一只:', row.stock_code, '指标数:', selectedIndicators.value.length)
-
-  // 保存当前钻取状态
-  const wasDrillDown = klineChartRef.value?.drillDownMode?.value
-  const drillDate = klineChartRef.value?.drillDownDate?.value
-  const drillPeriod = klineChartRef.value?.minutePeriod?.value
-
-  // 先退出钻取模式，让 watch 正常渲染新股票日线
-  if (wasDrillDown) {
-    klineChartRef.value?.exitDrillDown()
-    await new Promise(resolve => setTimeout(resolve, 50))
-  }
-
-  await loadKlineData(row.stock_code, row.stock_name)
-
-  // 如果之前处于钻取模式，切换后自动进入新股票的分钟线
-  if (wasDrillDown && drillDate && drillPeriod) {
-    await new Promise(resolve => setTimeout(resolve, 100))
-    klineChartRef.value?.enterDrillDown(drillDate, drillPeriod)
-  }
+  klineIndicators.value = {}
+  await switchStockPreservingDrillDown(klineChartRef, () => loadKlineData(row.stock_code, row.stock_name))
 }
 
 const nextStock = async () => {
@@ -1286,65 +1243,22 @@ const nextStock = async () => {
   const row = positions.value[idx]
   if (!row) return
   klineStockIndex.value = idx
-  klineIndicators.value = {}  // 清空旧指标数据，避免与新K线日期不匹配
-  console.log('[切换] 下一只:', row.stock_code, '指标数:', selectedIndicators.value.length)
-
-  // 保存当前钻取状态
-  const wasDrillDown = klineChartRef.value?.drillDownMode?.value
-  const drillDate = klineChartRef.value?.drillDownDate?.value
-  const drillPeriod = klineChartRef.value?.minutePeriod?.value
-
-  // 先退出钻取模式，让 watch 正常渲染新股票日线
-  if (wasDrillDown) {
-    klineChartRef.value?.exitDrillDown()
-    await new Promise(resolve => setTimeout(resolve, 50))
-  }
-
-  await loadKlineData(row.stock_code, row.stock_name)
-
-  // 如果之前处于钻取模式，切换后自动进入新股票的分钟线
-  if (wasDrillDown && drillDate && drillPeriod) {
-    await new Promise(resolve => setTimeout(resolve, 100))
-    klineChartRef.value?.enterDrillDown(drillDate, drillPeriod)
-  }
+  klineIndicators.value = {}
+  await switchStockPreservingDrillDown(klineChartRef, () => loadKlineData(row.stock_code, row.stock_name))
 }
 
 // 静默刷新当前价（从内存 PriceCache 取，不触发 SDK 调用）
 let priceRefreshTimer = null
 const startPriceRefresh = () => {
   priceRefreshTimer = setInterval(async () => {
-    // 保存旧价格用于对比
-    const oldPrices = new Map()
-    for (const p of positions.value) {
-      if (p.current_price > 0) {
-        oldPrices.set(p.stock_code, p.current_price)
-      }
-    }
-
+    const oldPrices = prepareForRefresh()
     try {
-      await posStore.loadPositions(currentAccountId.value)
-      await posStore.loadStrategyStats(currentAccountId.value)
-
-      // 对比新旧价格，标记变化
-      const changes = new Map()
-      for (const p of positions.value) {
-        const oldPrice = oldPrices.get(p.stock_code)
-        const newPrice = p.current_price
-        if (oldPrice && newPrice && oldPrice > 0 && newPrice > 0) {
-          if (newPrice > oldPrice) {
-            changes.set(p.stock_code, 'up')
-          } else if (newPrice < oldPrice) {
-            changes.set(p.stock_code, 'down')
-          }
-        }
-      }
-      if (changes.size > 0) {
-        priceChangeHighlight.value = changes
-        // 3秒后清除高亮
-        setTimeout(() => {
-          priceChangeHighlight.value = new Map()
-        }, 3000)
-      }
+      // 并发加载持仓和策略统计
+      await Promise.all([
+        posStore.loadPositions(currentAccountId.value),
+        posStore.loadStrategyStats(currentAccountId.value)
+      ])
+      compareAndHighlight(oldPrices)
     } catch (e) {
       // 静默失败，不弹提示
     }

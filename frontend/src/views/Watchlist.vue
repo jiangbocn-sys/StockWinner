@@ -636,6 +636,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { Search, Refresh, Plus, MoreFilled, Upload, Loading, WarningFilled, Edit, Delete, ArrowLeft, ArrowRight, Download, Setting, ArrowDown } from '@element-plus/icons-vue'
 import { useAccountStore } from '../stores/account'
 import { useWatchlistStore } from '../stores/watchlist'
+import { switchStockPreservingDrillDown } from '../utils/drillDownHelper'
 import NavBar from '../components/NavBar.vue'
 import KlineChart from '../components/KlineChart.vue'
 
@@ -1331,28 +1332,9 @@ const prevStock = async () => {
   const idx = klineStockIndex.value - 1
   const row = sortedCurrentStocks.value[idx]
   if (!row) return
-  console.log('[Watchlist] prevStock: switching to', row.stock_code, 'selectedIndicators:', selectedIndicators.value)
   klineStockIndex.value = idx
-  klineIndicators.value = {}  // 清空旧指标数据
-
-  // 保存当前钻取状态
-  const wasDrillDown = klineChartRef.value?.drillDownMode?.value
-  const drillDate = klineChartRef.value?.drillDownDate?.value
-  const drillPeriod = klineChartRef.value?.minutePeriod?.value
-
-  // 先退出钻取模式，让 watch 正常渲染新股票日线
-  if (wasDrillDown) {
-    klineChartRef.value?.exitDrillDown()
-    await new Promise(resolve => setTimeout(resolve, 50))
-  }
-
-  await loadKlineData(row.stock_code, row.stock_name)
-
-  // 如果之前处于钻取模式，切换后自动进入新股票的分钟线
-  if (wasDrillDown && drillDate && drillPeriod) {
-    await new Promise(resolve => setTimeout(resolve, 100))
-    klineChartRef.value?.enterDrillDown(drillDate, drillPeriod)
-  }
+  klineIndicators.value = {}
+  await switchStockPreservingDrillDown(klineChartRef, () => loadKlineData(row.stock_code, row.stock_name))
 }
 
 const nextStock = async () => {
@@ -1360,28 +1342,9 @@ const nextStock = async () => {
   const idx = klineStockIndex.value + 1
   const row = sortedCurrentStocks.value[idx]
   if (!row) return
-  console.log('[Watchlist] nextStock: switching to', row.stock_code, 'selectedIndicators:', selectedIndicators.value)
   klineStockIndex.value = idx
-  klineIndicators.value = {}  // 清空旧指标数据
-
-  // 保存当前钻取状态
-  const wasDrillDown = klineChartRef.value?.drillDownMode?.value
-  const drillDate = klineChartRef.value?.drillDownDate?.value
-  const drillPeriod = klineChartRef.value?.minutePeriod?.value
-
-  // 先退出钻取模式，让 watch 正常渲染新股票日线
-  if (wasDrillDown) {
-    klineChartRef.value?.exitDrillDown()
-    await new Promise(resolve => setTimeout(resolve, 50))
-  }
-
-  await loadKlineData(row.stock_code, row.stock_name)
-
-  // 如果之前处于钻取模式，切换后自动进入新股票的分钟线
-  if (wasDrillDown && drillDate && drillPeriod) {
-    await new Promise(resolve => setTimeout(resolve, 100))
-    klineChartRef.value?.enterDrillDown(drillDate, drillPeriod)
-  }
+  klineIndicators.value = {}
+  await switchStockPreservingDrillDown(klineChartRef, () => loadKlineData(row.stock_code, row.stock_name))
 }
 
 // 搜索股票（智能搜索：代码/拼音/名称）

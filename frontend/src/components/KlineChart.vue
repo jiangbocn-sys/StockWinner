@@ -235,12 +235,11 @@ const handleDblClick = (params) => {
 }
 
 // 进入钻取模式
-const enterDrillDown = (date) => {
+const enterDrillDown = (date, period = '5m') => {
+  if (!props.stockCode || !props.accountId) return
   drillDownMode.value = true
-  // 日线数据已统一为 YYYY-MM-DD 格式，直接取前10位
   drillDownDate.value = String(date).slice(0, 10)
-  console.log('[KlineChart] 进入钻取模式, 目标日期:', drillDownDate.value)
-  minutePeriod.value = '5m'
+  minutePeriod.value = period
   loadMinuteData()
 }
 
@@ -615,19 +614,12 @@ onBeforeUnmount(() => {
 defineExpose({
   resize: () => chart?.resize(),
   // 钻取状态
-  drillDownMode: drillDownMode,
-  drillDownDate: drillDownDate,
-  minutePeriod: minutePeriod,
-  // 方法：进入钻取模式（供父组件调用）
-  enterDrillDown: (date, period) => {
-    if (!props.stockCode || !props.accountId) return
-    drillDownMode.value = true
-    drillDownDate.value = String(date).slice(0, 10)
-    if (period) minutePeriod.value = period
-    loadMinuteData()
-  },
-  // 方法：退出钻取模式
-  exitDrillDown: exitDrillDown,
+  drillDownMode,
+  drillDownDate,
+  minutePeriod,
+  // 方法
+  enterDrillDown,
+  exitDrillDown,
 })
 </script>
 
