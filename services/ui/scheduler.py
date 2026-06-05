@@ -7,6 +7,7 @@
 from fastapi import APIRouter, Query, Path, Body, HTTPException, BackgroundTasks
 from typing import Dict, List, Optional, Any
 from services.common.timezone import format_china_time
+from services.auth.account_validator import validate_account_active
 
 router = APIRouter()
 
@@ -291,6 +292,61 @@ async def list_strategy_tasks(account_id: str = Path(..., description="账户 ID
                 pass
         return far_future
     tasks.sort(key=_sort_key)
+
+    return {"success": True, "tasks": tasks}
+
+
+@router.get("/api/v1/ui/{account_id}/system-tasks")
+async def list_system_tasks(account_id: str = Path(..., description="账户 ID")):
+    """列出所有内置系统任务（仅管理员可见）"""
+    from services.auth.account_validator import require_admin_role
+    from services.common.database import get_db_manager
+    from services.tasks import get_task
+
+    await require_admin_role(account_id)
+
+    db = get_db_manager()
+    rows = await db.fetchall("""
+        SELECT * FROM strategy_tasks
+        WHERE task_type = 'builtin' AND account_id = 'SYSTEM'
+        ORDER BY id
+    """, ())
+    tasks = []
+    for r in rows:
+        task = dict(r)
+        if task.get("module"):
+            info = get_task(task["module"])
+            if info:
+                task["task_name"] = info["name"]
+        task["cron_description"] = _describe_cron(task.get("cron_expression", ""))
+        tasks.append(task)
+    return {"success": True, "tasks": tasks}
+
+
+@router.get("/api/v1/ui/{account_id}/strategy-tasks-only")
+async def list_strategy_tasks_only(account_id: str = Path(..., description="账户 ID")):
+    """列出该账户的策略任务（不含系统任务）"""
+    from services.auth.account_validator import validate_account_active
+    from services.common.database import get_db_manager
+
+    await validate_account_active(account_id)
+
+    db = get_db_manager()
+    rows = await db.fetchall("""
+        SELECT t.*, s.name as strategy_name, g.name as group_name
+        FROM strategy_tasks t
+        LEFT JOIN strategies s ON t.strategy_id = s.id
+        LEFT JOIN candidate_groups g ON t.group_id = g.id
+        WHERE t.task_type = 'strategy' AND t.account_id = ?
+        ORDER BY t.created_at DESC
+    """, (account_id,))
+
+    tasks = []
+    for r in rows:
+        task = dict(r)
+        task["task_name"] = task.get("strategy_name") or "未知策略"
+        task["cron_description"] = _describe_cron(task.get("cron_expression", ""))
+        tasks.append(task)
 
     return {"success": True, "tasks": tasks}
 

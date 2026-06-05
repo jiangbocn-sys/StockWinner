@@ -275,3 +275,46 @@ def get_next_trading_window(dt: datetime = None) -> tuple[datetime | None, str]:
     # t < 09:15 → 等今天 09:15
     target = dt.replace(hour=9, minute=15, second=0, microsecond=0)
     return target, "等待开盘 09:15"
+
+
+def get_previous_trading_day(dt: datetime = None) -> str:
+    """获取上一个交易日日期（YYYY-MM-DD 格式，匹配数据库存储格式）
+
+    用于查询前一天收盘价计算涨跌幅。
+
+    Args:
+        dt: 当前时间，默认为北京时间
+
+    Returns:
+        上一个交易日的日期字符串（YYYY-MM-DD），如 "2026-05-30"
+    """
+    if dt is None:
+        dt = get_china_time()
+
+    # 尝试从 SDK 日历获取上一个交易日
+    try:
+        from services.common.sdk_manager import get_sdk_manager
+        sdk_mgr = get_sdk_manager()
+        if sdk_mgr.is_connected():
+            calendar = sdk_mgr.get_calendar()
+            today = int(dt.strftime('%Y%m%d'))
+            # 找到今天在日历中的位置，取前一个
+            sorted_days = sorted(calendar)
+            for i, day in enumerate(sorted_days):
+                if day >= today:
+                    if i > 0:
+                        prev_int = sorted_days[i - 1]
+                        # 转换为 YYYY-MM-DD 格式
+                        return f"{prev_int // 10000}-{(prev_int % 10000) // 100:02d}-{prev_int % 100:02d}"
+                    break
+    except Exception:
+        pass
+
+    # 降级：向前查找最近的工作日（最多回溯 7 天）
+    prev_day = dt - timedelta(days=1)
+    for _ in range(7):
+        if prev_day.weekday() < 5:  # 周一到周五
+            return prev_day.strftime('%Y-%m-%d')
+        prev_day -= timedelta(days=1)
+
+    return dt.strftime('%Y-%m-%d')  # 无法确定时返回当天

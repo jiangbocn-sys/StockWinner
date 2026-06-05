@@ -86,7 +86,12 @@
       "Bash(find /home/bobo/StockWinner -name *.py -exec grep -l \"stock_daily_factors\\\\|stock_monthly_factors\\\\|weekly_kline\" {})",
       "Bash(grep -rn 'CREATE TABLE' /home/bobo/StockWinner/services --include=*.py)",
       "Bash(grep -rn temp_candidates /home/bobo/StockWinner --include=*.py)",
-      "Bash(grep -rn temp_candidates /home/bobo/StockWinner --include=*.py -A 5 -B 5)"
+      "Bash(grep -rn temp_candidates /home/bobo/StockWinner --include=*.py -A 5 -B 5)",
+      "Bash(find /home/bobo/StockWinner/services -type f -name *.py)",
+      "Bash(find /home/bobo/StockWinner/frontend/src -type f \\\\\\(-name *.vue -o -name *.ts -o -name *.js \\\\\\))",
+      "Bash(grep -rn sqlite3.connect /home/bobo/StockWinner --include=*.py)",
+      "Bash(grep -rn \"kline.db\\\\|stock.db\\\\|KLINE_DB\" /home/bobo/StockWinner/services --include=*.py)",
+      "Bash(grep -rn \"DB_PATH\\\\|DATA_DIR\" /home/bobo/StockWinner/services --include=*.py)"
     ]
   }
 }

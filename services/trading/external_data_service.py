@@ -61,18 +61,19 @@ class ExternalDataService:
                 record[key] = self._sanitize_nan(value)
         return records
 
-    async def get_code_info(self, security_type: str = 'EXTRA_STOCK_A', connected: bool = True) -> List[Dict[str, Any]]:
+    async def get_code_info(self, security_type: str = 'EXTRA_STOCK_A', priority: int = 3, connected: bool = True) -> List[Dict[str, Any]]:
+        """获取代码信息（后台任务，默认 low priority）"""
         if not connected:
             raise Exception("网关未连接")
         try:
-            return await asyncio.to_thread(self._get_code_info_sync, security_type)
+            return await asyncio.to_thread(self._get_code_info_sync, security_type, priority)
         except Exception as e:
             raise Exception(f"获取代码信息失败：{str(e)}")
 
-    def _get_code_info_sync(self, security_type: str = 'EXTRA_STOCK_A') -> List[Dict[str, Any]]:
+    def _get_code_info_sync(self, security_type: str = 'EXTRA_STOCK_A', priority: int = 3) -> List[Dict[str, Any]]:
         from services.common.sdk_manager import get_sdk_manager
         sdk_mgr = get_sdk_manager()
-        df = sdk_mgr.get_code_info(security_type=security_type)
+        df = sdk_mgr.get_code_info(security_type=security_type, priority=priority)
         if df.empty:
             return []
         return [{
@@ -81,18 +82,19 @@ class ExternalDataService:
             "market": str(idx).split('.')[-1] if '.' in str(idx) else ('SH' if str(idx).startswith('6') else 'SZ'),
         } for idx, row in df.iterrows()]
 
-    async def get_industry_list(self, level: int = 1, connected: bool = True) -> List[Dict[str, Any]]:
+    async def get_industry_list(self, level: int = 1, priority: int = 3, connected: bool = True) -> List[Dict[str, Any]]:
+        """获取行业列表（后台任务，默认 low priority）"""
         if not connected:
             raise Exception("网关未连接")
         try:
-            return await asyncio.to_thread(self._get_industry_list_sync, level)
+            return await asyncio.to_thread(self._get_industry_list_sync, level, priority)
         except Exception as e:
             raise Exception(f"获取行业列表失败：{str(e)}")
 
-    def _get_industry_list_sync(self, level: int = 1) -> List[Dict[str, Any]]:
+    def _get_industry_list_sync(self, level: int = 1, priority: int = 3) -> List[Dict[str, Any]]:
         from services.common.sdk_manager import get_sdk_manager
         sdk_mgr = get_sdk_manager()
-        df = sdk_mgr.get_industry_base_info()
+        df = sdk_mgr.get_industry_base_info(priority=priority)
         if df.empty:
             return []
         filtered = df[df["LEVEL_TYPE"] == level]
@@ -102,18 +104,19 @@ class ExternalDataService:
                 record[key] = self._sanitize_nan(value)
         return records
 
-    async def get_industry_kline(self, index_code: str, connected: bool = True) -> List[Dict[str, Any]]:
+    async def get_industry_kline(self, index_code: str, priority: int = 3, connected: bool = True) -> List[Dict[str, Any]]:
+        """获取行业行情（后台任务，默认 low priority）"""
         if not connected:
             raise Exception("网关未连接")
         try:
-            return await asyncio.to_thread(self._get_industry_kline_sync, index_code)
+            return await asyncio.to_thread(self._get_industry_kline_sync, index_code, priority)
         except Exception as e:
             raise Exception(f"获取行业行情失败：{str(e)}")
 
-    def _get_industry_kline_sync(self, index_code: str) -> List[Dict[str, Any]]:
+    def _get_industry_kline_sync(self, index_code: str, priority: int = 3) -> List[Dict[str, Any]]:
         from services.common.sdk_manager import get_sdk_manager
         sdk_mgr = get_sdk_manager()
-        result = sdk_mgr.get_industry_daily(code_list=[index_code])
+        result = sdk_mgr.get_industry_daily(code_list=[index_code], priority=priority)
         if not result or index_code not in result:
             return []
         df = result[index_code].reset_index()
@@ -128,170 +131,182 @@ class ExternalDataService:
                 record[key] = self._sanitize_nan(value)
         return records
 
-    async def get_industry_constituent(self, index_code: str, connected: bool = True) -> List[Dict[str, Any]]:
+    async def get_industry_constituent(self, index_code: str, priority: int = 3, connected: bool = True) -> List[Dict[str, Any]]:
+        """获取行业成分股（后台任务，默认 low priority）"""
         if not connected:
             raise Exception("网关未连接")
         try:
-            return await asyncio.to_thread(self._get_industry_constituent_sync, index_code)
+            return await asyncio.to_thread(self._get_industry_constituent_sync, index_code, priority)
         except Exception as e:
             raise Exception(f"获取行业成分股失败：{str(e)}")
 
-    def _get_industry_constituent_sync(self, index_code: str) -> List[Dict[str, Any]]:
+    def _get_industry_constituent_sync(self, index_code: str, priority: int = 3) -> List[Dict[str, Any]]:
         from services.common.sdk_manager import get_sdk_manager
         sdk_mgr = get_sdk_manager()
-        df = sdk_mgr.get_industry_constituent(index_codes=[index_code])
+        df = sdk_mgr.get_industry_constituent(index_codes=[index_code], priority=priority)
         return self._records_from_raw_df(df)
 
-    async def get_index_constituent(self, index_code: str, connected: bool = True) -> List[Dict[str, Any]]:
+    async def get_index_constituent(self, index_code: str, priority: int = 3, connected: bool = True) -> List[Dict[str, Any]]:
+        """获取指数成分股（后台任务，默认 low priority）"""
         if not connected:
             raise Exception("网关未连接")
         try:
-            return await asyncio.to_thread(self._get_index_constituent_sync, index_code)
+            return await asyncio.to_thread(self._get_index_constituent_sync, index_code, priority)
         except Exception as e:
             raise Exception(f"获取指数成分股失败：{str(e)}")
 
-    def _get_index_constituent_sync(self, index_code: str) -> List[Dict[str, Any]]:
+    def _get_index_constituent_sync(self, index_code: str, priority: int = 3) -> List[Dict[str, Any]]:
         from services.common.sdk_manager import get_sdk_manager
         sdk_mgr = get_sdk_manager()
-        df = sdk_mgr.get_index_constituent(index_codes=[index_code])
+        df = sdk_mgr.get_index_constituent(index_codes=[index_code], priority=priority)
         return self._records_from_raw_df(df)
 
-    async def get_income_statement(self, stock_code: str, connected: bool = True) -> List[Dict[str, Any]]:
+    async def get_income_statement(self, stock_code: str, priority: int = 3, connected: bool = True) -> List[Dict[str, Any]]:
+        """获取利润表（后台任务，默认 low priority）"""
         if not connected:
             raise Exception("网关未连接")
         try:
-            return await asyncio.to_thread(self._get_income_statement_sync, stock_code)
+            return await asyncio.to_thread(self._get_income_statement_sync, stock_code, priority)
         except Exception as e:
             raise Exception(f"获取利润表失败：{str(e)}")
 
-    def _get_income_statement_sync(self, stock_code: str) -> List[Dict[str, Any]]:
+    def _get_income_statement_sync(self, stock_code: str, priority: int = 3) -> List[Dict[str, Any]]:
         from services.common.sdk_manager import get_sdk_manager
         sdk_mgr = get_sdk_manager()
-        df = sdk_mgr.get_income_statement(stock_codes=[stock_code])
+        df = sdk_mgr.get_income_statement(stock_codes=[stock_code], priority=priority)
         return self._records_from_df(df, stock_code)
 
-    async def get_balance_sheet(self, stock_code: str, connected: bool = True) -> List[Dict[str, Any]]:
+    async def get_balance_sheet(self, stock_code: str, priority: int = 3, connected: bool = True) -> List[Dict[str, Any]]:
+        """获取资产负债表（后台任务，默认 low priority）"""
         if not connected:
             raise Exception("网关未连接")
         try:
-            return await asyncio.to_thread(self._get_balance_sheet_sync, stock_code)
+            return await asyncio.to_thread(self._get_balance_sheet_sync, stock_code, priority)
         except Exception as e:
             raise Exception(f"获取资产负债表失败：{str(e)}")
 
-    def _get_balance_sheet_sync(self, stock_code: str) -> List[Dict[str, Any]]:
+    def _get_balance_sheet_sync(self, stock_code: str, priority: int = 3) -> List[Dict[str, Any]]:
         from services.common.sdk_manager import get_sdk_manager
         sdk_mgr = get_sdk_manager()
-        df = sdk_mgr.get_balance_sheet(stock_codes=[stock_code])
+        df = sdk_mgr.get_balance_sheet(stock_codes=[stock_code], priority=priority)
         return self._records_from_df(df, stock_code)
 
-    async def get_cash_flow_statement(self, stock_code: str, connected: bool = True) -> List[Dict[str, Any]]:
+    async def get_cash_flow_statement(self, stock_code: str, priority: int = 3, connected: bool = True) -> List[Dict[str, Any]]:
+        """获取现金流量表（后台任务，默认 low priority）"""
         if not connected:
             raise Exception("网关未连接")
         try:
-            return await asyncio.to_thread(self._get_cash_flow_statement_sync, stock_code)
+            return await asyncio.to_thread(self._get_cash_flow_statement_sync, stock_code, priority)
         except Exception as e:
             raise Exception(f"获取现金流量表失败：{str(e)}")
 
-    def _get_cash_flow_statement_sync(self, stock_code: str) -> List[Dict[str, Any]]:
+    def _get_cash_flow_statement_sync(self, stock_code: str, priority: int = 3) -> List[Dict[str, Any]]:
         from services.common.sdk_manager import get_sdk_manager
         sdk_mgr = get_sdk_manager()
-        df = sdk_mgr.get_cash_flow_statement(stock_codes=[stock_code])
+        df = sdk_mgr.get_cash_flow_statement(stock_codes=[stock_code], priority=priority)
         return self._records_from_df(df, stock_code)
 
-    async def get_profit_notice(self, stock_code: str, connected: bool = True) -> List[Dict[str, Any]]:
+    async def get_profit_notice(self, stock_code: str, priority: int = 3, connected: bool = True) -> List[Dict[str, Any]]:
+        """获取业绩预告（后台任务，默认 low priority）"""
         if not connected:
             raise Exception("网关未连接")
         try:
-            return await asyncio.to_thread(self._get_profit_notice_sync, stock_code)
+            return await asyncio.to_thread(self._get_profit_notice_sync, stock_code, priority)
         except Exception as e:
             raise Exception(f"获取业绩预告失败：{str(e)}")
 
-    def _get_profit_notice_sync(self, stock_code: str) -> List[Dict[str, Any]]:
+    def _get_profit_notice_sync(self, stock_code: str, priority: int = 3) -> List[Dict[str, Any]]:
         from services.common.sdk_manager import get_sdk_manager
         sdk_mgr = get_sdk_manager()
-        df = sdk_mgr.get_profit_notice(stock_codes=[stock_code])
+        df = sdk_mgr.get_profit_notice(stock_codes=[stock_code], priority=priority)
         return self._records_from_df(df, stock_code)
 
-    async def get_profit_express(self, stock_code: str, connected: bool = True) -> List[Dict[str, Any]]:
+    async def get_profit_express(self, stock_code: str, priority: int = 3, connected: bool = True) -> List[Dict[str, Any]]:
+        """获取业绩快报（后台任务，默认 low priority）"""
         if not connected:
             raise Exception("网关未连接")
         try:
-            return await asyncio.to_thread(self._get_profit_express_sync, stock_code)
+            return await asyncio.to_thread(self._get_profit_express_sync, stock_code, priority)
         except Exception as e:
             raise Exception(f"获取业绩快报失败：{str(e)}")
 
-    def _get_profit_express_sync(self, stock_code: str) -> List[Dict[str, Any]]:
+    def _get_profit_express_sync(self, stock_code: str, priority: int = 3) -> List[Dict[str, Any]]:
         from services.common.sdk_manager import get_sdk_manager
         sdk_mgr = get_sdk_manager()
-        df = sdk_mgr.get_profit_express(stock_codes=[stock_code])
+        df = sdk_mgr.get_profit_express(stock_codes=[stock_code], priority=priority)
         return self._records_from_df(df, stock_code)
 
-    async def get_long_hu_bang(self, stock_code: str, begin_date: int, end_date: int, connected: bool = True) -> List[Dict[str, Any]]:
+    async def get_long_hu_bang(self, stock_code: str, begin_date: int, end_date: int, priority: int = 3, connected: bool = True) -> List[Dict[str, Any]]:
+        """获取龙虎榜（后台任务，默认 low priority）"""
         if not connected:
             raise Exception("网关未连接")
         try:
-            return await asyncio.to_thread(self._get_long_hu_bang_sync, stock_code, begin_date, end_date)
+            return await asyncio.to_thread(self._get_long_hu_bang_sync, stock_code, begin_date, end_date, priority)
         except Exception as e:
             raise Exception(f"获取龙虎榜失败：{str(e)}")
 
-    def _get_long_hu_bang_sync(self, stock_code: str, begin_date: int, end_date: int) -> List[Dict[str, Any]]:
+    def _get_long_hu_bang_sync(self, stock_code: str, begin_date: int, end_date: int, priority: int = 3) -> List[Dict[str, Any]]:
         from services.common.sdk_manager import get_sdk_manager
         sdk_mgr = get_sdk_manager()
-        df = sdk_mgr.get_long_hu_bang(stock_codes=[stock_code], begin_date=begin_date, end_date=end_date)
+        df = sdk_mgr.get_long_hu_bang(stock_codes=[stock_code], begin_date=begin_date, end_date=end_date, priority=priority)
         return self._records_from_raw_df(df)
 
-    async def get_margin_summary(self, begin_date: int, end_date: int, connected: bool = True) -> List[Dict[str, Any]]:
+    async def get_margin_summary(self, begin_date: int, end_date: int, priority: int = 3, connected: bool = True) -> List[Dict[str, Any]]:
+        """获取两融汇总（后台任务，默认 low priority）"""
         if not connected:
             raise Exception("网关未连接")
         try:
-            return await asyncio.to_thread(self._get_margin_summary_sync, begin_date, end_date)
+            return await asyncio.to_thread(self._get_margin_summary_sync, begin_date, end_date, priority)
         except Exception as e:
             raise Exception(f"获取两融汇总失败：{str(e)}")
 
-    def _get_margin_summary_sync(self, begin_date: int, end_date: int) -> List[Dict[str, Any]]:
+    def _get_margin_summary_sync(self, begin_date: int, end_date: int, priority: int = 3) -> List[Dict[str, Any]]:
         from services.common.sdk_manager import get_sdk_manager
         sdk_mgr = get_sdk_manager()
-        df = sdk_mgr.get_margin_summary(begin_date=begin_date, end_date=end_date)
+        df = sdk_mgr.get_margin_summary(begin_date=begin_date, end_date=end_date, priority=priority)
         return self._records_from_raw_df(df)
 
-    async def get_margin_detail(self, stock_code: str, begin_date: int, end_date: int, connected: bool = True) -> List[Dict[str, Any]]:
+    async def get_margin_detail(self, stock_code: str, begin_date: int, end_date: int, priority: int = 3, connected: bool = True) -> List[Dict[str, Any]]:
+        """获取两融明细（后台任务，默认 low priority）"""
         if not connected:
             raise Exception("网关未连接")
         try:
-            return await asyncio.to_thread(self._get_margin_detail_sync, stock_code, begin_date, end_date)
+            return await asyncio.to_thread(self._get_margin_detail_sync, stock_code, begin_date, end_date, priority)
         except Exception as e:
             raise Exception(f"获取两融明细失败：{str(e)}")
 
-    def _get_margin_detail_sync(self, stock_code: str, begin_date: int, end_date: int) -> List[Dict[str, Any]]:
+    def _get_margin_detail_sync(self, stock_code: str, begin_date: int, end_date: int, priority: int = 3) -> List[Dict[str, Any]]:
         from services.common.sdk_manager import get_sdk_manager
         sdk_mgr = get_sdk_manager()
-        df = sdk_mgr.get_margin_detail(stock_codes=[stock_code], begin_date=begin_date, end_date=end_date)
+        df = sdk_mgr.get_margin_detail(stock_codes=[stock_code], begin_date=begin_date, end_date=end_date, priority=priority)
         return self._records_from_raw_df(df)
 
-    async def get_block_trading(self, stock_code: str, begin_date: int, end_date: int, connected: bool = True) -> List[Dict[str, Any]]:
+    async def get_block_trading(self, stock_code: str, begin_date: int, end_date: int, priority: int = 3, connected: bool = True) -> List[Dict[str, Any]]:
+        """获取大宗交易（后台任务，默认 low priority）"""
         if not connected:
             raise Exception("网关未连接")
         try:
-            return await asyncio.to_thread(self._get_block_trading_sync, stock_code, begin_date, end_date)
+            return await asyncio.to_thread(self._get_block_trading_sync, stock_code, begin_date, end_date, priority)
         except Exception as e:
             raise Exception(f"获取大宗交易失败：{str(e)}")
 
-    def _get_block_trading_sync(self, stock_code: str, begin_date: int, end_date: int) -> List[Dict[str, Any]]:
+    def _get_block_trading_sync(self, stock_code: str, begin_date: int, end_date: int, priority: int = 3) -> List[Dict[str, Any]]:
         from services.common.sdk_manager import get_sdk_manager
         sdk_mgr = get_sdk_manager()
-        df = sdk_mgr.get_block_trading(stock_codes=[stock_code], begin_date=begin_date, end_date=end_date)
+        df = sdk_mgr.get_block_trading(stock_codes=[stock_code], begin_date=begin_date, end_date=end_date, priority=priority)
         return self._records_from_raw_df(df)
 
-    async def get_treasury_yield(self, connected: bool = True) -> List[Dict[str, Any]]:
+    async def get_treasury_yield(self, priority: int = 3, connected: bool = True) -> List[Dict[str, Any]]:
+        """获取国债收益率（后台任务，默认 low priority）"""
         if not connected:
             raise Exception("网关未连接")
         try:
-            return await asyncio.to_thread(self._get_treasury_yield_sync)
+            return await asyncio.to_thread(self._get_treasury_yield_sync, priority)
         except Exception as e:
             raise Exception(f"获取国债收益率失败：{str(e)}")
 
-    def _get_treasury_yield_sync(self) -> List[Dict[str, Any]]:
+    def _get_treasury_yield_sync(self, priority: int = 3) -> List[Dict[str, Any]]:
         from services.common.sdk_manager import get_sdk_manager
         sdk_mgr = get_sdk_manager()
-        df = sdk_mgr.get_treasury_yield()
+        df = sdk_mgr.get_treasury_yield(priority=priority)
         return self._records_from_raw_df(df)

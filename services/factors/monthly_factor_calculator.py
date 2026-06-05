@@ -69,7 +69,7 @@ class MonthlyFactorCalculator:
             }
 
             # 获取利润表数据
-            income_df = sdk.get_income_statement([stock_code])
+            income_df = sdk.get_income_statement([stock_code], priority=3)
             if not income_df.empty:
                 # 根据季度和年份筛选数据
                 # REPORT_TYPE: 1=年报，2=中报，3=季报，4=一季报
@@ -99,7 +99,7 @@ class MonthlyFactorCalculator:
                     result['net_profit_ttm'] = recent['NET_PRO_INCL_MIN_INT_INC'].sum()
 
             # 获取现金流量表数据
-            cashflow_df = sdk.get_cash_flow_statement([stock_code])
+            cashflow_df = sdk.get_cash_flow_statement([stock_code], priority=3)
             if not cashflow_df.empty:
                 # 获取对应报告期的数据
                 if report_quarter == 3:
@@ -120,7 +120,7 @@ class MonthlyFactorCalculator:
                     result['operating_cash_flow'] = row.get('NET_CASH_FLOWS_OPERA_ACT')
 
             # 获取资产负债表数据
-            balance_df = sdk.get_balance_sheet([stock_code])
+            balance_df = sdk.get_balance_sheet([stock_code], priority=3)
             if not balance_df.empty:
                 # 获取对应报告期的数据
                 if report_quarter == 3:

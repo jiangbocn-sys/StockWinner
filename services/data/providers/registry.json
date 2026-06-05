@@ -1,130 +1,40 @@
 {
   "providers": [
     {
-      "provider_id": "eastmoney",
-      "display_name": "东方财富",
-      "description": "东方财富免费行情接口，支持实时行情和K线",
-      "capabilities": {
-        "supports_kline": true,
-        "supports_realtime": true,
-        "supports_fundamentals": false,
-        "supports_stock_list": true,
-        "supports_industry": false,
-        "supports_trading": false,
-        "supports_realtime_snapshot": false
-      },
-      "requires_config": false,
-      "default_enabled": true,
-      "priority": {
-        "trading": 1,
-        "market_data": 1,
-        "download": 1
-      }
-    },
-    {
-      "provider_id": "tushare",
-      "display_name": "Tushare Pro",
-      "description": "Tushare Pro 金融数据接口（需要付费 API Token）",
-      "capabilities": {
-        "supports_kline": true,
-        "supports_realtime": false,
-        "supports_fundamentals": true,
-        "supports_stock_list": true,
-        "supports_industry": false,
-        "supports_trading": false,
-        "supports_realtime_snapshot": false
-      },
-      "requires_config": true,
-      "default_enabled": false,
-      "priority": {
-        "trading": 3,
-        "market_data": 2,
-        "download": 2
-      }
-    },
-    {
       "provider_id": "amazingdata",
       "display_name": "银河证券",
-      "description": "银河证券 AmazingData SDK（系统默认数据源）",
-      "capabilities": {
-        "supports_kline": true,
-        "supports_realtime": true,
-        "supports_fundamentals": true,
-        "supports_stock_list": true,
-        "supports_industry": true,
-        "supports_trading": true,
-        "supports_realtime_snapshot": true
-      },
-      "requires_config": true,
       "default_enabled": true,
-      "priority": {
-        "trading": 2,
-        "market_data": 3,
-        "download": 3
-      }
+      "priority": {"trading": 1, "market_data": 1, "download": 1}
     },
     {
-      "provider_id": "sina",
-      "display_name": "新浪财经",
-      "description": "新浪财经免费行情接口，支持实时行情和五档盘口",
-      "capabilities": {
-        "supports_kline": false,
-        "supports_realtime": true,
-        "supports_fundamentals": false,
-        "supports_stock_list": false,
-        "supports_industry": false,
-        "supports_trading": false,
-        "supports_realtime_snapshot": true
-      },
-      "requires_config": false,
+      "provider_id": "eastmoney",
+      "display_name": "东方财富",
       "default_enabled": true,
-      "priority": {
-        "trading": 3,
-        "market_data": 2,
-        "download": 999
-      }
+      "priority": {"trading": 2, "market_data": 2, "download": 2}
     },
     {
       "provider_id": "akshare",
       "display_name": "Akshare",
-      "description": "Akshare 聚合数据源（新浪/腾讯），支持日K线、实时行情、股票列表、财务报表",
-      "capabilities": {
-        "supports_kline": true,
-        "supports_realtime": false,
-        "supports_fundamentals": true,
-        "supports_stock_list": true,
-        "supports_industry": false,
-        "supports_trading": false,
-        "supports_realtime_snapshot": false
-      },
-      "requires_config": false,
       "default_enabled": true,
-      "priority": {
-        "trading": 999,
-        "market_data": 4,
-        "download": 4
-      }
+      "priority": {"trading": 3, "market_data": 3, "download": 3}
+    },
+    {
+      "provider_id": "sina",
+      "display_name": "新浪财经",
+      "default_enabled": true,
+      "priority": {"trading": 4, "market_data": 4, "download": 999}
     },
     {
       "provider_id": "tencent",
       "display_name": "腾讯行情",
-      "description": "腾讯免费行情接口，支持实时行情和五档盘口",
-      "capabilities": {
-        "supports_kline": false,
-        "supports_realtime": true,
-        "supports_fundamentals": false,
-        "supports_stock_list": false,
-        "supports_industry": false,
-        "supports_trading": false,
-        "supports_realtime_snapshot": true
-      },
-      "requires_config": false,
       "default_enabled": true,
-      "priority": {
-        "trading": 4,
-        "market_data": 3,
-        "download": 999
-      }
+      "priority": {"trading": 5, "market_data": 5, "download": 999}
+    },
+    {
+      "provider_id": "tushare",
+      "display_name": "Tushare Pro",
+      "default_enabled": false,
+      "priority": {"trading": 6, "market_data": 6, "download": 6}
     }
   ]
 }

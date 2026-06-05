@@ -56,7 +56,7 @@ class FundamentalFactorCalculator:
         """
         try:
             # 获取财务数据
-            income_df = self.sdk_manager.get_income_statement([stock_code])
+            income_df = self.sdk_manager.get_income_statement([stock_code], priority=3)
             if income_df.empty:
                 return None
 
@@ -98,7 +98,7 @@ class FundamentalFactorCalculator:
         """
         try:
             # 获取资产负债表
-            balance_df = self.sdk_manager.get_balance_sheet([stock_code])
+            balance_df = self.sdk_manager.get_balance_sheet([stock_code], priority=3)
             if balance_df.empty:
                 return None
 
@@ -133,7 +133,7 @@ class FundamentalFactorCalculator:
         """
         try:
             # 获取利润表
-            income_df = self.sdk_manager.get_income_statement([stock_code])
+            income_df = self.sdk_manager.get_income_statement([stock_code], priority=3)
             if income_df.empty:
                 return None
 
@@ -168,7 +168,7 @@ class FundamentalFactorCalculator:
         """
         try:
             # 获取现金流量表
-            cashflow_df = self.sdk_manager.get_cash_flow_statement([stock_code])
+            cashflow_df = self.sdk_manager.get_cash_flow_statement([stock_code], priority=3)
             if cashflow_df.empty:
                 return None
 
@@ -203,9 +203,9 @@ class FundamentalFactorCalculator:
         """
         try:
             # 获取利润表
-            income_df = self.sdk_manager.get_income_statement([stock_code])
+            income_df = self.sdk_manager.get_income_statement([stock_code], priority=3)
             # 获取资产负债表
-            balance_df = self.sdk_manager.get_balance_sheet([stock_code])
+            balance_df = self.sdk_manager.get_balance_sheet([stock_code], priority=3)
 
             if income_df.empty or balance_df.empty:
                 return None
@@ -236,8 +236,8 @@ class FundamentalFactorCalculator:
         """
         try:
             # 获取利润表和资产负债表
-            income_df = self.sdk_manager.get_income_statement([stock_code])
-            balance_df = self.sdk_manager.get_balance_sheet([stock_code])
+            income_df = self.sdk_manager.get_income_statement([stock_code], priority=3)
+            balance_df = self.sdk_manager.get_balance_sheet([stock_code], priority=3)
 
             if income_df.empty or balance_df.empty:
                 return None
@@ -267,7 +267,7 @@ class FundamentalFactorCalculator:
         毛利率 = (营收 - 营业成本) / 营收 * 100
         """
         try:
-            income_df = self.sdk_manager.get_income_statement([stock_code])
+            income_df = self.sdk_manager.get_income_statement([stock_code], priority=3)
             if income_df.empty:
                 return None
 
@@ -292,7 +292,7 @@ class FundamentalFactorCalculator:
         净利率 = 净利润 / 营收 * 100
         """
         try:
-            income_df = self.sdk_manager.get_income_statement([stock_code])
+            income_df = self.sdk_manager.get_income_statement([stock_code], priority=3)
             if income_df.empty:
                 return None
 
@@ -334,7 +334,7 @@ class FundamentalFactorCalculator:
         }
 
         try:
-            income_df = self.sdk_manager.get_income_statement([stock_code])
+            income_df = self.sdk_manager.get_income_statement([stock_code], priority=3)
             if income_df.empty:
                 return result
 

@@ -17,6 +17,11 @@ export const useAccountStore = defineStore('account', () => {
     return accounts.value.find(acc => acc.account_id === currentAccountId.value)
   })
 
+  // 是否为管理员
+  const isAdmin = computed(() => {
+    return userAccount?.role === 'admin'
+  })
+
   // 设置当前账户 — 不允许切换，始终锁定为登录账户
   // eslint-disable-next-line no-unused-vars
   const setCurrentAccount = (accountId) => {
@@ -47,6 +52,7 @@ export const useAccountStore = defineStore('account', () => {
     currentAccountId,
     accounts,
     currentAccount,
+    isAdmin,
     setCurrentAccount,
     loadAccounts
   }

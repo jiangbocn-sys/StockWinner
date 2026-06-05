@@ -279,3 +279,220 @@ async def rotate_agent_key(
         "api_key": new_key,
         "warning": "请妥善保存新 api_key，旧 key 已失效",
     }
+
+
+# ============================================================
+# 用户管理 API — 管理员专用
+# ============================================================
+
+def require_admin_role(token: str = Depends(get_token_from_header)) -> Dict[str, Any]:
+    """要求管理员角色"""
+    service = get_auth_service()
+    account = service.validate_token(token)
+    if not account:
+        raise HTTPException(status_code=401, detail="认证失败或会话已过期")
+    if account.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="需要管理员权限")
+    return account
+
+
+@router.get("/users")
+async def list_users(admin: Dict[str, Any] = Depends(require_admin_role)):
+    """列出所有用户（管理员专用）"""
+    db = get_db_manager()
+    users = await db.fetchall(
+        "SELECT account_id, name, display_name, role, is_active, created_at FROM accounts ORDER BY created_at DESC"
+    )
+    return {"success": True, "users": users}
+
+
+@router.post("/users")
+async def create_user(
+    user_data: Dict[str, str],
+    admin: Dict[str, Any] = Depends(require_admin_role),
+):
+    """创建用户（管理员专用）
+
+    请求体:
+    - name: 用户名（账户名）
+    - password: 密码（至少 6 位）
+    - display_name: 显示名称（可选）
+    - role: 角色（admin / user，默认 user）
+    """
+    import hashlib
+    import uuid
+
+    name = user_data.get("name", "").strip()
+    password = user_data.get("password", "")
+    display_name = user_data.get("display_name", name)
+    role = user_data.get("role", "user")
+
+    if not name or not password:
+        raise HTTPException(status_code=400, detail="用户名和密码不能为空")
+    if len(password) < 6:
+        raise HTTPException(status_code=400, detail="密码至少需要 6 位")
+    if role not in ("admin", "user"):
+        raise HTTPException(status_code=400, detail="角色必须是 admin 或 user")
+
+    db = get_db_manager()
+    existing = await db.fetchone("SELECT * FROM accounts WHERE name = ?", (name,))
+    if existing:
+        raise HTTPException(status_code=400, detail="用户名已存在")
+
+    password_hash = hashlib.sha256(password.encode()).hexdigest()
+    account_id = str(uuid.uuid4())[:8].upper()
+    now = get_china_time().strftime("%Y-%m-%dT%H:%M:%S")
+
+    await db.execute("""
+        INSERT INTO accounts (account_id, name, password_hash, display_name, role, is_active, created_at)
+        VALUES (?, ?, ?, ?, ?, 1, ?)
+    """, (account_id, name, password_hash, display_name, role, now))
+
+    return {
+        "success": True,
+        "account_id": account_id,
+        "name": name,
+        "role": role,
+        "message": "用户创建成功"
+    }
+
+
+@router.put("/users/{account_id}/role")
+async def update_user_role(
+    account_id: str,
+    role_data: Dict[str, str],
+    admin: Dict[str, Any] = Depends(require_admin_role),
+):
+    """修改用户角色（管理员专用）
+
+    请求体:
+    - role: 新角色（admin / user）
+    """
+    new_role = role_data.get("role", "")
+    if new_role not in ("admin", "user"):
+        raise HTTPException(status_code=400, detail="角色必须是 admin 或 user")
+
+    # 防止修改自己的角色
+    if account_id == admin.get("account_id"):
+        raise HTTPException(status_code=400, detail="不能修改自己的角色")
+
+    db = get_db_manager()
+    result = await db.execute(
+        "UPDATE accounts SET role = ?, updated_at = ? WHERE account_id = ?",
+        (new_role, get_china_time().strftime("%Y-%m-%dT%H:%M:%S"), account_id)
+    )
+    if result.rowcount == 0:
+        raise HTTPException(status_code=404, detail="用户不存在")
+
+    return {"success": True, "account_id": account_id, "role": new_role}
+
+
+@router.delete("/users/{account_id}")
+async def delete_user(
+    account_id: str,
+    admin: Dict[str, Any] = Depends(require_admin_role),
+):
+    """删除用户（管理员专用）"""
+    # 防止删除自己
+    if account_id == admin.get("account_id"):
+        raise HTTPException(status_code=400, detail="不能删除自己")
+
+    db = get_db_manager()
+
+    # 检查是否有持仓等关联数据
+    positions = await db.fetchone(
+        "SELECT COUNT(*) as cnt FROM stock_positions WHERE account_id = ?",
+        (account_id,)
+    )
+    if positions and positions.get("cnt", 0) > 0:
+        raise HTTPException(status_code=400, detail="用户有持仓记录，无法删除")
+
+    result = await db.execute("DELETE FROM accounts WHERE account_id = ?", (account_id,))
+    if result.rowcount == 0:
+        raise HTTPException(status_code=404, detail="用户不存在")
+
+    return {"success": True, "account_id": account_id, "message": "用户已删除"}
+
+
+@router.put("/users/{account_id}/status")
+async def toggle_user_status(
+    account_id: str,
+    status_data: Dict[str, int],
+    admin: Dict[str, Any] = Depends(require_admin_role),
+):
+    """锁定/解锁账户（管理员专用）
+
+    请求体:
+    - is_active: 1=激活, 0=锁定
+    """
+    is_active = status_data.get("is_active")
+    if is_active not in (0, 1):
+        raise HTTPException(status_code=400, detail="is_active 必须是 0 或 1")
+
+    # 防止锁定自己
+    if account_id == admin.get("account_id"):
+        raise HTTPException(status_code=400, detail="不能锁定自己的账户")
+
+    db = get_db_manager()
+    result = await db.execute(
+        "UPDATE accounts SET is_active = ?, updated_at = ? WHERE account_id = ?",
+        (is_active, get_china_time().strftime("%Y-%m-%dT%H:%M:%S"), account_id)
+    )
+    if result.rowcount == 0:
+        raise HTTPException(status_code=404, detail="用户不存在")
+
+    status_text = "激活" if is_active else "锁定"
+    return {"success": True, "account_id": account_id, "is_active": is_active, "message": f"账户已{status_text}"}
+
+
+@router.put("/me")
+async def update_my_profile(
+    profile_data: Dict[str, Any],
+    token: str = Depends(get_token_from_header),
+):
+    """更新个人信息（所有用户）
+
+    可更新字段:
+    - display_name: 显示名称
+    - broker_account: 券商资金账号
+    - broker_password: 券商密码
+    - broker_company: 开户券商
+    - broker_server_ip: 服务器 IP
+    - broker_server_port: 服务器端口
+    - commission_rate: 佣金费率
+    - stamp_tax: 印花税
+    - transfer_fee: 过户费
+    - min_commission: 最低佣金
+    - available_cash: 可用资金
+    """
+    service = get_auth_service()
+    account = service.validate_token(token)
+    if not account:
+        raise HTTPException(status_code=401, detail="认证失败或会话已过期")
+
+    db = get_db_manager()
+
+    # 可更新字段列表
+    updatable_fields = [
+        "display_name", "broker_account", "broker_password", "broker_company",
+        "broker_server_ip", "broker_server_port", "commission_rate",
+        "stamp_tax", "transfer_fee", "min_commission", "available_cash", "notes",
+        "notifications_paused"
+    ]
+
+    updates = {}
+    for field in updatable_fields:
+        if field in profile_data:
+            updates[field] = profile_data[field]
+
+    if not updates:
+        return {"success": True, "message": "无需更新"}
+
+    updates["updated_at"] = get_china_time().strftime("%Y-%m-%dT%H:%M:%S")
+
+    set_clause = ", ".join([f"{k} = ?" for k in updates.keys()])
+    values = list(updates.values()) + [account["account_id"]]
+
+    await db.execute(f"UPDATE accounts SET {set_clause} WHERE account_id = ?", values)
+
+    return {"success": True, "message": "个人信息已更新"}

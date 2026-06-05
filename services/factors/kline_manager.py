@@ -135,12 +135,29 @@ class KlineManager:
         return df
 
     def get_all_stocks(self) -> List[str]:
-        """获取数据库中所有股票代码"""
+        """获取数据库中所有股票代码
+
+        排除行业指数(801xxx.SI)和北交所创新层/基础层(4xxxxx/8xxxxx.BJ)
+        """
         conn = self._conn()
         cursor = conn.cursor()
         cursor.execute('SELECT DISTINCT stock_code FROM kline_data')
         stocks = [row[0] for row in cursor.fetchall()]
-        return stocks
+
+        # 过滤行业指数和北交所创新层/基础层
+        filtered = []
+        for code in stocks:
+            # 排除行业指数
+            if code.startswith('801') and code.endswith('.SI'):
+                continue
+            # 排除北交所创新层(4xxxxx)和基础层(8xxxxx)
+            if code.endswith('.BJ'):
+                base_code = code.split('.')[0]
+                if base_code.startswith('4') or base_code.startswith('8'):
+                    continue
+            filtered.append(code)
+
+        return filtered
 
     def get_all_trade_dates(self, start_date: Optional[str] = None,
                              end_date: Optional[str] = None) -> List[str]:
@@ -334,13 +351,21 @@ class KlineManager:
     def get_weekly_data(
         self, stock_code: str, limit: Optional[int] = None
     ) -> pd.DataFrame:
-        """获取某只股票的周K线数据"""
+        """获取某只股票的周K线数据（最近 N 条）"""
         conn = self._conn()
-        query = 'SELECT * FROM weekly_kline_data WHERE stock_code = ? ORDER BY week_end_date ASC'
-        params: list = [stock_code]
         if limit:
-            query = query.replace('ASC', 'ASC LIMIT ?')
-            params.append(limit)
+            # 子查询：先 DESC 取最近 limit 条，再 ASC 排序返回
+            query = '''
+                SELECT * FROM (
+                    SELECT * FROM weekly_kline_data
+                    WHERE stock_code = ?
+                    ORDER BY week_end_date DESC LIMIT ?
+                ) ORDER BY week_end_date ASC
+            '''
+            params: list = [stock_code, limit]
+        else:
+            query = 'SELECT * FROM weekly_kline_data WHERE stock_code = ? ORDER BY week_end_date ASC'
+            params: list = [stock_code]
 
         df = pd.read_sql_query(query, conn, params=params)
         return df
@@ -360,6 +385,94 @@ class KlineManager:
         cursor.execute('SELECT MAX(week_end_date) FROM weekly_kline_data')
         result = cursor.fetchone()
         return result[0] if result and result[0] else None
+
+    def get_monthly_data(self, stock_code: str, limit: Optional[int] = None) -> List[Dict]:
+        """从周K线合成月K线数据
+
+        聚合规则：
+        - open: 该月第一周的 open
+        - high: 该月所有周的 max high
+        - low: 该月所有周的 min low
+        - close: 该月最后一周的 close
+        - volume: 月总成交量
+        - amount: 月总成交额
+
+        Args:
+            stock_code: 股票代码
+            limit: 返回记录数（最近 N 个月）
+
+        Returns:
+            月K线数据列表，包含 month, open, high, low, close, volume, amount
+        """
+        conn = self._conn()
+        query = '''
+            SELECT stock_code, stock_name, week_start_date, week_end_date,
+                   open, high, low, close, volume, amount
+            FROM weekly_kline_data
+            WHERE stock_code = ?
+            ORDER BY week_end_date ASC
+        '''
+        params: list = [stock_code]
+        if limit:
+            # 子查询取最近 limit 条
+            query = '''
+                SELECT * FROM (
+                    SELECT stock_code, stock_name, week_start_date, week_end_date,
+                           open, high, low, close, volume, amount
+                    FROM weekly_kline_data
+                    WHERE stock_code = ?
+                    ORDER BY week_end_date DESC LIMIT ?
+                ) ORDER BY week_end_date ASC
+            '''
+            params.append(limit * 5)  # 每月约 4-5 周
+
+        cursor = conn.cursor()
+        cursor.execute(query, params)
+        rows = cursor.fetchall()
+
+        if not rows:
+            return []
+
+        # 按 ISO 年-月分组聚合
+        monthly_data: Dict[str, Dict] = {}
+        for row in rows:
+            week_end = row['week_end_date']  # YYYY-MM-DD
+            month_key = week_end[:7]  # YYYY-MM
+
+            if month_key not in monthly_data:
+                monthly_data[month_key] = {
+                    'stock_code': row['stock_code'],
+                    'stock_name': row['stock_name'],
+                    'month': month_key,
+                    'week_start_date': row['week_start_date'],
+                    'week_end_date': row['week_end_date'],
+                    'open': float(row['open']) if row['open'] else 0,
+                    'high': float(row['high']) if row['high'] else 0,
+                    'low': float(row['low']) if row['low'] else 0,
+                    'close': float(row['close']) if row['close'] else 0,
+                    'volume': float(row['volume']) if row['volume'] else 0,
+                    'amount': float(row['amount']) if row['amount'] else 0,
+                    'weeks': 1,
+                }
+            else:
+                # 聚合：first open, max high, min low, last close, sum volume/amount
+                m = monthly_data[month_key]
+                m['high'] = max(m['high'], float(row['high']) if row['high'] else 0)
+                m['low'] = min(m['low'], float(row['low']) if row['low'] else 0)
+                m['close'] = float(row['close']) if row['close'] else 0  # last close
+                m['volume'] += float(row['volume']) if row['volume'] else 0
+                m['amount'] += float(row['amount']) if row['amount'] else 0
+                m['week_end_date'] = row['week_end_date']  # 更新为最后一周
+                m['weeks'] += 1
+
+        # 转为列表，按 month 排序
+        result = sorted(monthly_data.values(), key=lambda x: x['month'])
+
+        # 如果指定了 limit，只返回最近 N 个月
+        if limit:
+            result = result[-limit:]
+
+        return result
 
     def delete_by_date(self, trade_date: str) -> int:
         """删除指定交易日的全部数据。

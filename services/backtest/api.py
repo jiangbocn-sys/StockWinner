@@ -10,7 +10,6 @@ import logging
 from services.common.database import get_db_manager
 from services.common.timezone import get_china_time
 from services.backtest.engine import BacktestEngine
-from services.backtest.execution import FeeConfig, PositionLimits
 
 router = APIRouter()
 logger = logging.getLogger("backtest")
@@ -205,74 +204,58 @@ async def create_backtest_run(
         await db.execute("UPDATE backtest_runs SET pool_schedule = ? WHERE id = ?",
                          (json.dumps(pool_schedule), run_id))
 
-    # 在线程池中异步执行回测（避免阻塞事件循环）
+    # 使用子进程模式执行回测（完全隔离，不阻塞主事件循环）
     import asyncio
-    from concurrent.futures import ThreadPoolExecutor
+    from services.backtest.subprocess_worker import get_backtest_process_manager
 
-    async def run_async():
-        loop = asyncio.get_event_loop()
-        with ThreadPoolExecutor(max_workers=1) as executor:
-            try:
-                fee_config = FeeConfig(
-                    commission_rate=strategy_config.get("commission_rate", 0.0001),
-                    min_commission=strategy_config.get("min_commission", 5.0),
-                    stamp_tax=strategy_config.get("stamp_tax", 0.0005),
-                    transfer_fee=strategy_config.get("transfer_fee", 0.00002),
-                )
-                position_limits = PositionLimits(
-                    max_total_position_pct=strategy_config.get("max_total_position_pct", 0.80),
-                    max_single_position_pct=strategy_config.get("max_single_position_pct", 0.15),
-                    cash_reserve_pct=strategy_config.get("cash_reserve_pct", 0.10),
-                )
+    manager = get_backtest_process_manager()
 
-                if pool_schedule:
-                    # 分段回测
-                    await loop.run_in_executor(
-                        executor,
-                        lambda: engine._run_segmented_backtest_sync(
-                            run_id=run_id,
-                            strategy_config=strategy_config,
-                            mode=mode,
-                            start_date=start_date,
-                            end_date=end_date,
-                            initial_capital=initial_capital,
-                            pool_schedule=pool_schedule,
-                            fee_config=fee_config,
-                            position_limits=position_limits,
-                            slippage_pct=float(body.get("slippage_pct", 0.0)),
-                            stop_loss_pct=strategy_config.get("stop_loss_pct"),
-                            take_profit_pct=strategy_config.get("take_profit_pct"),
-                            trailing_stop_pct=strategy_config.get("trailing_stop_pct"),
-                        )
-                    )
-                else:
-                    # 普通回测
-                    await loop.run_in_executor(
-                        executor,
-                        lambda: engine._run_backtest_sync(
-                            run_id=run_id,
-                            strategy_config=strategy_config,
-                            mode=mode,
-                            start_date=start_date,
-                            end_date=end_date,
-                            initial_capital=initial_capital,
-                            stock_pool=stock_pool,
-                            fee_config=fee_config,
-                            position_limits=position_limits,
-                            slippage_pct=float(body.get("slippage_pct", 0.0)),
-                            stop_loss_pct=strategy_config.get("stop_loss_pct"),
-                            take_profit_pct=strategy_config.get("take_profit_pct"),
-                            trailing_stop_pct=strategy_config.get("trailing_stop_pct"),
-                        )
-                    )
-            except Exception as e:
-                # 线程中异常，标记失败
-                try:
-                    await engine._mark_failed(run_id, str(e), None)
-                except Exception as mark_err:
-                    logger.error("backtest", f"回测任务 {run_id} 标记失败时出错: {mark_err}")
+    # 构造费率和仓位限制配置（转为 dict，便于 IPC 传递）
+    fee_config_dict = {
+        "commission_rate": strategy_config.get("commission_rate", 0.0001),
+        "min_commission": strategy_config.get("min_commission", 5.0),
+        "stamp_tax": strategy_config.get("stamp_tax", 0.0005),
+        "transfer_fee": strategy_config.get("transfer_fee", 0.00002),
+    }
+    position_limits_dict = {
+        "max_total_position_pct": strategy_config.get("max_total_position_pct", 0.80),
+        "max_single_position_pct": strategy_config.get("max_single_position_pct", 0.15),
+        "cash_reserve_pct": strategy_config.get("cash_reserve_pct", 0.10),
+    }
 
-    asyncio.ensure_future(run_async())
+    async def run_subprocess():
+        """子进程执行回测，结果由主进程写入数据库"""
+        try:
+            await manager.execute_backtest(
+                run_id=run_id,
+                strategy_config=strategy_config,
+                mode=mode,
+                start_date=start_date,
+                end_date=end_date,
+                initial_capital=initial_capital,
+                stock_pool=stock_pool,
+                pool_schedule=pool_schedule,
+                fee_config=fee_config_dict,
+                position_limits=position_limits_dict,
+                slippage_pct=float(body.get("slippage_pct", 0.0)),
+                stop_loss_pct=strategy_config.get("stop_loss_pct"),
+                take_profit_pct=strategy_config.get("take_profit_pct"),
+                trailing_stop_pct=strategy_config.get("trailing_stop_pct"),
+            )
+        except Exception as e:
+            logger.error("backtest", f"子进程回测异常 (run_id={run_id}): {e}")
+            # 标记失败（使用同步连接，避免跨循环问题）
+            from services.common.database import get_sync_connection
+            from services.common.timezone import get_china_time
+            conn = get_sync_connection("stockwinner")
+            conn.execute(
+                "UPDATE backtest_runs SET status = 'failed', error_message = ?, completed_at = ? WHERE id = ?",
+                (str(e), get_china_time().isoformat(), run_id)
+            )
+            conn.commit()
+            conn.close()
+
+    asyncio.ensure_future(run_subprocess())
 
     return {
         "success": True,
@@ -585,70 +568,57 @@ async def retry_backtest_run(
                 )
                 seg["stock_pool"] = [r["stock_code"] for r in rows]
 
-    fee_config = FeeConfig(
-        commission_rate=run.get("commission_rate", 0.0001),
-        min_commission=run.get("min_commission", 5.0),
-        stamp_tax=run.get("stamp_tax", 0.0005),
-        transfer_fee=run.get("transfer_fee", 0.00002),
-    )
-    position_limits = PositionLimits(
-        max_total_position_pct=run.get("max_total_position_pct", 0.80),
-        max_single_position_pct=run.get("max_single_position_pct", 0.15),
-        cash_reserve_pct=run.get("cash_reserve_pct", 0.10),
-    )
-
+    # 使用子进程模式重新执行
     import asyncio
-    from concurrent.futures import ThreadPoolExecutor
+    from services.backtest.subprocess_worker import get_backtest_process_manager
 
-    async def run_async():
-        loop = asyncio.get_event_loop()
-        with ThreadPoolExecutor(max_workers=1) as executor:
-            try:
-                if pool_schedule:
-                    await loop.run_in_executor(
-                        executor,
-                        lambda: engine._run_segmented_backtest_sync(
-                            run_id=run_id,
-                            strategy_config=strategy_config,
-                            mode=run["mode"],
-                            start_date=run["start_date"],
-                            end_date=run["end_date"],
-                            initial_capital=run["initial_capital"],
-                            pool_schedule=pool_schedule,
-                            fee_config=fee_config,
-                            position_limits=position_limits,
-                            slippage_pct=run.get("slippage_pct", 0.0),
-                            stop_loss_pct=run.get("stop_loss_pct"),
-                            take_profit_pct=run.get("take_profit_pct"),
-                            trailing_stop_pct=run.get("trailing_stop_pct"),
-                        )
-                    )
-                else:
-                    await loop.run_in_executor(
-                        executor,
-                        lambda: engine._run_backtest_sync(
-                            run_id=run_id,
-                            strategy_config=strategy_config,
-                            mode=run["mode"],
-                            start_date=run["start_date"],
-                            end_date=run["end_date"],
-                            initial_capital=run["initial_capital"],
-                            stock_pool=stock_pool,
-                            fee_config=fee_config,
-                            position_limits=position_limits,
-                            slippage_pct=run.get("slippage_pct", 0.0),
-                            stop_loss_pct=run.get("stop_loss_pct"),
-                            take_profit_pct=run.get("take_profit_pct"),
-                            trailing_stop_pct=run.get("trailing_stop_pct"),
-                        )
-                    )
-            except Exception as e:
-                try:
-                    await engine._mark_failed(run_id, str(e), None)
-                except Exception as mark_err:
-                    logger.error("backtest", f"重试任务 {run_id} 标记失败时出错: {mark_err}")
+    manager = get_backtest_process_manager()
 
-    asyncio.ensure_future(run_async())
+    # 构造配置（转为 dict，便于 IPC 传递）
+    fee_config_dict = {
+        "commission_rate": run.get("commission_rate", 0.0001),
+        "min_commission": run.get("min_commission", 5.0),
+        "stamp_tax": run.get("stamp_tax", 0.0005),
+        "transfer_fee": run.get("transfer_fee", 0.00002),
+    }
+    position_limits_dict = {
+        "max_total_position_pct": run.get("max_total_position_pct", 0.80),
+        "max_single_position_pct": run.get("max_single_position_pct", 0.15),
+        "cash_reserve_pct": run.get("cash_reserve_pct", 0.10),
+    }
+
+    async def run_subprocess():
+        """子进程重新执行回测"""
+        try:
+            await manager.execute_backtest(
+                run_id=run_id,
+                strategy_config=strategy_config,
+                mode=run["mode"],
+                start_date=run["start_date"],
+                end_date=run["end_date"],
+                initial_capital=run["initial_capital"],
+                stock_pool=stock_pool,
+                pool_schedule=pool_schedule,
+                fee_config=fee_config_dict,
+                position_limits=position_limits_dict,
+                slippage_pct=run.get("slippage_pct", 0.0),
+                stop_loss_pct=run.get("stop_loss_pct"),
+                take_profit_pct=run.get("take_profit_pct"),
+                trailing_stop_pct=run.get("trailing_stop_pct"),
+            )
+        except Exception as e:
+            logger.error("backtest", f"重试任务 {run_id} 子进程异常: {e}")
+            from services.common.database import get_sync_connection
+            from services.common.timezone import get_china_time
+            conn = get_sync_connection("stockwinner")
+            conn.execute(
+                "UPDATE backtest_runs SET status = 'failed', error_message = ?, completed_at = ? WHERE id = ?",
+                (str(e), get_china_time().isoformat(), run_id)
+            )
+            conn.commit()
+            conn.close()
+
+    asyncio.ensure_future(run_subprocess())
 
     return {"success": True, "run_id": run_id, "message": "回测任务已重新启动"}
 

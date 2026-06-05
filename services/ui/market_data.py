@@ -446,7 +446,8 @@ async def get_kline_data(
     start_date: Optional[str] = Query(None, description="开始日期，格式：YYYYMMDD"),
     end_date: Optional[str] = Query(None, description="结束日期，格式：YYYYMMDD"),
     limit: int = Query(100, description="返回数量限制，默认 100", ge=1, le=10000),
-    time_range: Optional[str] = Query(None, description="快捷时间范围：7d/30d/90d/180d/1y/2y/5y/10y/all")
+    time_range: Optional[str] = Query(None, description="快捷时间范围：7d/30d/90d/180d/1y/2y/5y/10y/all"),
+    adjust: str = Query("none", description="复权: none/forward"),
 ):
     """
     获取 K 线历史数据
@@ -467,6 +468,10 @@ async def get_kline_data(
     - 5y: 最近 5 年
     - 10y: 最近 10 年
     - all: 全部可用数据
+
+    复权类型：
+    - none: 不复权（原始价格）
+    - forward: 前复权（历史价格调整，以当前价格为基准）
 
     优先级：start_date/end_date > time_range > limit
     """
@@ -541,6 +546,52 @@ async def get_kline_data(
             priority=1  # 用户请求，high priority
         )
 
+        # 应用前复权（日线/周线/月线/分钟线都支持）
+        if adjust == "forward" and kline_data and period not in ["none"]:
+            try:
+                adj_factors = await gateway.get_adj_factor([stock_code])
+                if adj_factors:
+                    # 构建日期 → 累计因子映射
+                    cumulative_map = {}
+                    latest_cumulative = 1.0
+                    for f in adj_factors:
+                        td_raw = str(f.get('trade_date', ''))
+                        if '-' in td_raw:
+                            td = td_raw.replace('-', '')[:8]
+                        else:
+                            td = td_raw[:8]
+                        cum_factor = float(f.get('cumulative_factor', 1.0))
+                        cumulative_map[td] = cum_factor
+                        latest_cumulative = cum_factor
+
+                    # 应用前复权公式
+                    for k in kline_data:
+                        td_raw = k.get('trade_date', '')
+                        if not td_raw:
+                            continue
+                        # 处理日期格式（可能是 YYYY-MM-DD 或 YYYYMMDD 或 YYYYMMDD HH:MM:SS）
+                        if ' ' in td_raw:
+                            td_raw = td_raw.split(' ')[0]  # 取日期部分
+                        if '-' in td_raw:
+                            td = td_raw.replace('-', '')[:8]
+                        else:
+                            td = td_raw[:8]
+
+                        # 找到该日期的累计因子
+                        if td in cumulative_map:
+                            factor = cumulative_map[td]
+                        else:
+                            earlier_dates = [d for d in cumulative_map.keys() if d <= td]
+                            factor = cumulative_map[max(earlier_dates)] if earlier_dates else latest_cumulative
+
+                        adj_ratio = factor / latest_cumulative
+                        if 'open' in k: k['open'] = round(k['open'] * adj_ratio, 2)
+                        if 'high' in k: k['high'] = round(k['high'] * adj_ratio, 2)
+                        if 'low' in k: k['low'] = round(k['low'] * adj_ratio, 2)
+                        if 'close' in k: k['close'] = round(k['close'] * adj_ratio, 2)
+            except Exception:
+                pass  # 复权失败，返回未复权数据
+
         return {
             "success": True,
             "data": {
@@ -549,6 +600,7 @@ async def get_kline_data(
                 "count": len(kline_data),
                 "start_date": actual_start_date,
                 "end_date": actual_end_date,
+                "adjust": adjust,
                 "kline": kline_data
             }
         }
@@ -768,7 +820,12 @@ async def get_local_kline(
                     cumulative_map = {}
                     latest_cumulative = 1.0
                     for f in adj_factors:
-                        td = str(f.get('trade_date', ''))[:8]  # YYYYMMDD
+                        # trade_date 可能是 YYYYMMDD 或 YYYY-MM-DD，统一转为 YYYYMMDD
+                        td_raw = str(f.get('trade_date', ''))
+                        if '-' in td_raw:
+                            td = td_raw.replace('-', '')[:8]  # YYYY-MM-DD → YYYYMMDD
+                        else:
+                            td = td_raw[:8]  # YYYYMMDD
                         cum_factor = float(f.get('cumulative_factor', 1.0))
                         cumulative_map[td] = cum_factor
                         latest_cumulative = cum_factor  # 最后一个就是最新的
@@ -776,7 +833,12 @@ async def get_local_kline(
                     # 应用前复权公式
                     # 前复权价格 = 原价 × (当日累计因子 / 最新累计因子)
                     for k in kline:
-                        td = k['trade_date'][:8]  # YYYYMMDD
+                        # kline_data 的 trade_date 是 YYYY-MM-DD 格式，转为 YYYYMMDD
+                        td_raw = k['trade_date']
+                        if '-' in td_raw:
+                            td = td_raw.replace('-', '')[:8]  # YYYY-MM-DD → YYYYMMDD
+                        else:
+                            td = td_raw[:8]
 
                         # 找到该日期的累计因子
                         if td in cumulative_map:

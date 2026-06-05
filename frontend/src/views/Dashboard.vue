@@ -89,6 +89,40 @@
             </el-alert>
           </el-card>
 
+          <!-- 正在执行的任务 -->
+          <el-card class="running-tasks-card" v-if="runningTasks.length > 0">
+            <template #header>
+              <div class="card-header">
+                <span>
+                  <el-icon style="margin-right: 6px"><Loading /></el-icon>
+                  正在执行的任务
+                </span>
+                <el-tag type="warning" size="small">{{ runningTasks.length }} 个任务</el-tag>
+              </div>
+            </template>
+            <div v-for="task in runningTasks" :key="task.id || task.task_type" class="task-item">
+              <div class="task-header">
+                <el-tag :type="taskTypeTag(task.type)" size="small">{{ taskTypeName(task.type) }}</el-tag>
+                <span class="task-name">{{ task.name }}</span>
+                <span class="task-elapsed" v-if="task.elapsed_seconds > 0">
+                  {{ formatElapsed(task.elapsed_seconds) }}
+                </span>
+              </div>
+              <el-progress
+                :percentage="Math.min(task.progress || 0, 100)"
+                :status="task.progress >= 100 ? 'success' : ''"
+                :stroke-width="8"
+                style="margin-top: 8px"
+              />
+              <div class="task-message">
+                {{ task.message }}
+                <span v-if="task.current_stock" style="color: #909399; font-size: 12px">
+                  ({{ task.current_stock }})
+                </span>
+              </div>
+            </div>
+          </el-card>
+
           <!-- 数据通道状态 -->
           <el-card class="data-sources-card">
             <template #header>
@@ -346,6 +380,34 @@ const sdkMetrics = ref({
   session: { total_calls: 0, success_calls: 0, total_rows: 0 },
 })
 
+// 正在执行的任务
+const runningTasks = ref([])
+const taskTypeTag = (type) => {
+  const map = { system: 'info', screening: 'success', backtest: 'warning' }
+  return map[type] || 'info'
+}
+const taskTypeName = (type) => {
+  const map = { system: '系统', screening: '筛选', backtest: '回测' }
+  return map[type] || '任务'
+}
+const formatElapsed = (seconds) => {
+  if (seconds < 60) return `${seconds}秒`
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}分${seconds % 60}秒`
+  return `${Math.floor(seconds / 3600)}小时${Math.floor((seconds % 3600) / 60)}分`
+}
+
+// 加载正在执行的任务
+const loadRunningTasks = async () => {
+  try {
+    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/tasks/running`)
+    if (!res.ok) return
+    const data = await res.json()
+    runningTasks.value = data.tasks || []
+  } catch {
+    runningTasks.value = []
+  }
+}
+
 // 数据通道状态
 const dataSources = ref([])
 const statusTagType = (status) => {
@@ -593,9 +655,11 @@ const formatNumber = (num) => {
 // 自动刷新定时器
 let refreshTimer = null
 let healthTimer = null
+let tasksTimer = null
 let abortController = null
 const REFRESH_INTERVAL = 300000 // 5 分钟（业务数据全量刷新）
 const HEALTH_INTERVAL = 30000  // 30 秒（仅数据通道状态）
+const TASKS_INTERVAL = 5000   // 5 秒（任务进度）
 
 // 轻量轮询：仅刷新数据通道状态，不触发 SDK 调用
 const refreshHealthStatus = async () => {
@@ -628,10 +692,12 @@ onMounted(async () => {
   abortController = new AbortController()
   await Promise.all([
     accountStore.loadAccounts(),
-    loadDashboard(false, abortController.signal)
+    loadDashboard(false, abortController.signal),
+    loadRunningTasks()
   ])
   refreshTimer = setInterval(() => loadDashboard(true), REFRESH_INTERVAL)
   healthTimer = setInterval(refreshHealthStatus, HEALTH_INTERVAL)
+  tasksTimer = setInterval(loadRunningTasks, TASKS_INTERVAL)
 })
 
 onUnmounted(() => {
@@ -639,6 +705,7 @@ onUnmounted(() => {
   if (uptimeTimer) clearInterval(uptimeTimer)
   if (refreshTimer) clearInterval(refreshTimer)
   if (healthTimer) clearInterval(healthTimer)
+  if (tasksTimer) clearInterval(tasksTimer)
 })
 </script>
 
@@ -705,6 +772,42 @@ onUnmounted(() => {
 
 .data-sources-card {
   margin-bottom: 20px;
+}
+
+.running-tasks-card {
+  margin-bottom: 20px;
+}
+
+.task-item {
+  padding: 12px 0;
+  border-bottom: 1px solid #e4e7ed;
+}
+
+.task-item:last-child {
+  border-bottom: none;
+}
+
+.task-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.task-name {
+  font-weight: 500;
+  color: #303133;
+}
+
+.task-elapsed {
+  color: #909399;
+  font-size: 12px;
+  margin-left: auto;
+}
+
+.task-message {
+  color: #606266;
+  font-size: 13px;
+  margin-top: 4px;
 }
 
 .error-text {

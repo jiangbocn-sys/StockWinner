@@ -214,7 +214,9 @@ async def _download_batch(
                 period="week",
                 start_date=str(start_date_int),
                 end_date=str(end_date_int),
-                limit=years * 52 + 200  # 额外缓冲，避免日历对齐损失
+                limit=years * 52 + 200,  # 额外缓冲，避免日历对齐损失
+                task_type="download",
+                priority=3  # 后台下载，使用 low priority
             )
 
             for code, data in kline_data.items():
@@ -289,7 +291,9 @@ async def _download_incremental(
                 period="week",
                 start_date=start_from,
                 end_date=str(end_date_int),
-                limit=200  # 增量通常只需几周，200条足够
+                limit=200,  # 增量通常只需几周，200条足够
+                task_type="download",
+                priority=3  # 后台下载，使用 low priority
             )
 
             for s in batch:
@@ -328,18 +332,32 @@ def download_weekly_kline_sync(
     batch_size: int = 50,
     market_filter: Optional[List[str]] = ['SH', 'SZ']
 ):
-    """同步版本的周K线下载函数（显式创建新事件循环）"""
+    """同步版本的周K线下载函数（使用主事件循环）
+
+    当 APScheduler daemon 线程调用时，使用 run_coroutine_threadsafe 提交到主循环，
+    避免创建临时循环导致 aiosqlite 连接失效。
+    """
     import asyncio
-    loop = asyncio.new_event_loop()
+    from services.common.scheduler_service import _get_fastapi_loop
+
+    main_loop = _get_fastapi_loop()
+    if main_loop is None or main_loop.is_closed():
+        print("[WeeklyKline] ERROR: 主事件循环不可用")
+        return False
+
     try:
-        asyncio.set_event_loop(loop)
-        return loop.run_until_complete(download_weekly_kline_data(
-            years=years, start_date=start_date, end_date=end_date,
-            broker_account=broker_account, broker_password=broker_password,
-            batch_size=batch_size, market_filter=market_filter
-        ))
-    finally:
-        loop.close()
+        future = asyncio.run_coroutine_threadsafe(
+            download_weekly_kline_data(
+                years=years, start_date=start_date, end_date=end_date,
+                broker_account=broker_account, broker_password=broker_password,
+                batch_size=batch_size, market_filter=market_filter
+            ),
+            main_loop
+        )
+        return future.result(timeout=600.0)
+    except Exception as e:
+        print(f"[WeeklyKline] ERROR: {e}")
+        return False
 
 
 if __name__ == "__main__":

@@ -280,18 +280,28 @@ def check_freshness(stock_codes: List[str]) -> Tuple[List[str], Dict[str, str]]:
             reasons[code] = "无数据"
             continue
 
-        # 检查2: 当天是否已检查过（通过 updated_at 判断）
-        cursor.execute("SELECT MAX(updated_at) as last_update FROM stock_adj_factor WHERE stock_code = ?", (code,))
+        # 检查2: 当天是否已检查过 AND 最新除权日期是否接近当前
+        cursor.execute("""
+            SELECT MAX(updated_at) as last_update, MAX(trade_date) as last_adj_date
+            FROM stock_adj_factor WHERE stock_code = ?
+        """, (code,))
         row = cursor.fetchone()
         if row and row['last_update']:
             last_update_date = row['last_update'][:10]  # 取日期部分
-            if last_update_date == today:
-                # 当天已更新，不需要再查
-                continue
+            last_adj_date = row['last_adj_date']
 
-        # 当天未检查，需要查询 SDK
+            # 当天已更新 且 最新除权日期在最近30天内 → 认为新鲜
+            # 否则需要重新检查（可能有新的除权事件）
+            if last_update_date == today and last_adj_date:
+                from datetime import datetime, timedelta
+                adj_date = datetime.strptime(last_adj_date, '%Y-%m-%d')
+                if adj_date >= datetime.strptime(today, '%Y-%m-%d') - timedelta(days=30):
+                    # 最新除权在30天内，数据足够新鲜
+                    continue
+
+        # 当天未检查 或 可能遗漏新事件，需要查询 SDK
         needs_update.append(code)
-        reasons[code] = "当天未检查"
+        reasons[code] = "当天未检查或可能有新除权"
 
     return needs_update, reasons
 
@@ -347,7 +357,7 @@ def update_adj_factor_from_sdk(stock_codes: List[str]) -> Dict:
             'message': f'成功更新 {len(stock_codes)} 只股票，保存 {saved} 条除权记录'
         }
     except Exception as e:
-        log.error(f"复权因子更新失败: {e}")
+        log.error("adj_factor", f"复权因子更新失败: {e}")
         return {'success': False, 'saved': 0, 'stocks': 0, 'message': str(e)}
 
 

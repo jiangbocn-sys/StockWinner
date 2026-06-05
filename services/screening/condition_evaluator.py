@@ -30,8 +30,17 @@ def _load_stock_names() -> Dict[str, str]:
 class ConditionEvaluator:
     """选股条件评估：优化 DB 模式 / 本地 DB 模式 / SDK 实时模式 + 代码型策略"""
 
-    def __init__(self, progress: Dict):
+    def __init__(self, progress: Dict, progress_callback: Optional[callable] = None):
         self._progress = progress
+        self._progress_callback = progress_callback  # 进度更新回调函数
+
+    def _notify_progress(self):
+        """通知进度更新（通过回调）"""
+        if self._progress_callback:
+            try:
+                self._progress_callback(self._progress)
+            except Exception:
+                pass
 
     async def evaluate_optimized(
         self, config: Dict, match_score_threshold: float = 0.5, trade_date: Optional[str] = None
@@ -203,6 +212,7 @@ class ConditionEvaluator:
             # 预估剩余时间
             if self._progress["processed"] % 100 == 0:
                 self._update_eta()
+                self._notify_progress()  # 每100只股票通知一次进度
 
         print(f"[Screening] 优化模式筛选完成，共匹配 {matched_count}/{len(stock_codes)} 只股票 (匹配度阈值：{match_score_threshold*100:.0f}%)")
         return candidates
@@ -464,7 +474,8 @@ class ConditionEvaluator:
             return get_local_data_service().get_batch_kline(codes, limit=limit)
 
         def _get_kline_smart(codes: list, lookback: int = 100):
-            return get_local_data_service().get_kline_smart(codes, lookback=lookback)
+            # get_kline_with_realtime 是智能K线方法（盘中实时拼接，盘后纯本地）
+            return get_local_data_service().get_kline_with_realtime(codes, lookback=lookback)
 
         def _query_kline_db(sql: str, params: tuple = None):
             conn = get_sync_connection("kline")

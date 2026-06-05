@@ -3,6 +3,7 @@
 """
 
 from fastapi import APIRouter, HTTPException, Path, Body
+from services.auth.account_validator import validate_account_active, validate_account_exists
 from typing import Dict, Any
 from services.common.database import get_db_manager
 from services.common.structured_logger import get_logger

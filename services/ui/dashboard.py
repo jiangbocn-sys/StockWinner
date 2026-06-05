@@ -3,7 +3,7 @@
 """
 
 from pathlib import Path as FilePath
-from fastapi import APIRouter, HTTPException, Path
+from fastapi import APIRouter, HTTPException, Path, Query
 from services.common.account_manager import get_account_manager
 from services.common.database import get_db_manager, get_sync_connection
 from services.common.timezone import get_china_time
@@ -15,6 +15,9 @@ router = APIRouter()
 
 # 数据源状态缓存：避免阻塞仪表盘返回，由后台任务异步刷新
 _data_sources_cache: list = []
+
+# 策略筛选进度缓存（内存中跟踪正在运行的筛选）
+_screening_progress: dict = {}  # key: f"{account_id}:{strategy_id}"
 
 
 def get_sdk_metrics() -> dict:
@@ -540,3 +543,287 @@ def get_resource_usage() -> dict:
         }
     except Exception:
         return {"cpu_percent": 0, "memory_mb": 0, "disk_percent": 0}
+
+
+# ================================================================
+# 任务状态 API
+# ================================================================
+
+def update_screening_progress(account_id: str, strategy_id: int, progress: dict):
+    """更新策略筛选进度（由 screening service 调用）"""
+    key = f"{account_id}:{strategy_id}"
+    _screening_progress[key] = {
+        "account_id": account_id,
+        "strategy_id": strategy_id,
+        "progress": progress.get("percent", 0),
+        "message": progress.get("message", ""),
+        "processed": progress.get("processed", 0),
+        "total": progress.get("total_stocks", 0),
+        "matched": progress.get("matched", 0),
+        "current_stock": progress.get("current_stock", ""),
+        "start_time": progress.get("start_time"),
+        "updated_at": get_china_time().isoformat(),
+    }
+
+
+def clear_screening_progress(account_id: str, strategy_id: int):
+    """清除策略筛选进度（筛选完成时调用）"""
+    key = f"{account_id}:{strategy_id}"
+    if key in _screening_progress:
+        del _screening_progress[key]
+
+
+def get_screening_progress(account_id: str, strategy_id: int) -> dict:
+    """获取策略筛选进度"""
+    key = f"{account_id}:{strategy_id}"
+    return _screening_progress.get(key)
+
+
+@router.get("/api/v1/ui/{account_id}/tasks/running")
+async def get_running_tasks(account_id: str = Path(..., description="账户 ID")):
+    """获取当前正在执行的所有任务
+
+    返回：
+    - 系统级后台任务（因子计算、数据下载）
+    - 策略筛选任务
+    - 回测任务
+    """
+
+    await validate_account_active(account_id)
+
+    db = get_db_manager()
+    tasks = []
+
+    # 1. 系统级后台任务（TaskManager）
+    try:
+        from services.common.task_manager import get_task_manager
+        task_mgr = get_task_manager()
+        system_tasks = task_mgr.get_all_status()
+
+        for task_type, info in system_tasks.items():
+            if info.get("status") == "running":
+                # 任务名称映射
+                name_map = {
+                    "data_download": "K线数据下载",
+                    "daily_factor_calc": "日频因子计算",
+                    "daily_factor_fill": "因子空值填充",
+                    "monthly_factor_update": "月频因子更新",
+                    "weekly_kline_download": "周K线下载",
+                }
+                tasks.append({
+                    "type": "system",
+                    "task_type": task_type,
+                    "name": name_map.get(task_type, task_type),
+                    "account_id": None,  # 系统级任务不关联账户
+                    "progress": info.get("progress", {}).get("percent", 0),
+                    "message": info.get("progress", {}).get("message", ""),
+                    "started_at": info.get("start_time"),
+                    "elapsed_seconds": info.get("elapsed_seconds", 0),
+                    "can_cancel": False,  # 系统任务不允许取消
+                })
+    except Exception:
+        pass
+
+    # 2. 策略筛选任务（内存缓存 + 数据库）
+    # 先检查内存缓存中的运行中筛选
+    for key, prog in _screening_progress.items():
+        if prog.get("account_id") == account_id:
+            # 获取策略名称
+            strategy = await db.fetchone(
+                "SELECT name FROM strategies WHERE id = ?",
+                (prog.get("strategy_id"),)
+            )
+            tasks.append({
+                "type": "screening",
+                "task_type": "strategy_screening",
+                "id": prog.get("strategy_id"),
+                "name": strategy.get("name", "未知策略") if strategy else "未知策略",
+                "account_id": account_id,
+                "progress": prog.get("progress", 0),
+                "message": prog.get("message", f"已处理 {prog.get('processed', 0)}/{prog.get('total', 0)}"),
+                "started_at": prog.get("start_time"),
+                "elapsed_seconds": 0,
+                "current_stock": prog.get("current_stock", ""),
+                "matched": prog.get("matched", 0),
+                "can_cancel": True,
+            })
+
+    # 也检查数据库中 last_status='running' 的任务（可能是之前崩溃遗留）
+    running_strategy_tasks = await db.fetchall("""
+        SELECT st.id, st.strategy_id, st.last_run_at, st.last_output,
+               s.name as strategy_name
+        FROM strategy_tasks st
+        JOIN strategies s ON st.strategy_id = s.id
+        WHERE st.account_id = ? AND st.last_status = 'running'
+    """, (account_id,))
+
+    for t in running_strategy_tasks:
+        # 检查是否已在内存缓存中（避免重复）
+        key = f"{account_id}:{t['strategy_id']}"
+        if key in _screening_progress:
+            continue
+
+        # 解析 last_output 获取进度
+        import json
+        output = {}
+        try:
+            output = json.loads(t.get("last_output") or "{}")
+        except Exception:
+            pass
+
+        tasks.append({
+            "type": "screening",
+            "task_type": "strategy_screening",
+            "id": t["strategy_id"],
+            "name": t["strategy_name"],
+            "account_id": account_id,
+            "progress": 50,  # 无法确定进度
+            "message": "正在筛选（进度未知）",
+            "started_at": t.get("last_run_at"),
+            "elapsed_seconds": 0,
+            "can_cancel": True,
+            "stale": True,  # 标记为可能遗留
+        })
+
+    # 3. 回测任务
+    running_backtests = await db.fetchall("""
+        SELECT br.id, br.name, br.strategy_id, br.status, br.progress, br.started_at,
+               br.current_trade_date, br.start_date, br.end_date,
+               s.name as strategy_name
+        FROM backtest_runs br
+        LEFT JOIN strategies s ON br.strategy_id = s.id
+        WHERE br.account_id = ? AND br.status = 'running'
+        ORDER BY br.started_at DESC
+    """, (account_id,))
+
+    for b in running_backtests:
+        # 计算进度百分比（基于日期范围）
+        progress_pct = b.get("progress", 0)
+        if not progress_pct and b.get("start_date") and b.get("end_date") and b.get("current_trade_date"):
+            # 简单估算：当前日期 / 总日期范围
+            try:
+                from datetime import datetime
+                start = datetime.strptime(b["start_date"], "%Y-%m-%d")
+                end = datetime.strptime(b["end_date"], "%Y-%m-%d")
+                current = datetime.strptime(b["current_trade_date"], "%Y-%m-%d")
+                total_days = (end - start).days + 1
+                passed_days = (current - start).days + 1
+                progress_pct = round(passed_days / total_days * 100, 1)
+            except Exception:
+                progress_pct = 0
+
+        message = f"回测进度 {progress_pct:.0f}%"
+        if b.get("current_trade_date"):
+            message += f"（当前日期: {b['current_trade_date']}）"
+
+        tasks.append({
+            "type": "backtest",
+            "task_type": "backtest",
+            "id": b["id"],
+            "name": b.get("name") or b.get("strategy_name") or "回测",
+            "strategy_name": b.get("strategy_name"),
+            "account_id": account_id,
+            "progress": progress_pct,
+            "message": message,
+            "started_at": b.get("started_at"),
+            "elapsed_seconds": 0,
+            "current_date": b.get("current_trade_date"),
+            "can_cancel": True,
+        })
+
+    # 按启动时间排序
+    tasks.sort(key=lambda x: x.get("started_at") or "", reverse=True)
+
+    return {
+        "account_id": account_id,
+        "timestamp": get_china_time().isoformat(),
+        "tasks": tasks,
+        "total": len(tasks),
+        "system_busy": len([t for t in tasks if t["type"] == "system"]) > 0,
+    }
+
+
+@router.get("/api/v1/ui/{account_id}/tasks/history")
+async def get_task_history(
+    account_id: str = Path(..., description="账户 ID"),
+    limit: int = Query(20, description="返回数量"),
+    task_type: str = Query(None, description="任务类型过滤"),
+):
+    """获取最近完成的任务历史"""
+
+    await validate_account_active(account_id)
+
+    db = get_db_manager()
+    history = []
+
+    # 最近完成的策略任务
+    if not task_type or task_type == "screening":
+        strategy_tasks = await db.fetchall("""
+            SELECT st.id, st.strategy_id, st.last_run_at, st.last_status, st.last_output,
+                   s.name as strategy_name
+            FROM strategy_tasks st
+            JOIN strategies s ON st.strategy_id = s.id
+            WHERE st.account_id = ? AND st.last_status IN ('success', 'error', 'failed')
+            ORDER BY st.last_run_at DESC
+            LIMIT ?
+        """, (account_id, limit))
+
+        for t in strategy_tasks:
+            import json
+            output = {}
+            try:
+                output = json.loads(t.get("last_output") or "{}")
+            except Exception:
+                pass
+
+            history.append({
+                "type": "screening",
+                "task_type": "strategy_screening",
+                "id": t["strategy_id"],
+                "name": t["strategy_name"],
+                "status": t["last_status"],
+                "completed_at": t["last_run_at"],
+                "result": output,
+                "matched_count": output.get("added", 0) if t["last_status"] == "success" else 0,
+            })
+
+    # 最近完成的回测
+    if not task_type or task_type == "backtest":
+        backtests = await db.fetchall("""
+            SELECT br.id, br.name, br.strategy_id, br.status, br.progress, br.completed_at,
+                   br.result_summary, br.error_message,
+                   s.name as strategy_name
+            FROM backtest_runs br
+            LEFT JOIN strategies s ON br.strategy_id = s.id
+            WHERE br.account_id = ? AND br.status IN ('completed', 'failed', 'cancelled')
+            ORDER BY br.completed_at DESC
+            LIMIT ?
+        """, (account_id, limit))
+
+        for b in backtests:
+            import json
+            result = {}
+            try:
+                result = json.loads(b.get("result_summary") or "{}")
+            except Exception:
+                pass
+
+            history.append({
+                "type": "backtest",
+                "task_type": "backtest",
+                "id": b["id"],
+                "name": b.get("name") or b.get("strategy_name") or "回测",
+                "status": b["status"],
+                "completed_at": b["completed_at"],
+                "result": result,
+                "error": b.get("error_message"),
+            })
+
+    # 按完成时间排序
+    history.sort(key=lambda x: x.get("completed_at") or "", reverse=True)
+
+    return {
+        "account_id": account_id,
+        "history": history[:limit],
+        "total": len(history),
+    }

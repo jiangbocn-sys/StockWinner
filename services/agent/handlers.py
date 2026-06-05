@@ -2194,6 +2194,10 @@ async def submit_strategy_code(
     import io
     import time
 
+    # 导入公共数据库查询函数（用于 context 传递）
+    from services.common.database import query_kline_db as _query_kline_db
+    from services.common.database import query_db as _query_db
+
     context = {
         "stocks": stocks,
         "account_id": account_id,
@@ -2220,6 +2224,9 @@ async def submit_strategy_code(
         "get_etf_pcf": _get_etf_pcf,
         "get_etf_share": _get_etf_share,
         "get_etf_iopv": _get_etf_iopv,
+        # 数据库查询
+        "query_kline_db": _query_kline_db,
+        "query_db": _query_db,
     }
 
     old_stdout = __import__("sys").stdout

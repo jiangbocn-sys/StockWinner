@@ -7,6 +7,7 @@
 """
 
 from fastapi import APIRouter, HTTPException, Path, Query
+from services.auth.account_validator import validate_account_active, validate_account_exists
 from typing import List, Optional
 from datetime import datetime
 

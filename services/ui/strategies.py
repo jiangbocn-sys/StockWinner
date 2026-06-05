@@ -7,6 +7,7 @@ from typing import List, Optional, Dict, Any
 from datetime import datetime
 from services.common.database import get_db_manager
 from services.common.timezone import get_china_time, format_china_time
+from services.auth.account_validator import validate_account_active, validate_account_exists
 import json
 
 router = APIRouter()
@@ -96,6 +97,24 @@ async def create_strategy(
     # Validate strategy_type
     if strategy_type not in ('screening', 'python'):
         raise HTTPException(status_code=400, detail=f"不支持的 strategy_type: {strategy_type}")
+
+    # 如果是代码型策略，进行自动验证
+    validation_warnings = []
+    if strategy_type == "python" and code is not None and code.strip():
+        from services.strategy.engine import get_strategy_engine
+        engine = get_strategy_engine()
+        validation = engine.validate_code(code)
+        if not validation["valid"]:
+            raise HTTPException(status_code=400, detail=f"代码验证失败: {validation['error']}")
+        validation_warnings = validation.get("warnings", [])
+        # 检查是否有严重警告（DataFrame列名错误）
+        critical_warnings = [w for w in validation_warnings if "⚠️" in w and ("列名" in w or "groupby" in w)]
+        if critical_warnings:
+            # 严重警告：返回错误，阻止保存
+            raise HTTPException(
+                status_code=400,
+                detail=f"代码存在严重问题：\n{chr(10).join(critical_warnings[:3])}\n请修正后再保存"
+            )
 
     strategy_data = {
         "account_id": account_id,
@@ -207,6 +226,24 @@ async def update_strategy(
         if ref["strategy_type"] != "python":
             raise HTTPException(status_code=400, detail="卖出策略必须是代码型策略 (python)")
         update_data["sell_strategy_id"] = sell_strategy_id
+
+    # 如果更新了代码，进行自动验证
+    validation_warnings = []
+    if code is not None and code.strip():
+        from services.strategy.engine import get_strategy_engine
+        engine = get_strategy_engine()
+        validation = engine.validate_code(code)
+        if not validation["valid"]:
+            raise HTTPException(status_code=400, detail=f"代码验证失败: {validation['error']}")
+        validation_warnings = validation.get("warnings", [])
+        # 检查是否有严重警告（DataFrame列名错误）
+        critical_warnings = [w for w in validation_warnings if "⚠️" in w and ("列名" in w or "groupby" in w)]
+        if critical_warnings:
+            # 严重警告：返回错误，阻止保存
+            raise HTTPException(
+                status_code=400,
+                detail=f"代码存在严重问题：\n{chr(10).join(critical_warnings[:3])}\n请修正后再保存"
+            )
 
     if len(update_data) > 1:
         await db.update("strategies", update_data, "id = ?", (strategy_id,))
@@ -670,6 +707,96 @@ async def validate_strategy_code(
     return engine.validate_code(code)
 
 
+@router.post("/api/v1/ui/{account_id}/strategies/{strategy_id}/compare-code")
+async def compare_strategy_code(
+    account_id: str = Path(..., description="账户 ID"),
+    strategy_id: int = Path(..., description="策略 ID"),
+    new_code: str = Body(..., description="新代码"),
+):
+    """
+    对比策略代码变更
+
+    Returns:
+        {
+            "added_lines": int,
+            "removed_lines": int,
+            "changes": [{"line": int, "type": "add/remove/change", "content": "..."}],
+            "critical_changes": [{"type": "...", "old": "...", "new": "..."}],
+            "warnings": [...]
+        }
+    """
+    import difflib
+
+    db = get_db_manager()
+    await validate_account_active(account_id)
+
+    # 获取旧代码
+    strategy = await db.fetchone(
+        "SELECT code FROM strategies WHERE id = ? AND account_id = ?",
+        (strategy_id, account_id)
+    )
+    if not strategy:
+        raise HTTPException(status_code=404, detail="策略不存在")
+
+    old_code = strategy.get("code", "") or ""
+
+    # 行级对比
+    old_lines = old_code.splitlines()
+    new_lines = new_code.splitlines()
+
+    diff = difflib.unified_diff(old_lines, new_lines, lineterm='')
+
+    added = 0
+    removed = 0
+    changes = []
+
+    for line in list(diff)[2:]:  # Skip header lines
+        if line.startswith('+') and not line.startswith('+++'):
+            added += 1
+            changes.append({"type": "add", "content": line[1:]})
+        elif line.startswith('-') and not line.startswith('---'):
+            removed += 1
+            changes.append({"type": "remove", "content": line[1:]})
+
+    # 检测关键变更（如列名修改）
+    critical_changes = []
+    warnings = []
+
+    # 检查是否有 trade_date → date 的错误变更
+    if "groupby('trade_date')" in old_code and "groupby('date')" in new_code:
+        critical_changes.append({
+            "type": "wrong_column",
+            "message": "⚠️ 检测到错误的列名变更: trade_date → date",
+            "severity": "critical"
+        })
+        warnings.append("groupby('trade_date') 被错误改为 groupby('date')，这会导致 KeyError")
+
+    if "['trade_date']" in old_code and "['date']" in new_code:
+        critical_changes.append({
+            "type": "wrong_column",
+            "message": "⚠️ 检测到错误的列名变更: ['trade_date'] → ['date']",
+            "severity": "critical"
+        })
+        warnings.append("['trade_date'] 被错误改为 ['date']，这会导致 KeyError")
+
+    # 检查是否有新增的错误代码
+    if "groupby('date')" in new_code and "groupby('date')" not in old_code:
+        critical_changes.append({
+            "type": "new_bug",
+            "message": "⚠️ 新增了错误的 groupby('date')，应为 groupby('trade_date')",
+            "severity": "critical"
+        })
+
+    return {
+        "added_lines": added,
+        "removed_lines": removed,
+        "changes": changes[:50],  # 限制返回数量
+        "critical_changes": critical_changes,
+        "warnings": warnings,
+        "has_critical_issue": len(critical_changes) > 0
+    }
+
+
 @router.post("/api/v1/ui/{account_id}/strategies/test-run")
 async def test_run_strategy(
     account_id: str = Path(..., description="账户 ID"),
@@ -774,6 +901,10 @@ async def test_run_strategy(
         gateway = await get_gateway()
         return await gateway.get_market_data(stock_code)
 
+    # 导入公共数据库查询函数（用于 context 传递）
+    from services.common.database import query_kline_db as _query_kline_db
+    from services.common.database import query_db as _query_db
+
     context = {
         "stocks": stocks,
         "account_id": account_id,
@@ -799,6 +930,8 @@ async def test_run_strategy(
         "get_kline_spliced": _get_kline_spliced,
         "get_kline_smart": _get_kline_smart,
         "get_realtime_quote": _get_realtime_quote,
+        "query_kline_db": _query_kline_db,
+        "query_db": _query_db,
     }
 
     # 4. 捕获 print 输出并执行

@@ -611,11 +611,18 @@ class SDKSubprocessManager:
                 line = self._subprocess.stdout.readline()
                 if not line:
                     continue
-                msg = json.loads(line.decode("utf-8").strip())
-                if msg.get("event") == "sdk_ready":
-                    self._ready_event.set()
-                    logger.log_event("sdk_ready_received", "收到子进程就绪信号")
-                    return
+                line_str = line.decode("utf-8").strip()
+                # 检查是否是 SDK 信号（以 __SDK_SIGNAL__: 开头）
+                if line_str.startswith("__SDK_SIGNAL__:"):
+                    try:
+                        msg = json.loads(line_str[len("__SDK_SIGNAL__:"):])
+                        if msg.get("event") == "sdk_ready":
+                            self._ready_event.set()
+                            logger.log_event("sdk_ready_received", "收到子进程就绪信号")
+                            return
+                    except json.JSONDecodeError:
+                        pass
+                # 其他输出是日志，忽略（不尝试解析）
             except Exception:
                 continue
 

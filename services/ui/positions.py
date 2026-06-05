@@ -212,6 +212,30 @@ async def get_positions(
             (account_id,)
         )
 
+    # 从 kline.db 获取行业信息并合并
+    if positions:
+        codes = [pos["stock_code"] for pos in positions if pos.get("stock_code")]
+        if codes:
+            from services.common.database import get_sync_connection
+            conn = get_sync_connection("kline")
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT stock_code, sw_level1, sw_level2, sw_level3 FROM stock_base_info WHERE stock_code IN ({})".format(
+                    ",".join(["?" for _ in codes])
+                ),
+                tuple(codes)
+            )
+            industry_map = {row[0]: {"sw_level1": row[1], "sw_level2": row[2], "sw_level3": row[3]} for row in cursor.fetchall()}
+            conn.close()
+
+            # 合并行业信息
+            for pos in positions:
+                code = pos.get("stock_code")
+                if code and code in industry_map:
+                    pos["sw_level1"] = industry_map[code]["sw_level1"]
+                    pos["sw_level2"] = industry_map[code]["sw_level2"]
+                    pos["sw_level3"] = industry_map[code]["sw_level3"]
+
     # 从内存价格缓存注入实时现价和涨跌幅
     try:
         from services.common.price_cache import get_price_cache

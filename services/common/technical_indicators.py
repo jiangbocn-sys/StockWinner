@@ -555,7 +555,7 @@ def add_all_technical_indicators_to_df(
 
     # 添加 MA 指标
     for window in ma_windows:
-        df[f'ma_{window}'] = df['close'].rolling(window=window).mean()
+        df[f'ma{window}'] = df['close'].rolling(window=window).mean()
 
     # 添加 KDJ
     df = add_kdj_to_df(df, n=kdj_n)
@@ -571,7 +571,7 @@ def add_all_technical_indicators_to_df(
 
 def add_all_extended_technical_indicators_to_df(
     df: pd.DataFrame,
-    ma_windows: List[int] = [5, 10, 20, 60],
+    ma_windows: List[int] = [5, 10, 20, 60, 120, 250],
     boll_period: int = 20,
     boll_std: float = 2.0,
     atr_period: int = 14,
@@ -584,7 +584,7 @@ def add_all_extended_technical_indicators_to_df(
     为 DataFrame 添加所有扩展技术指标
 
     添加的因子：
-    - 趋势类：MA5/10/20/60, EMA12/26, ADX
+    - 趋势类：MA5/10/20/60/120/250, EMA12/26, ADX
     - 动量类：RSI, CCI, 动量 (10d/20d)
     - 波动类：布林带、ATR、历史波动率
     - 成交量类：OBV, 量比
@@ -613,7 +613,7 @@ def add_all_extended_technical_indicators_to_df(
     # ==================== 趋势类 ====================
     # MA
     for window in ma_windows:
-        df[f'ma_{window}'] = df['close'].rolling(window=window).mean()
+        df[f'ma{window}'] = df['close'].rolling(window=window).mean()
 
     # EMA
     df['ema12'] = df['close'].ewm(span=12, adjust=False).mean()

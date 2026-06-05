@@ -28,6 +28,13 @@
                 <el-input-number v-model="profileForm.available_cash" :min="0" :precision="2" :step="1000" style="width: 200px" />
               </el-form-item>
 
+              <el-divider content-position="left">通知设置</el-divider>
+
+              <el-form-item label="暂停通知">
+                <el-switch v-model="profileForm.notifications_paused" :active-value="1" :inactive-value="0" />
+                <span class="field-hint" style="margin-left: 8px">开启后暂停所有飞书通知（测试时使用）</span>
+              </el-form-item>
+
               <el-divider content-position="left">交易成本参数</el-divider>
 
               <el-form-item label="佣金费率">
@@ -512,6 +519,7 @@ const getToken = () => localStorage.getItem('auth_token') || ''
 const profileForm = reactive({
   display_name: '',
   available_cash: 0,
+  notifications_paused: 0,
   commission_rate: 0.0003,
   stamp_tax: 0.0005,
   transfer_fee: 0.00002,
@@ -593,6 +601,7 @@ const loadProfile = () => {
   if (currentAccount.value) {
     profileForm.display_name = currentAccount.value.display_name || ''
     profileForm.available_cash = currentAccount.value.available_cash || 0
+    profileForm.notifications_paused = currentAccount.value.notifications_paused || 0
     profileForm.commission_rate = currentAccount.value.commission_rate || 0.0003
     profileForm.stamp_tax = currentAccount.value.stamp_tax || 0.0005
     profileForm.transfer_fee = currentAccount.value.transfer_fee || 0.00002

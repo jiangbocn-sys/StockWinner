@@ -574,8 +574,11 @@ def start_server():
     logger.log_event("sdk_ipc_server_started", f"IPC 服务端监听: {SOCKET_PATH}")
     logger.log_event("sdk_ipc_server_pid", f"子进程 PID: {os.getpid()}")
 
-    # 通知主进程已就绪
-    print(json.dumps({"event": "sdk_ready", "pid": os.getpid()}), flush=True)
+    # 通知主进程已就绪（使用 stderr 避免与日志 stdout 混合）
+    # 父进程捕获 stderr=STDOUT，所以还是能读到，但不会被异步日志队列干扰
+    import sys
+    sys.stderr.write(f"__SDK_SIGNAL__:{json.dumps({'event': 'sdk_ready', 'pid': os.getpid()})}\n")
+    sys.stderr.flush()
 
     running = True
 

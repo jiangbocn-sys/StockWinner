@@ -227,9 +227,9 @@ class MonthlyFactorUpdater:
         """从SDK获取财务报表数据"""
         print(f"[MonthlyFactor] 从SDK获取 {len(stock_codes)} 只股票的财务数据...")
 
-        income_df = self.sdk.get_income_statement(stock_codes)
-        balance_df = self.sdk.get_balance_sheet(stock_codes)
-        cashflow_df = self.sdk.get_cash_flow_statement(stock_codes)
+        income_df = self.sdk.get_income_statement(stock_codes, priority=3)
+        balance_df = self.sdk.get_balance_sheet(stock_codes, priority=3)
+        cashflow_df = self.sdk.get_cash_flow_statement(stock_codes, priority=3)
 
         return income_df, balance_df, cashflow_df
 

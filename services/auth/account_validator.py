@@ -74,3 +74,21 @@ async def get_account_display_name(account_id: str) -> str:
     if not account:
         return account_id
     return account.get("display_name") or account.get("name") or account_id
+
+
+async def require_admin_role(account_id: str) -> dict:
+    """验证账户是否为管理员角色
+
+    Args:
+        account_id: 账户 ID
+
+    Returns:
+        账户完整信息
+
+    Raises:
+        HTTPException(403): 非管理员
+    """
+    account = await validate_account_active(account_id)
+    if account.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="需要管理员权限")
+    return account

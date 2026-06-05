@@ -220,19 +220,18 @@ class TradingGateway(TradingGatewayInterface):
 
         前复权公式：前复权价格 = 原价 × 当日累计因子 / 最新累计因子
 
+        注意：复权因子更新由定时任务负责，此函数只从本地数据库读取。
+
         返回格式：[{trade_date, adj_factor, cumulative_factor}, ...]
         """
-        from services.data.adj_factor_service import get_adj_factor_for_stock, update_adj_factor_if_needed
+        from services.data.adj_factor_service import get_adj_factor_for_stock
 
         if not stock_codes:
             return []
 
         stock_code = stock_codes[0]
 
-        # 检查新鲜度并按需更新
-        update_adj_factor_if_needed([stock_code])
-
-        # 从数据库读取
+        # 直接从数据库读取（更新由定时任务处理）
         factors = get_adj_factor_for_stock(stock_code)
 
         # 转换为原有格式（trade_date YYYYMMDD）

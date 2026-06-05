@@ -19,7 +19,7 @@ CONFIG_PATH = Path(__file__).parent.parent.parent / "config" / "system_config.js
 # 默认配置
 DEFAULT_CONFIG = {
     "price_cache_ttl_trading": 300,      # 交易时段 TTL（秒）
-    "price_cache_ttl_non_trading": 43200, # 非交易时段 TTL（秒）= 12小时
+    "price_cache_ttl_non_trading": 32400, # 非交易时段 TTL（秒）= 9小时，确保收盘数据在24:00失效
     "price_cache_max_size": 10000,       # 缓存容量上限
     "price_cache_flush_interval": 900,   # 刷盘间隔（秒）= 15分钟
     "monitor_interval": 60,              # 监控循环间隔（秒）

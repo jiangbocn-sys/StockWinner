@@ -33,7 +33,7 @@ class MarketDataService:
 
     @staticmethod
     async def _fill_stale_from_kline_db(codes: Set[str]) -> Dict[str, MarketData]:
-        """从 kline.db 读取最新收盘价兜底（仅非交易时段）"""
+        """从 kline.db 读取最新收盘价兜底（仅非交易时段），计算涨跌幅"""
         from services.trading.trading_hours import can_trade
         if can_trade():
             return {}
@@ -44,24 +44,35 @@ class MarketDataService:
             conn = get_sync_connection("kline")
             cursor = conn.cursor()
             placeholders = ','.join(['?'] * len(codes))
+            # 获取最新两天数据以计算涨跌幅
             cursor.execute(f"""
-                SELECT k.stock_code, k.close, k.open, k.high, k.low, k.volume, k.amount, k.trade_date
+                SELECT k.stock_code, k.close, k.open, k.high, k.low, k.volume, k.amount, k.trade_date,
+                       k2.close as prev_close
                 FROM kline_data k
                 INNER JOIN (
                     SELECT stock_code, MAX(trade_date) as max_date
                     FROM kline_data WHERE stock_code IN ({placeholders})
                     GROUP BY stock_code
                 ) latest ON k.stock_code = latest.stock_code AND k.trade_date = latest.max_date
+                LEFT JOIN kline_data k2 ON k.stock_code = k2.stock_code
+                    AND k2.trade_date = (
+                        SELECT MAX(trade_date) FROM kline_data WHERE stock_code = k.stock_code AND trade_date < k.trade_date
+                    )
             """, list(codes))
             for row in cursor.fetchall():
                 code = row['stock_code']
                 close = float(row['close'] or 0)
+                prev_close = float(row['prev_close'] or close)
+                # 计算涨跌幅
+                change_pct = 0.0
+                if prev_close > 0 and close > 0:
+                    change_pct = (close - prev_close) / prev_close * 100
                 if close > 0:
                     results[code] = MarketData(
                         stock_code=code, stock_name=code, current_price=close,
-                        change_percent=0, high=float(row['high'] or close),
+                        change_percent=change_pct, high=float(row['high'] or close),
                         low=float(row['low'] or close), open_price=float(row['open'] or close),
-                        prev_close=close, volume=int(row['volume'] or 0),
+                        prev_close=prev_close, volume=int(row['volume'] or 0),
                         amount=float(row['amount'] or 0),
                         bid=[close] * 5, ask=[close] * 5,
                         bid_volume=[0] * 5, ask_volume=[0] * 5,

@@ -49,13 +49,9 @@
           <el-icon><DataLine /></el-icon>
           <span>数据浏览器</span>
         </el-menu-item>
-        <el-menu-item index="/data-management">
+        <el-menu-item index="/task-management">
           <el-icon><Files /></el-icon>
-          <span>数据维护</span>
-        </el-menu-item>
-        <el-menu-item index="/accounts">
-          <el-icon><User /></el-icon>
-          <span>账户管理</span>
+          <span>任务管理</span>
         </el-menu-item>
         <el-menu-item index="/settings">
           <el-icon><Tools /></el-icon>
@@ -68,6 +64,9 @@
         <div class="user-info">
           <el-icon><User /></el-icon>
           <span class="username">{{ currentUser?.display_name || currentUser?.name }}</span>
+          <el-tag :type="currentUser?.role === 'admin' ? 'danger' : 'info'" size="small" style="margin-left: 8px;">
+            {{ currentUser?.role === 'admin' ? '管理员' : '用户' }}
+          </el-tag>
         </div>
         <el-dropdown style="margin-left: 15px">
           <el-button size="small">
@@ -75,9 +74,9 @@
           </el-button>
           <template #dropdown>
             <el-dropdown-menu>
-              <el-dropdown-item @click="router.push('/change-password')">
-                <el-icon><Lock /></el-icon>
-                修改密码
+              <el-dropdown-item @click="router.push('/settings')">
+                <el-icon><Tools /></el-icon>
+                系统设置
               </el-dropdown-item>
               <el-dropdown-item divided @click="handleLogout">
                 <el-icon><SwitchButton /></el-icon>

@@ -43,7 +43,7 @@ CROSS_SIGNALS = {
 # 可识别的指标因子
 INDICATOR_FACTORS = {
     "RSI_14", "RSI", "VOLUME_RATIO", "DIF", "DEA", "MACD",
-    "MA5", "MA10", "MA20", "MA60",
+    "MA5", "MA10", "MA20", "MA60", "MA120", "MA250",
     "PRICE", "CLOSE", "VOLUME",
     "KDJ_K", "KDJ_D", "KDJ_J", "K", "D", "J",
     "BOLL_UPPER", "BOLL_LOWER", "BOLL_MID",

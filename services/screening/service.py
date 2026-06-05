@@ -34,7 +34,24 @@ class ScreeningService:
             "current_stock": None, "start_time": None,
             "estimated_remaining": None
         }
-        self._evaluator = ConditionEvaluator(self._progress)
+        self._current_account_id: Optional[str] = None
+        self._current_strategy_id: Optional[int] = None
+
+        # 进度回调函数
+        def progress_callback(prog: dict):
+            if self._current_account_id and self._current_strategy_id:
+                from services.ui.dashboard import update_screening_progress
+                update_screening_progress(self._current_account_id, self._current_strategy_id, {
+                    "percent": prog.get("processed", 0) / max(prog.get("total_stocks", 1), 1) * 100,
+                    "message": f"已处理 {prog.get('processed', 0)}/{prog.get('total_stocks', 0)}",
+                    "processed": prog.get("processed", 0),
+                    "total_stocks": prog.get("total_stocks", 0),
+                    "matched": prog.get("matched", 0),
+                    "current_stock": prog.get("current_stock", ""),
+                    "start_time": prog.get("start_time"),
+                })
+
+        self._evaluator = ConditionEvaluator(self._progress, progress_callback)
         self._candidate_mgr = CandidateManager()
 
     async def start_screening(self, account_id: str, strategy_id: Optional[int] = None, interval: int = 60):
@@ -83,6 +100,7 @@ class ScreeningService:
         """执行一次选股扫描"""
         db = get_db_manager()
         account_manager = get_account_manager()
+        log = get_logger("screening")
 
         if not await account_manager.validate_account(account_id):
             return
@@ -95,6 +113,10 @@ class ScreeningService:
         self.reset_progress()
         self._progress["start_time"] = get_china_time().isoformat()
         self._progress["current_phase"] = "fetching_list"
+        self._current_account_id = account_id  # 设置当前账户ID供回调使用
+
+        # 导入进度更新函数
+        from services.ui.dashboard import update_screening_progress, clear_screening_progress
 
         # 获取策略列表
         if strategy_id:
@@ -120,16 +142,36 @@ class ScreeningService:
             if not strategy:
                 continue
 
-            print(f"[Screening] 执行策略 {strategy_idx + 1}/{total_strategies}: {strategy.get('name')}")
+            current_strategy_id = strategy.get('id')
+            self._current_strategy_id = current_strategy_id  # 设置当前策略ID供回调使用
+
+            log.info("screening", f"执行策略 {strategy_idx + 1}/{total_strategies}: {strategy.get('name')}")
+
+            # 标记筛选开始
+            self._progress["current_phase"] = "scanning"
+            update_screening_progress(account_id, current_strategy_id, {
+                "percent": 0,
+                "message": f"开始筛选: {strategy.get('name')}",
+                "start_time": self._progress["start_time"],
+            })
 
             strategy_type = strategy.get('strategy_type', 'screening')
             if strategy_type == 'python':
-                self._progress["current_phase"] = "scanning"
                 stock_scope = override_stock_scope or 'market'
                 await self._evaluator.execute_python_strategy(
                     account_id, strategy, stock_scope, pending_to_temp,
                     candidate_manager=self._candidate_mgr
                 )
+                # 更新进度
+                update_screening_progress(account_id, current_strategy_id, {
+                    "percent": self._progress.get("processed", 0) / max(self._progress.get("total_stocks", 1), 1) * 100,
+                    "message": f"已处理 {self._progress.get('processed', 0)}/{self._progress.get('total_stocks', 0)}",
+                    "processed": self._progress.get("processed", 0),
+                    "total_stocks": self._progress.get("total_stocks", 0),
+                    "matched": self._progress.get("matched", 0),
+                    "current_stock": self._progress.get("current_stock", ""),
+                    "start_time": self._progress.get("start_time"),
+                })
                 continue
 
             config = self._parse_config(strategy.get('config'))
@@ -144,18 +186,11 @@ class ScreeningService:
             if match_score_threshold is None:
                 match_score_threshold = config.get('match_score_threshold', 0.5)
 
-            self._progress["current_phase"] = "scanning"
-
-            if use_local:
-                print(f"[Screening] 使用本地数据源进行筛选... (匹配度阈值：{match_score_threshold*100:.0f}%)")
-                try:
-                    candidates = await self._evaluator.evaluate_optimized(config, match_score_threshold)
-                except Exception as e:
-                    print(f"[Screening] 优化模式失败，回退到传统模式：{e}")
-                    candidates = await self._evaluator.evaluate_local(config, match_score_threshold)
-            else:
-                print(f"[Screening] 使用 SDK 实时数据源进行筛选... (匹配度阈值：{match_score_threshold*100:.0f}%)")
-                candidates = await self._evaluator.evaluate_sdk(config, match_score_threshold)
+            try:
+                candidates = await self._evaluator.evaluate_optimized(config, match_score_threshold)
+            except Exception as e:
+                log.warn("screening", f"优化模式失败，回退到传统模式：{e}")
+                candidates = await self._evaluator.evaluate_local(config, match_score_threshold)
 
             for candidate in candidates:
                 if pending_to_temp:
@@ -166,6 +201,10 @@ class ScreeningService:
                     await self._candidate_mgr.add_to_watchlist(
                         account_id, strategy.get('id'), candidate, config, group_id=group_id
                     )
+
+            # 筛选完成，清除进度
+            clear_screening_progress(account_id, current_strategy_id)
+            log.info("screening", f"策略 {strategy.get('name')} 筛选完成，入选 {len(candidates)} 只")
 
         self._progress["current_phase"] = "done"
 

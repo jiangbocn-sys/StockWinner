@@ -910,26 +910,9 @@ class SimulatedTradingEngine:
             "kronos_available": kronos_service.is_available,
         }
 
-        # 同步数据库查询（只读，用于策略中特殊查询需求）
-        def _query_db(sql: str, params: tuple = None):
-            from services.common.database import get_sync_connection
-            conn = get_sync_connection()
-            cursor = conn.cursor()
-            try:
-                if params:
-                    cursor.execute(sql, params)
-                else:
-                    cursor.execute(sql)
-                if sql.strip().upper().startswith("SELECT"):
-                    rows = [dict(r) for r in cursor.fetchall()]
-                    return rows
-                else:
-                    conn.commit()
-                    return cursor.rowcount
-            except Exception:
-                conn.rollback()
-                raise
-
-        context["query_db"] = _query_db
+        # 导入公共数据库查询函数（用于 context 传递）
+        from services.common.database import query_kline_db, query_db
+        context["query_db"] = query_db
+        context["query_kline_db"] = query_kline_db
 
         return context

@@ -624,3 +624,50 @@ async def mcp_industry_weight(index_code: str) -> dict:
         行业成分股权重数据
     """
     return await api.get("/query/data/industry-weight", {"index_code": index_code})
+
+
+# ================================================================
+# ETF 专项数据
+# ================================================================
+
+@mcp.tool()
+async def mcp_etf_pcf(etf_codes: str) -> dict:
+    """
+    查询 ETF 申赎数据（PCF清单+成分股）
+
+    Args:
+        etf_codes: ETF代码列表，逗号分隔，如 "510050.SH,510300.SH"
+
+    Returns:
+        pcf_info: ETF基本信息（申购赎回代码、最小申购单位等）
+        constituents: 各ETF的成分股清单
+    """
+    return await api.get("/query/data/etf/pcf", {"etf_codes": etf_codes})
+
+
+@mcp.tool()
+async def mcp_etf_share(etf_codes: str) -> dict:
+    """
+    查询 ETF 基金份额
+
+    Args:
+        etf_codes: ETF代码列表，逗号分隔
+
+    Returns:
+        各ETF的历史份额变动数据
+    """
+    return await api.get("/query/data/etf/share", {"etf_codes": etf_codes})
+
+
+@mcp.tool()
+async def mcp_etf_iopv(etf_codes: str) -> dict:
+    """
+    查询 ETF IOPV 实时净值（盘中计算）
+
+    Args:
+        etf_codes: ETF代码列表，逗号分隔
+
+    Returns:
+        各ETF的IOPV净值数据（Indicative Optimized Portfolio Value）
+    """
+    return await api.get("/query/data/etf/iopv", {"etf_codes": etf_codes})

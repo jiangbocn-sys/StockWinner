@@ -8,7 +8,7 @@ from services.ui import (
     screening, monitoring, market_data, data_explorer,
     position_rules, factors, scheduler, notifications,
     trading_strategies, strategy_performance, data_service, data_sources,
-    capital, system_config, signal_allocation, sl_tp_sync,
+    capital, system_config, signal_allocation, sl_tp_sync, system_tasks,
 )
 from services.backtest.api import router as backtest_router
 from services.strategy.api import router as strategy_v2_router
@@ -48,6 +48,7 @@ def register_routers(app: FastAPI):
     app.include_router(system_config.router)
     app.include_router(signal_allocation.router)
     app.include_router(sl_tp_sync.router)
+    app.include_router(system_tasks.router)
 
     # 别名路由：前端调用 /api/me（不带 /auth 前缀）
     from fastapi import Depends

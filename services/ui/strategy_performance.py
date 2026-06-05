@@ -5,6 +5,7 @@
 """
 
 from fastapi import APIRouter, HTTPException, Path, Query
+from services.auth.account_validator import validate_account_active, validate_account_exists
 from typing import Optional
 from services.common.database import get_db_manager
 from services.common.account_manager import get_account_manager

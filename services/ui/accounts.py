@@ -8,6 +8,7 @@ from datetime import datetime
 from services.common.database import get_db_manager
 from services.common.account_manager import get_account_manager
 from services.common.timezone import get_china_time
+from services.auth.account_validator import validate_account_active, validate_account_exists
 
 router = APIRouter()
 

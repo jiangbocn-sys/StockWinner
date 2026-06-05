@@ -4,7 +4,7 @@
 
 import os
 from fastapi import FastAPI
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 
@@ -19,6 +19,16 @@ def mount_static_files(app: FastAPI):
     @app.get("/ui/favicon.svg", include_in_schema=False)
     async def serve_favicon():
         return FileResponse(os.path.join(frontend_dist, "favicon.svg"))
+
+    # 兼容旧路径：/login 重定向到 /ui/login
+    @app.get("/login", include_in_schema=False)
+    async def redirect_login():
+        return RedirectResponse(url="/ui/login", status_code=301)
+
+    # 兼容旧路径：/dashboard 重定向到 /ui/dashboard
+    @app.get("/dashboard", include_in_schema=False)
+    async def redirect_dashboard():
+        return RedirectResponse(url="/ui/dashboard", status_code=301)
 
     @app.get("/ui/{full_path:path}", include_in_schema=False)
     async def serve_spa(full_path: str):

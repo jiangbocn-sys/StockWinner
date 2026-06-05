@@ -46,7 +46,10 @@ class DailyFactorCalculator:
         return [row[0] for row in cursor.fetchall()]
 
     def get_all_stocks_on_date(self, trade_date: str) -> List[str]:
-        """获取指定交易日有数据的所有股票代码"""
+        """获取指定交易日有数据的所有股票代码
+
+        排除北交所创新层(4xxxxx)和基础层(8xxxxx)代码
+        """
         conn = get_sync_connection("kline")
         cursor = conn.cursor()
         cursor.execute("""
@@ -54,7 +57,19 @@ class DailyFactorCalculator:
             FROM kline_data
             WHERE trade_date = ?
         """, (trade_date,))
-        return [row[0] for row in cursor.fetchall()]
+        codes = [row[0] for row in cursor.fetchall()]
+
+        # 过滤北交所创新层和基础层
+        filtered_codes = []
+        for code in codes:
+            # 北交所格式为 xxxxxx.BJ
+            if code.endswith('.BJ'):
+                base_code = code.split('.')[0]
+                if base_code.startswith('4') or base_code.startswith('8'):
+                    continue
+            filtered_codes.append(code)
+
+        return filtered_codes
 
     def get_stock_kline_data(
         self,
@@ -134,7 +149,7 @@ class DailyFactorCalculator:
             try:
                 from services.common.sdk_manager import get_sdk_manager
                 sdk_manager = get_sdk_manager()
-                equity_df = sdk_manager.get_equity_structure([stock_code])
+                equity_df = sdk_manager.get_equity_structure([stock_code], priority=3)
                 if not equity_df.empty:
                     # 获取最接近 trade_date 的数据
                     equity_df['ANN_DATE'] = pd.to_datetime(equity_df['ANN_DATE'], format='%Y%m%d')
@@ -290,7 +305,7 @@ class DailyFactorCalculator:
 
                 # 获取股本数据
                 if total_shares is None:
-                    equity_df = sdk_manager.get_equity_structure([stock_code])
+                    equity_df = sdk_manager.get_equity_structure([stock_code], priority=3)
                     if not equity_df.empty:
                         # 获取最接近 trade_date 的数据
                         equity_df['ANN_DATE'] = pd.to_datetime(equity_df['ANN_DATE'], format='%Y%m%d', errors='coerce')
@@ -302,7 +317,7 @@ class DailyFactorCalculator:
 
                 # 获取利润表数据
                 if net_profit_ttm is None:
-                    income_df = sdk_manager.get_income_statement([stock_code])
+                    income_df = sdk_manager.get_income_statement([stock_code], priority=3)
                     if not income_df.empty:
                         # 获取最新的年报数据（REPORT_TYPE=1）
                         annual = income_df[income_df['REPORT_TYPE'] == '1']
@@ -313,7 +328,7 @@ class DailyFactorCalculator:
 
                 # 获取资产负债表数据
                 if net_assets is None:
-                    balance_df = sdk_manager.get_balance_sheet([stock_code])
+                    balance_df = sdk_manager.get_balance_sheet([stock_code], priority=3)
                     if not balance_df.empty:
                         # 获取最新的年报数据
                         annual = balance_df[balance_df['REPORT_TYPE'] == '1']

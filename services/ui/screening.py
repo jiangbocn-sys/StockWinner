@@ -9,6 +9,7 @@ import os
 from services.common.database import get_db_manager, get_sync_connection
 from services.screening.service import get_screening_service
 from services.common.timezone import get_china_time, format_china_time
+from services.auth.account_validator import validate_account_active
 
 router = APIRouter()
 
@@ -541,7 +542,7 @@ async def get_watchlist(
 
     db = get_db_manager()
 
-    # JOIN 候选组、策略表和持仓表，获取组名、策略名和持仓数量
+    # 从 stockwinner.db 获取 watchlist（不能直接 JOIN kline.db 的 stock_base_info）
     base_sql = """
         SELECT w.*, g.name as group_name, g.group_type, g.screening_strategy_id,
                s.name as strategy_name, COALESCE(p.quantity, 0) as position_quantity
@@ -563,6 +564,30 @@ async def get_watchlist(
     base_sql += " ORDER BY w.group_id, w.created_at DESC"
 
     watchlist = await db.fetchall(base_sql, tuple(params))
+
+    # 从 kline.db 获取行业信息并合并
+    if watchlist:
+        codes = [item["stock_code"] for item in watchlist if item.get("stock_code")]
+        if codes:
+            from services.common.database import get_sync_connection
+            conn = get_sync_connection("kline")
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT stock_code, sw_level1, sw_level2, sw_level3 FROM stock_base_info WHERE stock_code IN ({})".format(
+                    ",".join(["?" for _ in codes])
+                ),
+                tuple(codes)
+            )
+            industry_map = {row[0]: {"sw_level1": row[1], "sw_level2": row[2], "sw_level3": row[3]} for row in cursor.fetchall()}
+            conn.close()
+
+            # 合并行业信息
+            for item in watchlist:
+                code = item.get("stock_code")
+                if code and code in industry_map:
+                    item["sw_level1"] = industry_map[code]["sw_level1"]
+                    item["sw_level2"] = industry_map[code]["sw_level2"]
+                    item["sw_level3"] = industry_map[code]["sw_level3"]
 
     # 从内存价格缓存注入实时现价；缓存过期/缺失时后台异步刷新
     try:

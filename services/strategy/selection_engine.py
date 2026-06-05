@@ -309,7 +309,7 @@ class StockSelectionEngine:
         min_score: float,
         top_n: Optional[int]
     ) -> List[StockScore]:
-        """从 SDK 实时数据扫描（备用实现）"""
+        """从 SDK 实时数据扫描（备用实现，策略评估使用 medium priority）"""
         from services.trading.gateway import get_gateway
 
         gateway = await get_gateway()
@@ -325,8 +325,8 @@ class StockSelectionEngine:
 
         for stock_code in stock_codes:
             try:
-                # 获取实时 K 线数据
-                kline_data = await gateway.get_kline_data(stock_code, period="day", limit=60)
+                # 获取实时 K 线数据（策略评估使用 medium priority=2）
+                kline_data = await gateway.get_kline_data(stock_code, period="day", limit=60, priority=2)
                 if not kline_data or len(kline_data) < 30:
                     continue
 

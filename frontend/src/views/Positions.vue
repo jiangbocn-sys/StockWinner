@@ -281,7 +281,7 @@
       </el-dialog>
 
       <!-- K 线图弹窗 -->
-      <el-dialog v-model="klineVisible" :title="`${klineStockInfo.name} (${klineStockInfo.code}) K线走势`" width="85%" top="5vh">
+      <el-dialog v-model="klineVisible" :title="klineDialogTitle" width="85%" top="5vh">
         <div class="kline-nav">
           <el-button size="small" @click="prevStock" :disabled="!hasPrevStock">
             <el-icon><ArrowLeft /></el-icon> 上一只
@@ -624,7 +624,7 @@ const loadClosedPositions = async () => {
 // K 线图
 const klineVisible = ref(false)
 const klineChartRef = ref(null)
-const klineStockInfo = ref({ code: '', name: '' })
+const klineStockInfo = ref({ code: '', name: '', sw_level1: '', sw_level2: '', sw_level3: '' })
 const klineStockIndex = ref(-1)
 const klineData = ref([])
 
@@ -656,6 +656,15 @@ const klineIndicatorConfig = computed(() => {
     }
   }
   return config
+})
+
+// K 线弹窗标题（含行业信息）
+const klineDialogTitle = computed(() => {
+  const { name, code, sw_level1, sw_level2, sw_level3 } = klineStockInfo.value
+  // 构建行业字符串（只显示有值的级别）
+  const industryParts = [sw_level1, sw_level2, sw_level3].filter(Boolean)
+  const industryStr = industryParts.length > 0 ? ` [${industryParts.join(' - ')}]` : ''
+  return `${name} (${code})${industryStr} K线走势`
 })
 
 // 切换指标选择
@@ -1146,7 +1155,7 @@ const showKline = async (row) => {
   } else if (klinePeriod.value === 'week') {
     klineMonths.value = 60  // 周线初始 60 个月参数（约 250 根）
   }
-  await loadKlineData(row.stock_code, row.stock_name)
+  await loadKlineData(row.stock_code, row.stock_name, row.sw_level1, row.sw_level2, row.sw_level3)
 }
 
 const reloadKline = () => {
@@ -1158,7 +1167,8 @@ const reloadKline = () => {
     } else if (klinePeriod.value === 'week') {
       klineMonths.value = 60
     }
-    loadKlineData(klineStockInfo.value.code, klineStockInfo.value.name)
+    const { code, name, sw_level1, sw_level2, sw_level3 } = klineStockInfo.value
+    loadKlineData(code, name, sw_level1, sw_level2, sw_level3)
   }
 }
 
@@ -1167,14 +1177,15 @@ const loadMoreKline = async () => {
   klineLoadingMore.value = true
   klineMonths.value += 12  // 每次增加 1 年
   try {
-    await loadKlineData(klineStockInfo.value.code, klineStockInfo.value.name)
+    const { code, name, sw_level1, sw_level2, sw_level3 } = klineStockInfo.value
+    await loadKlineData(code, name, sw_level1, sw_level2, sw_level3)
   } finally {
     klineLoadingMore.value = false
   }
 }
 
-const loadKlineData = async (code, name) => {
-  klineStockInfo.value = { code, name }
+const loadKlineData = async (code, name, sw_level1 = '', sw_level2 = '', sw_level3 = '') => {
+  klineStockInfo.value = { code, name, sw_level1, sw_level2, sw_level3 }
   klineData.value = []
   // 不在这里清空指标数据，等 loadIndicatorData 加载完新数据后自然替换
 
@@ -1235,7 +1246,7 @@ const prevStock = async () => {
   if (!row) return
   klineStockIndex.value = idx
   klineIndicators.value = {}
-  await switchStockPreservingDrillDown(klineChartRef, () => loadKlineData(row.stock_code, row.stock_name))
+  await switchStockPreservingDrillDown(klineChartRef, () => loadKlineData(row.stock_code, row.stock_name, row.sw_level1, row.sw_level2, row.sw_level3))
 }
 
 const nextStock = async () => {
@@ -1245,7 +1256,7 @@ const nextStock = async () => {
   if (!row) return
   klineStockIndex.value = idx
   klineIndicators.value = {}
-  await switchStockPreservingDrillDown(klineChartRef, () => loadKlineData(row.stock_code, row.stock_name))
+  await switchStockPreservingDrillDown(klineChartRef, () => loadKlineData(row.stock_code, row.stock_name, row.sw_level1, row.sw_level2, row.sw_level3))
 }
 
 // 静默刷新当前价（从内存 PriceCache 取，不触发 SDK 调用）

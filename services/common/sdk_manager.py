@@ -11,7 +11,7 @@ SDK 管理器（v7.5.0 — 子进程隔离架构）
 import time
 from collections import deque
 from threading import Lock
-from typing import Optional, Dict
+from typing import Optional, Dict, Tuple
 import pandas as pd
 
 from services.common.structured_logger import get_logger
@@ -396,6 +396,45 @@ class SDKManager:
         except Exception:
             return pd.DataFrame()
 
+    # ── ETF 专项数据 ──
+
+    def get_etf_pcf(self, etf_codes: list, priority: int = 3) -> Tuple[pd.DataFrame, Dict[str, pd.DataFrame]]:
+        """ETF 申赎数据（后台任务，默认 low priority）
+        返回: (etf_pcf_info, etf_pcf_constituent_dict)
+        """
+        try:
+            result = self._call_ipc("get_etf_pcf", {"etf_codes": etf_codes},
+                                    "download", priority, 60.0, stock_count=len(etf_codes) if etf_codes else 0)
+            if isinstance(result, dict):
+                pcf_info = result.get("pcf_info", pd.DataFrame())
+                constituents = result.get("constituents", {})
+                return pcf_info, constituents
+            return pd.DataFrame(), {}
+        except Exception:
+            return pd.DataFrame(), {}
+
+    def get_fund_share(self, etf_codes: list, priority: int = 3) -> Dict[str, pd.DataFrame]:
+        """ETF 基金份额（后台任务，默认 low priority）
+        返回: {etf_code: dataframe}
+        """
+        try:
+            result = self._call_ipc("get_fund_share", {"etf_codes": etf_codes},
+                                    "download", priority, 60.0, stock_count=len(etf_codes) if etf_codes else 0)
+            return result if isinstance(result, dict) else {}
+        except Exception:
+            return {}
+
+    def get_fund_iopv(self, etf_codes: list, priority: int = 3) -> Dict[str, pd.DataFrame]:
+        """ETF IOPV 净值（后台任务，默认 low priority）
+        返回: {etf_code: dataframe}
+        """
+        try:
+            result = self._call_ipc("get_fund_iopv", {"etf_codes": etf_codes},
+                                    "download", priority, 60.0, stock_count=len(etf_codes) if etf_codes else 0)
+            return result if isinstance(result, dict) else {}
+        except Exception:
+            return {}
+
     def get_industry_constituent(self, index_codes: list, priority: int = 3) -> pd.DataFrame:
         """行业成分（后台任务，默认 low priority）"""
         try:
@@ -416,6 +455,22 @@ class SDKManager:
             if isinstance(result, dict):
                 dfs = [df for df in result.values() if isinstance(df, pd.DataFrame)]
                 return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
+            return result if isinstance(result, pd.DataFrame) else pd.DataFrame()
+        except Exception:
+            return pd.DataFrame()
+
+    def get_adj_factor(self, stock_codes: list, priority: int = 2) -> pd.DataFrame:
+        """获取复权因子（默认 medium priority）
+
+        用于 K 线前复权计算：
+        - 前复权价格 = 原价 × 当日复权因子 / 最新复权因子
+
+        Returns:
+            DataFrame with columns: stock_code, trade_date, adj_factor
+        """
+        try:
+            result = self._call_ipc("get_adj_factor", {"stock_codes": stock_codes},
+                                    "query", priority, 30.0, stock_count=len(stock_codes) if stock_codes else 0)
             return result if isinstance(result, pd.DataFrame) else pd.DataFrame()
         except Exception:
             return pd.DataFrame()

@@ -77,7 +77,7 @@ class FinancialService:
 
     def fetch_batch(self, stock_codes: List[str], force: bool = False) -> FinancialBatch:
         """
-        批量获取财务数据。
+        批量获取财务数据（后台任务，使用 low priority）。
 
         内部只调 3 次 SDK（income/balance/cashflow），覆盖所有传入的股票。
         结果缓存，同一批次内多次调用返回同一对象。
@@ -90,9 +90,9 @@ class FinancialService:
         if key in self._cache and not force:
             return self._cache[key]
 
-        income = self.sdk.get_income_statement(stock_codes)
-        balance = self.sdk.get_balance_sheet(stock_codes)
-        cashflow = self.sdk.get_cash_flow_statement(stock_codes)
+        income = self.sdk.get_income_statement(stock_codes, priority=3)
+        balance = self.sdk.get_balance_sheet(stock_codes, priority=3)
+        cashflow = self.sdk.get_cash_flow_statement(stock_codes, priority=3)
 
         batch = FinancialBatch(income, balance, cashflow)
         self._cache[key] = batch

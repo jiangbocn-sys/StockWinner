@@ -311,9 +311,9 @@ const filterAvailable = computed(() => {
   }
 })
 
-// 可见的列（限制显示前 50 列避免页面卡顿）
+// 可见的列（显示所有列）
 const visibleColumns = computed(() => {
-  return tableColumns.value.slice(0, 50)
+  return tableColumns.value
 })
 
 // 加载数据库列表

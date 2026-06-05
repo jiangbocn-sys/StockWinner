@@ -9,6 +9,7 @@ import sqlite3
 from services.common.database import get_db_manager, get_sync_connection
 from services.monitoring.service import get_trading_monitor
 from services.common.timezone import get_china_time, format_china_time
+from services.auth.account_validator import validate_account_active, validate_account_exists
 
 router = APIRouter()
 

@@ -4,6 +4,7 @@ import { resolve } from 'path'
 
 // https://vite.dev/config/
 export default defineConfig({
+  base: '/ui/',  // 与后端挂载路径匹配
   plugins: [vue()],
   resolve: {
     alias: {
