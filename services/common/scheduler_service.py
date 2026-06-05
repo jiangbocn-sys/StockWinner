@@ -1944,6 +1944,10 @@ class SchedulerService:
                     except Exception as e:
                         logger.warning(f"进度更新失败: {e}")
 
+                # 导入公共数据库查询函数（用于 context 传递）
+                from services.common.database import query_kline_db as _query_kline_db
+                from services.common.database import query_db as _query_db
+
                 context = {
                     "stocks": [dict(s) for s in stocks],
                     "account_id": task["account_id"],
@@ -1973,6 +1977,8 @@ class SchedulerService:
                     "get_kline_smart": _get_kline_smart,              # 同步: 自动判断盘中/盘后
                     "get_realtime_quote": _get_realtime_quote,        # 同步: 预取当日 OHLCV
                     "update_progress": _update_progress,              # 同步: 进度更新函数
+                    "query_kline_db": _query_kline_db,                # 同步: kline.db SQL 查询
+                    "query_db": _query_db,                            # 同步: stockwinner.db SQL 查询
                 }
 
                 # 交易型策略：注入持仓数据（同步可用）
@@ -2007,24 +2013,23 @@ class SchedulerService:
             )
             logger.info(f"策略任务完成: {result}")
 
-            # 发送通知（仅 signal_action=trade 时发送）
-            signal_action = task.get("signal_action", "trade")
-            if signal_action == "trade":
-                try:
-                    from services.notifications import get_notification_service
-                    notification = get_notification_service()
-                    await notification.emit(
-                        event_type="task_completed",
-                        account_id=task["account_id"],
-                        payload={
-                            "task_name": f"策略任务 #{task_id}",
-                            "task_type": task_type,
-                            "duration": "N/A",
-                            "output": json.dumps(result, ensure_ascii=False)[:500],
-                        },
-                    )
-                except Exception as e:
-                    logger.warning(f"发送任务完成通知失败: {e}")
+            # 发送通知（使用新 NotificationManager，signal_action 判断在规则引擎）
+            try:
+                from services.notifications import get_notification_manager
+                manager = get_notification_manager()
+                await manager.trigger(
+                    event_type="task_completed",
+                    account_id=task["account_id"],
+                    payload={
+                        "task_name": f"策略任务 #{task_id}",
+                        "task_type": task_type,
+                        "duration": "N/A",
+                        "output": json.dumps(result, ensure_ascii=False)[:500],
+                    },
+                    context={"signal_action": task.get("signal_action", "trade")},
+                )
+            except Exception as e:
+                logger.warning(f"发送任务完成通知失败: {e}")
 
         except Exception as e:
             logger.error(f"策略任务执行失败: {e}", exc_info=True)
@@ -2033,11 +2038,11 @@ class SchedulerService:
                 (json.dumps({"error": str(e)}, ensure_ascii=False), get_china_time().isoformat(), task_id)
             )
 
-            # 发送失败通知
+            # 发送失败通知（使用新 NotificationManager）
             try:
-                from services.notifications import get_notification_service
-                notification = get_notification_service()
-                await notification.emit(
+                from services.notifications import get_notification_manager
+                manager = get_notification_manager()
+                await manager.trigger(
                     event_type="task_failed",
                     account_id=task["account_id"],
                     payload={

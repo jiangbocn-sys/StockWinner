@@ -70,6 +70,14 @@ class NotificationService:
         """
         db = get_db_manager()
 
+        # 0. 检查账户是否暂停通知（测试模式）
+        account = await db.fetchone(
+            "SELECT notifications_paused FROM accounts WHERE account_id = ?",
+            (account_id,),
+        )
+        if account and account.get("notifications_paused"):
+            return  # 用户已暂停所有通知
+
         # 1. 检查通知配置
         configs = await db.fetchall(
             "SELECT * FROM notification_config WHERE account_id = ? AND enabled = 1",

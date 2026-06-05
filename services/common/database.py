@@ -446,6 +446,49 @@ def get_sync_connection(db_name: str = "stockwinner",
     return conn
 
 
+def query_kline_db(sql: str, params: tuple = None):
+    """同步查询 kline.db（只读）。返回 List[Dict] 或 int。
+
+    用于策略沙盒环境，统一封装数据库查询操作。
+    """
+    conn = get_sync_connection("kline")
+    cursor = conn.cursor()
+    try:
+        if params:
+            cursor.execute(sql, params)
+        else:
+            cursor.execute(sql)
+        if sql.strip().upper().startswith("SELECT"):
+            rows = [dict(r) for r in cursor.fetchall()]
+            return rows
+        return cursor.rowcount
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def query_db(sql: str, params: tuple = None):
+    """同步查询 stockwinner.db。返回 List[Dict] 或 int。
+
+    用于策略沙盒环境，统一封装数据库查询操作。
+    """
+    conn = get_sync_connection()
+    cursor = conn.cursor()
+    try:
+        if params:
+            cursor.execute(sql, params)
+        else:
+            cursor.execute(sql)
+        if sql.strip().upper().startswith("SELECT"):
+            rows = [dict(r) for r in cursor.fetchall()]
+            return rows
+        conn.commit()
+        return cursor.rowcount
+    except Exception:
+        conn.rollback()
+        raise
+
+
 def _cleanup_stale_connections(now: float):
     """清理老化连接：超过1小时未用或总缓存超过限制"""
     total_count = 0

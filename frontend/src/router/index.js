@@ -42,10 +42,10 @@ const routes = [
     meta: { title: '数据浏览器' }
   },
   {
-    path: '/data-management',
-    name: 'DataManagement',
-    component: () => import('../views/DataManagement.vue'),
-    meta: { title: '数据维护' }
+    path: '/task-management',
+    name: 'TaskManagement',
+    component: () => import('../views/TaskManagement.vue'),
+    meta: { title: '任务管理' }
   },
   {
     path: '/watchlist',
@@ -82,6 +82,12 @@ const routes = [
     name: 'ChangePassword',
     component: () => import('../views/ChangePassword.vue'),
     meta: { title: '修改密码' }
+  },
+  {
+    path: '/notification-settings',
+    name: 'NotificationSettings',
+    component: () => import('../views/NotificationSettings.vue'),
+    meta: { title: '通知配置' }
   }
 ]
 
@@ -100,10 +106,10 @@ router.beforeEach((to, from) => {
   const requiresAuth = to.meta.requiresAuth !== false
 
   if (requiresAuth && !token) {
-    return '/login'
+    return { path: '/login', replace: true }  // 使用绝对路径确保正确跳转
   }
   if (to.path === '/login' && token) {
-    return '/dashboard'
+    return { path: '/dashboard', replace: true }
   }
 })
 

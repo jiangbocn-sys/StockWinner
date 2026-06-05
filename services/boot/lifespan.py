@@ -182,6 +182,18 @@ def create_lifespan():
         except Exception as e:
             log.error("sdk_subprocess", f"停止 SDK 子进程失败: {e}")
 
+        # 终止所有回测子进程
+        try:
+            from services.backtest.subprocess_worker import get_backtest_process_manager
+            bt_mgr = get_backtest_process_manager()
+            active_count = bt_mgr.get_active_count()
+            if active_count > 0:
+                log.log_event("backtest_shutdown", f"终止 {active_count} 个活跃回测子进程")
+                bt_mgr.terminate_all()
+                log.log_event("backtest_stopped", "回测子进程已全部终止")
+        except Exception as e:
+            log.error("backtest_shutdown", f"终止回测子进程失败: {e}")
+
         try:
             from services.common.sdk_manager import get_sdk_manager
             get_sdk_manager().disconnect()
@@ -500,6 +512,8 @@ async def _run_migrations(db_manager, log, migration_version: int):
             {"task_type": "builtin", "module": "monthly_factors", "account_id": "SYSTEM", "cron_expression": "0 1 5 * *", "enabled": 1},
             {"task_type": "builtin", "module": "weekly_kline", "account_id": "SYSTEM", "cron_expression": "0 2 * * 6", "enabled": 1},
             {"task_type": "builtin", "module": "industry_download", "account_id": "SYSTEM", "cron_expression": "0 3 * * mon-fri", "enabled": 0},
+            {"task_type": "builtin", "module": "adj_factor", "account_id": "SYSTEM", "cron_expression": "15 9 * * mon-fri", "enabled": 0},
+            {"task_type": "builtin", "module": "daily_factor_calc", "account_id": "SYSTEM", "cron_expression": "", "enabled": 0},
         ]
         for t in builtin_defaults:
             existing = await db_manager.fetchone(
@@ -760,6 +774,51 @@ async def _run_migrations(db_manager, log, migration_version: int):
         kline_conn.close()
     except Exception as e:
         log.error("db_migration_v16", f"复权因子表创建失败: {e}")
+
+    # v17: 通知系统规则化改造
+    await run_migration(17, "通知系统规则化改造", [
+        """CREATE TABLE IF NOT EXISTS notification_rules (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            account_id TEXT NOT NULL,
+            rule_name TEXT DEFAULT '默认规则',
+            event_types TEXT DEFAULT '[]',
+            event_categories TEXT DEFAULT '[]',
+            notify_on_trade INTEGER DEFAULT 1,
+            notify_on_signal INTEGER DEFAULT 1,
+            notify_on_task INTEGER DEFAULT 1,
+            notify_on_system INTEGER DEFAULT 1,
+            notify_on_risk INTEGER DEFAULT 1,
+            time_range_start TEXT DEFAULT NULL,
+            time_range_end TEXT DEFAULT NULL,
+            trading_hours_only INTEGER DEFAULT 0,
+            signal_action_filter TEXT DEFAULT NULL,
+            min_amount_threshold REAL DEFAULT 0,
+            channels TEXT DEFAULT '[]',
+            priority INTEGER DEFAULT 1,
+            enabled INTEGER DEFAULT 1,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )""",
+        """CREATE TABLE IF NOT EXISTS notification_channels (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            account_id TEXT NOT NULL,
+            channel_type TEXT DEFAULT 'feishu',
+            webhook_url TEXT NOT NULL,
+            extra_config TEXT DEFAULT '{}',
+            priority INTEGER DEFAULT 1,
+            enabled INTEGER DEFAULT 1,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_notification_rules_account ON notification_rules(account_id)",
+        "CREATE INDEX IF NOT EXISTS idx_notification_rules_enabled ON notification_rules(enabled)",
+        "CREATE INDEX IF NOT EXISTS idx_notification_channels_account ON notification_channels(account_id)",
+        # 扩展 notification_history 表
+        """ALTER TABLE notification_history ADD COLUMN channels TEXT DEFAULT '[]'""",
+        """ALTER TABLE notification_history ADD COLUMN context TEXT DEFAULT '{}'""",
+        """ALTER TABLE notification_history ADD COLUMN payload TEXT DEFAULT '{}'""",
+        """ALTER TABLE notification_history ADD COLUMN rule_id INTEGER DEFAULT NULL""",
+    ])
 
     # v7 数据源配置 seed
     try:

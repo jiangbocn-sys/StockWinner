@@ -64,6 +64,8 @@ ALLOWED_MODULES = {
     "time", "calendar", "decimal", "copy", "string",
     # 策略 62 尾盘筛选需要
     "sys", "os",
+    # 策略调试日志需要
+    "logging",
 }
 
 # 黑名单：禁止使用的函数
@@ -143,6 +145,11 @@ class StrategyEngine:
         # 调用入口函数
         try:
             result = func(context)
+        except KeyError as e:
+            # KeyError 通常是 DataFrame 列名错误，提供更详细的提示
+            key_name = str(e).strip("'\"")
+            suggestion = self._suggest_column_fix(key_name, code)
+            raise RuntimeError(f"策略执行错误: KeyError '{key_name}'\n{suggestion}") from e
         except Exception as e:
             raise RuntimeError(f"策略执行错误: {e}") from e
 
@@ -162,6 +169,36 @@ class StrategyEngine:
                 signals.append(signal)
 
         return signals
+
+    def _suggest_column_fix(self, key_name: str, code: str) -> str:
+        """为 KeyError 提供修复建议"""
+        # K线数据正确列名
+        kline_columns = {
+            'date': 'trade_date',
+            'datetime': 'trade_date',
+            'time': 'trade_date',
+            'timestamp': 'trade_date',
+            'Date': 'trade_date',
+        }
+
+        suggestions = []
+
+        # 检查是否是常见错误列名
+        if key_name in kline_columns:
+            correct_col = kline_columns[key_name]
+            suggestions.append(f"检测到可能的列名错误：'{key_name}' → 应为 '{correct_col}'")
+            suggestions.append(f"K线 DataFrame 列名: trade_date, open, high, low, close, volume, amount")
+
+        # 检查代码中的 groupby 使用
+        if f"groupby('{key_name}')" in code or f'groupby("{key_name}")' in code:
+            correct_col = kline_columns.get(key_name, 'trade_date')
+            suggestions.append(f"发现 groupby('{key_name}')，应改为 groupby('{correct_col}')")
+
+        if not suggestions:
+            suggestions.append(f"请检查 DataFrame 是否包含 '{key_name}' 列")
+            suggestions.append(f"K线数据列名: trade_date, open, high, low, close, volume, amount")
+
+        return "\n".join(suggestions)
 
     def validate_code(self, code: str) -> Dict:
         """
@@ -291,6 +328,40 @@ class StrategyEngine:
                     if base in old_kronos_patterns:
                         errors.append(f"第 {node.lineno} 行: 禁止直接导入模型模块 '{alias.name}'，请使用沙盒注入的 kronos_predict()")
 
+        # 6. DataFrame 列名检查（检测常见错误）
+        wrong_columns = ['date', 'datetime', 'time', 'timestamp', 'Date', 'DateTime']
+        correct_column = 'trade_date'
+        for wrong_col in wrong_columns:
+            # 检查 groupby('date') 模式
+            if f"groupby('{wrong_col}')" in code or f'groupby("{wrong_col}")' in code:
+                warnings.append(f"⚠️ 检测到 groupby('{wrong_col}')，K线数据日期列应为 '{correct_column}'，建议改为 groupby('{correct_column}')")
+            # 检查 df['date'] 模式
+            import re
+            pattern = rf"(?:df|rows|data|klines?_df|daily|kline)\[['\"]({wrong_col})['\"]]"
+            matches = re.findall(pattern, code)
+            if matches:
+                warnings.append(f"⚠️ 检测到访问 '{wrong_col}' 列，K线数据日期列应为 '{correct_column}'，建议改为 ['{correct_column}']")
+
+        # 7. 进度反馈检查（建议添加进度更新调用）
+        # 检测是否有股票遍历循环
+        has_stock_loop = False
+        for node in ast.walk(tree):
+            if isinstance(node, ast.For):
+                # 检查循环目标是否涉及 stocks
+                if isinstance(node.iter, ast.Name) and node.iter.id == 'stocks':
+                    has_stock_loop = True
+                elif isinstance(node.iter, ast.Name) and node.iter.id == 'stock_codes':
+                    has_stock_loop = True
+                elif isinstance(node.iter, ast.Attribute) and node.iter.attr == 'stocks':
+                    has_stock_loop = True
+
+        # 检测是否已有进度更新调用
+        has_progress = 'update_progress' in code
+
+        if has_stock_loop and not has_progress:
+            warnings.append("💡 建议添加进度反馈：在股票遍历循环中调用 context['update_progress'](percent, message, stock_code)")
+            info.append("进度模板: if processed % 100 == 0 and 'update_progress' in context: context['update_progress'](processed/total*100, f'已处理 {processed}/{total}', stock_code)")
+
         return {"valid": True, "error": None, "warnings": warnings, "info": info}
 
     def _build_env(self, context: Dict) -> Dict:
@@ -307,6 +378,8 @@ class StrategyEngine:
         env["get_db_manager"] = get_db_manager
 
         # 注入同步数据库访问函数（只读，替代直接 import sqlite3）
+        # 注意：公共函数定义在 services.common.database.query_db / query_kline_db
+        # 这里在 _build_env 内部重新定义是为了保证沙盒环境隔离
         def _query_db(sql: str, params: tuple = None):
             """同步执行 SQL 查询。返回 List[Dict]（SELECT）或 int（影响行数）。
             使用 get_sync_connection 确保 WAL mode + busy_timeout 配置一致。"""
@@ -599,11 +672,11 @@ class StrategyEngine:
                     strategy_id=strategy_id, trigger_price=new_price,
                     reason=signal.get("reason", "策略信号"))
 
-                # 发送信号触发通知
+                # 发送信号触发通知（使用新 NotificationManager，signal_action 判断在规则引擎）
                 try:
-                    from services.notifications import get_notification_service
-                    notification = get_notification_service()
-                    # 查询源分组名称（股票池来源）
+                    from services.notifications import get_notification_manager
+                    manager = get_notification_manager()
+                    # 查询源分组名称（业务逻辑保持在调用方）
                     source_group_name = "-"
                     if source_group_id:
                         source_row = await db.fetchone(
@@ -611,31 +684,30 @@ class StrategyEngine:
                         )
                         if source_row:
                             source_group_name = source_row["name"]
-                    await notification.emit(
+                    await manager.trigger(
                         event_type="signal_triggered",
                         account_id=account_id,
                         payload={
                             "stock_code": code,
                             "stock_name": signal.get("stock_name", code),
-                            "price": f"{new_price:.2f}" if new_price else "-",
-                            "trigger_price": f"{new_price:.2f}" if new_price else "-",
-                            "stop_loss_price": f"{new_sl:.2f}" if new_sl else "-",
-                            "take_profit_price": f"{new_tp:.2f}" if new_tp else "-",
+                            "trigger_price": new_price,
+                            "stop_loss_price": new_sl,
+                            "take_profit_price": new_tp,
                             "reason": signal.get("reason", "策略信号"),
                             "strategy_name": strategy_name or "策略信号",
                             "group_name": source_group_name,
-                            "condition": f"新增信号 | 建议买入价 {new_price:.2f}" if new_price else "新增信号",
                         },
+                        context={"signal_action": signal_action},
                     )
                 except Exception as e:
                     print(f"[StrategyEngine] 发送信号通知失败: {e}")
 
-            # 已有信号但价格更优 → 也发送通知（价格更新）
+            # 已有信号但价格更优 → 也发送通知（使用新 NotificationManager）
             if code in existing and should_update:
                 try:
-                    from services.notifications import get_notification_service
-                    notification = get_notification_service()
-                    # 查询源分组名称（股票池来源）
+                    from services.notifications import get_notification_manager
+                    manager = get_notification_manager()
+                    # 查询源分组名称
                     source_group_name = "-"
                     if source_group_id:
                         source_row = await db.fetchone(
@@ -643,21 +715,20 @@ class StrategyEngine:
                         )
                         if source_row:
                             source_group_name = source_row["name"]
-                    await notification.emit(
+                    await manager.trigger(
                         event_type="signal_triggered",
                         account_id=account_id,
                         payload={
                             "stock_code": code,
                             "stock_name": signal.get("stock_name", code),
-                            "price": f"{new_price:.2f}" if new_price else "-",
-                            "trigger_price": f"{new_price:.2f}" if new_price else "-",
-                            "stop_loss_price": f"{new_sl:.2f}" if new_sl else "-",
-                            "take_profit_price": f"{new_tp:.2f}" if new_tp else "-",
+                            "trigger_price": new_price,
+                            "stop_loss_price": new_sl,
+                            "take_profit_price": new_tp,
                             "reason": signal.get("reason", "价格更优"),
                             "strategy_name": strategy_name or "策略信号",
                             "group_name": source_group_name,
-                            "condition": f"价格更优 | 新买入价 {new_price:.2f}" if new_price else "价格更优",
                         },
+                        context={"signal_action": signal_action, "is_update": True},
                     )
                 except Exception as e:
                     print(f"[StrategyEngine] 发送价格更新通知失败: {e}")
