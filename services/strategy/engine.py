@@ -66,6 +66,8 @@ ALLOWED_MODULES = {
     "sys", "os",
     # 策略调试日志需要
     "logging",
+    # datetime.strptime 内部依赖
+    "_strptime",
 }
 
 # 黑名单：禁止使用的函数
@@ -745,6 +747,130 @@ class StrategyEngine:
                     print(f"[StrategyEngine] 发送价格更新通知失败: {e}")
 
         return {"added": added, "updated": updated, "skipped": skipped, "total": len(signals)}
+
+
+# ── Context 构建器 ──
+
+def build_strategy_context(
+    stocks: List[Dict],
+    account_id: str,
+    *,
+    include_realtime: bool = False,
+    include_async_gateway: bool = False,
+    progress_callback=None,
+    **extra,
+) -> Dict:
+    """构建策略执行 context，消除 test-run / scheduler / screening 的重复代码。
+
+    Args:
+        stocks: 股票列表 [{"stock_code": ..., "stock_name": ...}, ...]
+        account_id: 账户 ID
+        include_realtime: 注入实时行情函数 (get_kline_smart / get_kline_spliced / get_realtime_quote)
+        include_async_gateway: 注入异步 gateway 函数 (get_kline / get_market_data)
+        progress_callback: 可选进度回调 fn(percent, message, current_stock)
+        **extra: 其他键值对合并到 context（如 strategy, group_id, code_scope）
+
+    Returns:
+        context dict，调用方可以在此基础上覆盖/追加特定键
+    """
+    from services.common import technical_indicators
+    from services.common.timezone import get_china_time
+    from services.common.database import query_kline_db, query_db
+    from services.data.local_data_service import get_local_data_service
+
+    lds = get_local_data_service()
+
+    # ── 本地数据函数（同步）──
+
+    def _get_kline_local(stock_code: str, limit: int = 100, start_date: str = None):
+        return lds.get_kline_data(stock_code, start_date=start_date, limit=limit)
+
+    def _get_batch_kline(codes: list, limit: int = 100):
+        return lds.get_batch_kline(codes, limit=limit)
+
+    def _get_factors(stock_code: str, date: str = None):
+        target_date = date or get_china_time().strftime("%Y-%m-%d")
+        return lds.get_daily_factors(stock_code, target_date)
+
+    def _get_factors_batch(codes: list, date: str = None):
+        target_date = date or get_china_time().strftime("%Y-%m-%d")
+        return lds.get_daily_factors_batch(codes, target_date)
+
+    context: Dict = {
+        "stocks": [dict(s) for s in stocks],
+        "account_id": account_id,
+        "today": get_china_time().strftime("%Y-%m-%d"),
+        "indicators": {
+            "calculate_ma": technical_indicators.calculate_ma,
+            "calculate_rsi": technical_indicators.calculate_rsi,
+            "calculate_macd": technical_indicators.calculate_macd,
+            "calculate_kdj": technical_indicators.calculate_kdj,
+            "calculate_bollinger_bands": technical_indicators.calculate_bollinger_bands,
+            "calculate_adx": technical_indicators.calculate_adx,
+            "calculate_atr": technical_indicators.calculate_atr,
+            "calculate_ema": technical_indicators.calculate_ema,
+            "calculate_obv": technical_indicators.calculate_obv,
+            "calculate_historical_volatility": technical_indicators.calculate_historical_volatility,
+        },
+        "get_kline_local": _get_kline_local,
+        "get_batch_kline": _get_batch_kline,
+        "get_factors": _get_factors,
+        "get_factors_batch": _get_factors_batch,
+        "query_kline_db": query_kline_db,
+        "query_db": query_db,
+    }
+
+    # ── 实时行情函数（同步，盘中将本地历史 + 实时 OHLCV 拼接）──
+    if include_realtime:
+        def _get_kline_smart(codes: list, lookback: int = 100):
+            return lds.get_kline_with_realtime(codes, lookback=lookback)
+
+        def _get_kline_spliced(codes: list, lookback: int = 100):
+            return lds.get_kline_spliced(codes, lookback=lookback)
+
+        context["get_kline_smart"] = _get_kline_smart
+        context["get_kline_spliced"] = _get_kline_spliced
+
+        # get_realtime_quote — 同步版本（从 lds 取，调用方可覆盖为预取版本）
+        def _get_realtime_quote(stock_code: str):
+            from services.common.price_cache import get_price_cache
+            cache = get_price_cache()
+            ohlcv = cache.get_ohlcv(stock_code)
+            if ohlcv and ohlcv.get("close", 0) > 0:
+                return ohlcv
+            return None
+
+        context["get_realtime_quote"] = _get_realtime_quote
+
+    # ── 异步 gateway 函数 ──
+    if include_async_gateway:
+        async def _get_kline(stock_code: str, period: str = "day", start_date: str = None):
+            from services.trading.gateway import get_gateway
+            gateway = await get_gateway()
+            return await gateway.get_kline_data(stock_code, period=period, start_date=start_date)
+
+        async def _get_market_data(stock_code: str):
+            from services.trading.gateway import get_gateway
+            gateway = await get_gateway()
+            return await gateway.get_market_data(stock_code)
+
+        async def _get_realtime_quote_async(stock_code: str):
+            from services.trading.gateway import get_gateway
+            gateway = await get_gateway()
+            return await gateway.get_market_data(stock_code)
+
+        context["get_kline"] = _get_kline
+        context["get_market_data"] = _get_market_data
+        context["get_realtime_quote"] = _get_realtime_quote_async  # 覆盖同步版本
+
+    # ── 进度回调 ──
+    if progress_callback:
+        context["update_progress"] = progress_callback
+
+    # ── 额外字段 ──
+    context.update(extra)
+
+    return context
 
 
 # 全局单例

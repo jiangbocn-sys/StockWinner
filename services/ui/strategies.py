@@ -288,13 +288,13 @@ async def delete_strategy(
 
     # 1. 检查是否有运行中的策略任务
     running_task = await db.fetchone(
-        "SELECT id, name FROM strategy_tasks WHERE strategy_id = ? AND last_status = 'running'",
+        "SELECT id FROM strategy_tasks WHERE strategy_id = ? AND last_status = 'running'",
         (strategy_id,)
     )
     if running_task:
         raise HTTPException(
             status_code=400,
-            detail=f"策略「{strategy['name']}」有运行中的任务「{running_task['name']}」，请先停止任务再删除策略"
+            detail=f"策略「{strategy['name']}」有运行中的任务（ID={running_task['id']}），请先停止任务再删除策略"
         )
 
     # 2. 检查是否有策略持仓（quantity > 0）
@@ -822,8 +822,6 @@ async def test_run_strategy(
     await validate_account_active(account_id)
 
     from services.strategy.engine import get_strategy_engine
-    from services.common import technical_indicators
-    from services.data.local_data_service import get_local_data_service, is_trading_hours
     import io
     import time
 
@@ -864,75 +862,13 @@ async def test_run_strategy(
     stock_codes = [s["stock_code"] for s in stocks]
 
     # 3. 构建数据获取函数
-    lds = get_local_data_service()
+    from services.strategy.engine import build_strategy_context
 
-    def _get_kline_local(stock_code: str, limit: int = 100, start_date: str = None):
-        return lds.get_kline_data(stock_code, start_date=start_date, limit=limit)
-
-    def _get_batch_kline(codes: list, limit: int = 100):
-        return lds.get_batch_kline(codes, limit=limit)
-
-    def _get_factors(sc: str, date: str = None):
-        target_date = date or get_china_time().strftime("%Y-%m-%d")
-        return lds.get_daily_factors(sc, target_date)
-
-    def _get_factors_batch(codes: list, date: str = None):
-        target_date = date or get_china_time().strftime("%Y-%m-%d")
-        return lds.get_daily_factors_batch(codes, target_date)
-
-    def _get_kline_spliced(codes: list, lookback: int = 100):
-        return lds.get_kline_spliced(codes, lookback=lookback)
-
-    def _get_kline_smart(codes: list, lookback: int = 100):
-        return lds.get_kline_with_realtime(codes, lookback=lookback)
-
-    async def _get_realtime_quote(stock_code: str):
-        from services.trading.gateway import get_gateway
-        gateway = await get_gateway()
-        return await gateway.get_market_data(stock_code)
-
-    async def _get_kline_async(stock_code: str, period: str = "day", start_date: str = None):
-        from services.trading.gateway import get_gateway
-        gateway = await get_gateway()
-        return await gateway.get_kline_data(stock_code, period=period, start_date=start_date)
-
-    async def _get_market_data_async(stock_code: str):
-        from services.trading.gateway import get_gateway
-        gateway = await get_gateway()
-        return await gateway.get_market_data(stock_code)
-
-    # 导入公共数据库查询函数（用于 context 传递）
-    from services.common.database import query_kline_db as _query_kline_db
-    from services.common.database import query_db as _query_db
-
-    context = {
-        "stocks": stocks,
-        "account_id": account_id,
-        "today": get_china_time().strftime("%Y-%m-%d"),
-        "indicators": {
-            "calculate_ma": technical_indicators.calculate_ma,
-            "calculate_rsi": technical_indicators.calculate_rsi,
-            "calculate_macd": technical_indicators.calculate_macd,
-            "calculate_kdj": technical_indicators.calculate_kdj,
-            "calculate_bollinger_bands": technical_indicators.calculate_bollinger_bands,
-            "calculate_adx": technical_indicators.calculate_adx,
-            "calculate_atr": technical_indicators.calculate_atr,
-            "calculate_ema": technical_indicators.calculate_ema,
-            "calculate_obv": technical_indicators.calculate_obv,
-            "calculate_historical_volatility": technical_indicators.calculate_historical_volatility,
-        },
-        "get_kline": _get_kline_async,
-        "get_market_data": _get_market_data_async,
-        "get_kline_local": _get_kline_local,
-        "get_batch_kline": _get_batch_kline,
-        "get_factors": _get_factors,
-        "get_factors_batch": _get_factors_batch,
-        "get_kline_spliced": _get_kline_spliced,
-        "get_kline_smart": _get_kline_smart,
-        "get_realtime_quote": _get_realtime_quote,
-        "query_kline_db": _query_kline_db,
-        "query_db": _query_db,
-    }
+    context = build_strategy_context(
+        stocks, account_id,
+        include_realtime=True,
+        include_async_gateway=True,
+    )
 
     # 4. 捕获 print 输出并执行
     old_stdout = __import__("sys").stdout

@@ -137,21 +137,13 @@ class SignalEvaluator:
             batch_data = market_data_cache
         else:
             from services.common.price_cache import get_price_cache
-            from services.trading.gateway import MarketData
+            from services.trading.models import MarketData
             cache = get_price_cache()
             batch_ohlcv = cache.get_all_for_codes(set(stock_codes))
             if batch_ohlcv:
                 batch_data = {}
                 for code, ohlcv in batch_ohlcv.items():
-                    batch_data[code] = MarketData(
-                        stock_code=code, stock_name="",
-                        current_price=ohlcv.get('close', 0),
-                        change_percent=ohlcv.get('change_pct', 0),
-                        high=ohlcv.get('high', 0), low=ohlcv.get('low', 0),
-                        open_price=ohlcv.get('open', 0), prev_close=ohlcv.get('close', 0),
-                        volume=int(ohlcv.get('volume', 0)), amount=ohlcv.get('amount', 0),
-                        source=ohlcv.get('source', ''),
-                    )
+                    batch_data[code] = MarketData.from_ohlcv(ohlcv, code, stock_name="")
             else:
                 get_logger("monitor").warn("monitor", f"_monitor_watchlist 无缓存数据，跳过账户 {account_id}")
                 return
@@ -260,22 +252,14 @@ class SignalEvaluator:
             batch_data = market_data_cache
         else:
             from services.common.price_cache import get_price_cache
-            from services.trading.gateway import MarketData
+            from services.trading.models import MarketData
             cache = get_price_cache()
             codes = [p["stock_code"] for p in unmonitored_positions]
             batch_ohlcv = cache.get_all_for_codes(set(codes))
             if batch_ohlcv:
                 batch_data = {}
                 for code, ohlcv in batch_ohlcv.items():
-                    batch_data[code] = MarketData(
-                        stock_code=code, stock_name="",
-                        current_price=ohlcv.get('close', 0),
-                        change_percent=ohlcv.get('change_pct', 0),
-                        high=ohlcv.get('high', 0), low=ohlcv.get('low', 0),
-                        open_price=ohlcv.get('open', 0), prev_close=ohlcv.get('close', 0),
-                        volume=int(ohlcv.get('volume', 0)), amount=ohlcv.get('amount', 0),
-                        source=ohlcv.get('source', ''),
-                    )
+                    batch_data[code] = MarketData.from_ohlcv(ohlcv, code, stock_name="")
             else:
                 return
 

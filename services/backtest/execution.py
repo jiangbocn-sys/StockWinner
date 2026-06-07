@@ -187,24 +187,35 @@ class BacktestExecutionEngine:
             Trade 记录，或 None（如果无法卖出）
         """
         if stock_code not in self.positions:
+            with open("/tmp/backtest_debug.log", "a") as f:
+                f.write(f"[SELL_DEBUG] code={stock_code}, date={date}, FAIL: not in positions\n")
             return None
 
         pos = self.positions[stock_code]
         if pos.quantity <= 0:
+            with open("/tmp/backtest_debug.log", "a") as f:
+                f.write(f"[SELL_DEBUG] code={stock_code}, date={date}, FAIL: quantity={pos.quantity}\n")
             return None
 
         # T+1 检查
         if pos.buy_date == date:
+            with open("/tmp/backtest_debug.log", "a") as f:
+                f.write(f"[SELL_DEBUG] code={stock_code}, date={date}, FAIL: T+1 buy_date={pos.buy_date}\n")
             return None  # 今日买入不可卖
 
         if price <= 0:
+            with open("/tmp/backtest_debug.log", "a") as f:
+                f.write(f"[SELL_DEBUG] code={stock_code}, date={date}, FAIL: price={price}\n")
             return None
 
         # 涨跌停检查
         if prev_close > 0:
             limit_down = prev_close * 0.90
-            if price <= limit_down:
-                return None  # 跌停无法卖出
+            if price < limit_down:
+                with open("/tmp/backtest_debug.log", "a") as f:
+                    f.write(f"[SELL_DEBUG] code={stock_code}, date={date}, FAIL: limit_down prev_close={prev_close} limit={limit_down:.2f} price={price}\n")
+                return None  # 穿透跌停无法卖出
+            # 价格等于跌停价时，按跌停价成交（允许卖出）
 
         # 滑点
         fill_price = price * (1 - self.slippage_pct)
@@ -292,8 +303,9 @@ class BacktestExecutionEngine:
         # 涨跌停检查
         if prev_close > 0:
             limit_down = prev_close * 0.90
-            if price <= limit_down:
-                return None  # 跌停无法卖出
+            if price < limit_down:
+                return None  # 穿透跌停无法卖出
+            # 价格等于跌停价时，按跌停价成交
 
         # 数量检查：必须是 100 的整数倍
         if sell_quantity >= pos.quantity:

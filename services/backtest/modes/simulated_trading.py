@@ -297,23 +297,20 @@ class SimulatedTradingEngine:
             ohlc = ohlc_data.get(code, {})
             prev_close = self._get_prev_close(code, trade_date)
 
-            print(f"[CHECK_SELL_SIGNALS] code={code}, buy_date={pos.buy_date}, price={price:.2f}, cost={pos.avg_cost:.2f}")
-
-            # Priority 1: 交易策略卖出信号（用户策略优先）
+            # Priority 1: 交易策略卖出（用户策略优先）
             if self._check_trading_strategy_sell(code, price, pos, trade_date, prev_close, ohlc):
-                print(f"[CHECK_SELL_SIGNALS] 交易策略卖出触发: {code}")
                 continue
 
-            # Priority 2: 固定止盈止损（风控兜底）
+            # Priority 2: 选股策略卖出信号
+            if self._check_strategy_sell(code, price, pos, trade_date, prev_close):
+                continue
+
+            # Priority 3: 固定止盈止损（风控兜底）
             if self._check_fixed_stop(code, price, pos, trade_date, prev_close, ohlc):
                 continue
 
-            # Priority 3: 移动止盈（风控兜底）
+            # Priority 4: 移动止盈（风控兜底）
             if self._check_trailing_stop(code, price, pos, trade_date, prev_close, ohlc):
-                continue
-
-            # Priority 4: 选股策略卖出信号
-            if self._check_strategy_sell(code, price, pos, trade_date, prev_close):
                 continue
 
     @staticmethod
@@ -456,9 +453,21 @@ class SimulatedTradingEngine:
         if not strategy["code"]:
             return False
 
-        # 只传入当前持仓股票的价格
-        prices = {code: price}
-        context = self._build_backtest_context(date, prices, "sell")
+        # 构建带持仓信息的 stocks 列表（与实盘 SignalEvaluator 保持一致）
+        prices_with_pos = {code: price}
+        context = self._build_backtest_context(date, prices_with_pos, "sell")
+        # 用持仓数据覆盖 stocks[0]，注入 buy_price/buy_date/quantity/buy_pattern/eval_price
+        context["stocks"] = [{
+            "stock_code": code,
+            "stock_name": self._stock_name_map.get(code, code),
+            "buy_price": pos.avg_cost,
+            "buy_date": pos.buy_date,
+            "quantity": pos.quantity,
+            "score": getattr(pos, 'score', 60),
+            "reduced_pct": getattr(pos, 'reduced_pct', 0) or 0,
+            "buy_pattern": getattr(pos, 'buy_pattern', None) or getattr(pos, 'details', None),
+            "eval_price": price,
+        }]
 
         try:
             signals = self.strategy_engine.execute_strategy(strategy, context)
@@ -1283,7 +1292,18 @@ class SimulatedTradingEngine:
                             f.write(f"[TRADING_STRATEGY_SELL_TRIGGERED] code={code}, action={action}, reason={reason}\n")
                         logger.log_event("trading_strategy_sell_triggered", f"code={code}, action={action}, reason={reason}")
                         if action == "sell":
-                            self.execution.sell(code, price, date, reason=reason, prev_close=prev_close)
+                            pos_before = code in self.execution.positions
+                            pos_count_before = len(self.execution.positions)
+                            result = self.execution.sell(code, price, date, reason=reason, prev_close=prev_close)
+                            pos_after = code in self.execution.positions
+                            debug_file = "/tmp/backtest_debug.log"
+                            with open(debug_file, "a") as f:
+                                f.write(f"[SELL_EXEC] code={code}, date={date}, price={price:.2f}, result={'OK' if result else 'FAIL'}, pos_before={pos_before}, pos_after={pos_after}, count={pos_count_before}->{len(self.execution.positions)}\n")
+                            if result is None:
+                                f2 = open(debug_file, "a")
+                                f2.write(f"[SELL_FAILED] code={code}, date={date}, price={price}, reason=execution.sell returned None\n")
+                                f2.close()
+                                return False
                             return True
                         elif action in ("reduce_half", "reduce_30"):
                             # 减仓处理
@@ -1323,7 +1343,7 @@ class SimulatedTradingEngine:
 
         # 沙箱执行（与选股策略类似）
         # 创建受限的 __import__，只允许导入安全模块
-        ALLOWED_MODULES = {"typing", "datetime", "collections", "math", "re", "time"}
+        ALLOWED_MODULES = {"typing", "datetime", "collections", "math", "re", "time", "_strptime"}
         def safe_import(name, *args, **kwargs):
             if name in ALLOWED_MODULES:
                 return __import__(name, *args, **kwargs)

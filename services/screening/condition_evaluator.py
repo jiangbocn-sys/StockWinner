@@ -434,7 +434,6 @@ class ConditionEvaluator:
     ):
         """执行代码型策略"""
         from services.strategy.engine import get_strategy_engine
-        from services.common import technical_indicators
 
         db = get_db_manager()
 
@@ -460,70 +459,13 @@ class ConditionEvaluator:
             print(f"[Screening] 股票列表为空 ({stock_scope})，跳过策略执行")
             return
 
-        # 构建数据获取函数
-        def _get_factors(stock_code: str, date: str = None):
-            return get_local_data_service().get_daily_factors(stock_code, date or get_china_time().strftime("%Y-%m-%d"))
+        from services.strategy.engine import build_strategy_context
 
-        def _get_factors_batch(codes: list, date: str = None):
-            return get_local_data_service().get_daily_factors_batch(codes, date or get_china_time().strftime("%Y-%m-%d"))
-
-        def _get_kline_local(stock_code: str, limit: int = 100, start_date: str = None):
-            return get_local_data_service().get_kline_data(stock_code, start_date=start_date, limit=limit)
-
-        def _get_batch_kline(codes: list, limit: int = 100):
-            return get_local_data_service().get_batch_kline(codes, limit=limit)
-
-        def _get_kline_smart(codes: list, lookback: int = 100):
-            # get_kline_with_realtime 是智能K线方法（盘中实时拼接，盘后纯本地）
-            return get_local_data_service().get_kline_with_realtime(codes, lookback=lookback)
-
-        def _query_kline_db(sql: str, params: tuple = None):
-            conn = get_sync_connection("kline")
-            cursor = conn.cursor()
-            if params:
-                cursor.execute(sql, params)
-            else:
-                cursor.execute(sql)
-            if sql.strip().upper().startswith("SELECT"):
-                return [dict(r) for r in cursor.fetchall()]
-            return cursor.rowcount
-
-        def _query_db(sql: str, params: tuple = None):
-            conn = get_sync_connection()
-            cursor = conn.cursor()
-            if params:
-                cursor.execute(sql, params)
-            else:
-                cursor.execute(sql)
-            if sql.strip().upper().startswith("SELECT"):
-                return [dict(r) for r in cursor.fetchall()]
-            else:
-                conn.commit()
-                return cursor.rowcount
-
-        context = {
-            "stocks": [dict(s) for s in stocks],
-            "account_id": account_id,
-            "today": get_china_time().strftime("%Y-%m-%d"),
-            "strategy": strategy,
-            "indicators": {
-                "calculate_ma": technical_indicators.calculate_ma,
-                "calculate_rsi": technical_indicators.calculate_rsi,
-                "calculate_macd": technical_indicators.calculate_macd,
-                "calculate_kdj": technical_indicators.calculate_kdj,
-                "calculate_bollinger_bands": technical_indicators.calculate_bollinger_bands,
-                "calculate_adx": technical_indicators.calculate_adx,
-                "calculate_atr": technical_indicators.calculate_atr,
-                "calculate_ema": technical_indicators.calculate_ema,
-            },
-            "get_factors": _get_factors,
-            "get_factors_batch": _get_factors_batch,
-            "get_kline_local": _get_kline_local,
-            "get_batch_kline": _get_batch_kline,
-            "get_kline_smart": _get_kline_smart,
-            "query_kline_db": _query_kline_db,
-            "query_db": _query_db,
-        }
+        context = build_strategy_context(
+            stocks, account_id,
+            include_realtime=True,
+            strategy=strategy,
+        )
 
         engine = get_strategy_engine()
         signals = engine.execute_strategy(strategy, context)

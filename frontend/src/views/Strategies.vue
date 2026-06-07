@@ -1945,10 +1945,10 @@ const saveCodeStrategy = async () => {
       code: codeStrategyForm.code,
       function_name: codeStrategyForm.function_name,
       status: 'draft',
-      config: JSON.stringify({
+      config: {
         ...codeStrategyForm.config,
         signal_allocation: codeStrategyForm.signalAllocation,
-      }),
+      },
     }
     const res = await fetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
     const data = await res.json()

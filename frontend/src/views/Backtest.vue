@@ -20,31 +20,43 @@
               </el-form-item>
             </el-col>
             <el-col :span="8">
-              <el-form-item label="回测模式">
-                <el-tooltip content="撮合模拟盘：逐日推进，模拟真实交易（考虑仓位、现金、T+1）。收益率累积：快速信号配对，不考虑资金限制" placement="top">
-                  <el-select v-model="form.mode" style="width: 100%">
-                    <el-option label="撮合模拟盘" value="simulated" />
-                    <el-option label="收益率累积" value="return_accumulation" />
-                  </el-select>
-                </el-tooltip>
+              <el-form-item>
+                <template #label>
+                  回测模式
+                  <el-tooltip content="撮合模拟盘：逐日推进，模拟真实交易（考虑仓位、现金、T+1）。收益率累积：快速信号配对，不考虑资金限制" placement="top">
+                    <span class="hint-icon">ⓘ</span>
+                  </el-tooltip>
+                </template>
+                <el-select v-model="form.mode" style="width: 100%">
+                  <el-option label="撮合模拟盘" value="simulated" />
+                  <el-option label="收益率累积" value="return_accumulation" />
+                </el-select>
               </el-form-item>
             </el-col>
             <el-col :span="8">
-              <el-form-item label="选股策略">
-                <el-tooltip content="可选。选择后使用该策略的买入条件和止盈止损参数；不选则使用下方手动配置" placement="top">
-                  <el-select v-model="form.strategy_id" placeholder="可选" clearable style="width: 100%">
-                    <el-option v-for="s in strategies" :key="s.id" :label="s.name" :value="s.id" />
-                  </el-select>
-                </el-tooltip>
+              <el-form-item>
+                <template #label>
+                  选股策略
+                  <el-tooltip content="可选。选择后使用该策略的买入条件和止盈止损参数；不选则使用下方手动配置" placement="top">
+                    <span class="hint-icon">ⓘ</span>
+                  </el-tooltip>
+                </template>
+                <el-select v-model="form.strategy_id" placeholder="可选" clearable style="width: 100%">
+                  <el-option v-for="s in strategies" :key="s.id" :label="s.name" :value="s.id" />
+                </el-select>
               </el-form-item>
             </el-col>
             <el-col :span="8">
-              <el-form-item label="交易策略">
-                <el-tooltip content="可选。卖出信号策略，用于判断持仓何时卖出。支持多选，按顺序执行" placement="top">
-                  <el-select v-model="form.trading_strategy_ids" multiple placeholder="可选（卖出策略）" clearable style="width: 100%">
-                    <el-option v-for="s in tradingStrategies" :key="s.id" :label="s.name" :value="s.id" />
-                  </el-select>
-                </el-tooltip>
+              <el-form-item>
+                <template #label>
+                  交易策略
+                  <el-tooltip content="可选。卖出信号策略，用于判断持仓何时卖出。支持多选，按顺序执行" placement="top">
+                    <span class="hint-icon">ⓘ</span>
+                  </el-tooltip>
+                </template>
+                <el-select v-model="form.trading_strategy_ids" multiple placeholder="可选（卖出策略）" clearable style="width: 100%">
+                  <el-option v-for="s in tradingStrategies" :key="s.id" :label="s.name" :value="s.id" />
+                </el-select>
               </el-form-item>
             </el-col>
           </el-row>
@@ -77,12 +89,16 @@
               </el-form-item>
             </el-col>
             <el-col :span="8">
-              <el-form-item label="股票池">
-                <el-tooltip content="选择候选组作为回测股票池，优先级高于市场选择" placement="top">
-                  <el-select v-model="form.group_ids" multiple placeholder="使用市场选择" style="width: 100%" clearable filterable>
-                    <el-option v-for="g in candidateGroups" :key="g.id" :label="`${g.name} (${g.stock_count}只)`" :value="g.id" />
-                  </el-select>
-                </el-tooltip>
+              <el-form-item>
+                <template #label>
+                  股票池
+                  <el-tooltip content="选择候选组作为回测股票池，优先级高于市场选择" placement="top">
+                    <span class="hint-icon">ⓘ</span>
+                  </el-tooltip>
+                </template>
+                <el-select v-model="form.group_ids" multiple placeholder="使用市场选择" style="width: 100%" clearable filterable>
+                  <el-option v-for="g in candidateGroups" :key="g.id" :label="`${g.name} (${g.stock_count}只)`" :value="g.id" />
+                </el-select>
               </el-form-item>
             </el-col>
             <el-col :span="8">
@@ -94,51 +110,75 @@
               </el-form-item>
             </el-col>
             <el-col :span="8">
-              <el-form-item label="止损比例 (%)">
-                <el-tooltip content="买入价下跌超过该比例时触发止损。例如填 5 表示亏损 5% 时卖出" placement="top">
-                  <el-input-number v-model="form.stop_loss_pct" :min="0" :max="50" :step="1" :precision="1" style="width: 100%" />
-                </el-tooltip>
+              <el-form-item>
+                <template #label>
+                  止损比例 (%)
+                  <el-tooltip content="买入价下跌超过该比例时触发止损。例如填 5 表示亏损 5% 时卖出" placement="top">
+                    <span class="hint-icon">ⓘ</span>
+                  </el-tooltip>
+                </template>
+                <el-input-number v-model="form.stop_loss_pct" :min="0" :max="50" :step="1" :precision="1" style="width: 100%" />
               </el-form-item>
             </el-col>
             <el-col :span="8">
-              <el-form-item label="止盈比例 (%)">
-                <el-tooltip content="买入价上涨超过该比例时触发止盈。例如填 15 表示盈利 15% 时卖出" placement="top">
-                  <el-input-number v-model="form.take_profit_pct" :min="0" :max="100" :step="1" :precision="1" style="width: 100%" />
-                </el-tooltip>
+              <el-form-item>
+                <template #label>
+                  止盈比例 (%)
+                  <el-tooltip content="买入价上涨超过该比例时触发止盈。例如填 15 表示盈利 15% 时卖出" placement="top">
+                    <span class="hint-icon">ⓘ</span>
+                  </el-tooltip>
+                </template>
+                <el-input-number v-model="form.take_profit_pct" :min="0" :max="100" :step="1" :precision="1" style="width: 100%" />
               </el-form-item>
             </el-col>
             <el-col :span="8">
-              <el-form-item label="移动止盈 (%)">
-                <el-tooltip content="持仓期间，从最高点回撤超过该比例时触发卖出。例如填 3 表示从最高点回撤 3% 时止盈" placement="top">
-                  <el-input-number v-model="form.trailing_stop_pct" :min="0" :max="50" :step="0.5" :precision="1" style="width: 100%" placeholder="可选" />
-                </el-tooltip>
+              <el-form-item>
+                <template #label>
+                  移动止盈 (%)
+                  <el-tooltip content="持仓期间，从最高点回撤超过该比例时触发卖出。例如填 3 表示从最高点回撤 3% 时止盈" placement="top">
+                    <span class="hint-icon">ⓘ</span>
+                  </el-tooltip>
+                </template>
+                <el-input-number v-model="form.trailing_stop_pct" :min="0" :max="50" :step="0.5" :precision="1" style="width: 100%" placeholder="可选" />
               </el-form-item>
             </el-col>
           </el-row>
 
           <el-row :gutter="20">
             <el-col :span="8">
-              <el-form-item label="止盈止损成交价">
-                <el-tooltip content="收盘价模式：触发后按当日收盘价成交；触发价模式：当日价格覆盖止盈/止损位即按触发价成交（更贴近实盘）" placement="top">
-                  <el-select v-model="form.stop_execution_price" style="width: 100%">
-                    <el-option label="收盘价" value="close" />
-                    <el-option label="触发价" value="trigger" />
-                  </el-select>
-                </el-tooltip>
+              <el-form-item>
+                <template #label>
+                  止盈止损成交价
+                  <el-tooltip content="收盘价模式：触发后按当日收盘价成交；触发价模式：当日价格覆盖止盈/止损位即按触发价成交（更贴近实盘）" placement="top">
+                    <span class="hint-icon">ⓘ</span>
+                  </el-tooltip>
+                </template>
+                <el-select v-model="form.stop_execution_price" style="width: 100%">
+                  <el-option label="收盘价" value="close" />
+                  <el-option label="触发价" value="trigger" />
+                </el-select>
               </el-form-item>
             </el-col>
             <el-col :span="8">
-              <el-form-item label="手续费率">
-                <el-tooltip content="券商佣金费率，按成交金额计算。例如万分之0.86填 0.000086，万分之三填 0.0003。最低佣金 5 元（不足按 5 元收取）" placement="top">
-                  <el-input-number v-model="form.commission_rate" :min="0" :max="0.01" :step="0.000001" :precision="6" style="width: 100%" />
-                </el-tooltip>
+              <el-form-item>
+                <template #label>
+                  手续费率
+                  <el-tooltip content="券商佣金费率，按成交金额计算。例如万分之0.86填 0.000086，万分之三填 0.0003。最低佣金 5 元（不足按 5 元收取）" placement="top">
+                    <span class="hint-icon">ⓘ</span>
+                  </el-tooltip>
+                </template>
+                <el-input-number v-model="form.commission_rate" :min="0" :max="0.01" :step="0.000001" :precision="6" style="width: 100%" />
               </el-form-item>
             </el-col>
             <el-col :span="8">
-              <el-form-item label="滑点 (%)">
-                <el-tooltip content="模拟成交价格的偏移，买入时成交价上浮、卖出时成交价下浮。例如填 0.1 表示买入按报价×1.001、卖出按报价×0.999 成交" placement="top">
-                  <el-input-number v-model="form.slippage_pct" :min="0" :max="1" :step="0.01" :precision="2" style="width: 100%" />
-                </el-tooltip>
+              <el-form-item>
+                <template #label>
+                  滑点 (%)
+                  <el-tooltip content="模拟成交价格的偏移，买入时成交价上浮、卖出时成交价下浮。例如填 0.1 表示买入按报价×1.001、卖出按报价×0.999 成交" placement="top">
+                    <span class="hint-icon">ⓘ</span>
+                  </el-tooltip>
+                </template>
+                <el-input-number v-model="form.slippage_pct" :min="0" :max="1" :step="0.01" :precision="2" style="width: 100%" />
               </el-form-item>
             </el-col>
           </el-row>
@@ -1560,6 +1600,12 @@ onBeforeUnmount(() => {
 }
 
 :deep(.el-table) {
+  font-size: 13px;
+}
+.hint-icon {
+  color: #909399;
+  cursor: help;
+  margin-left: 3px;
   font-size: 13px;
 }
 </style>

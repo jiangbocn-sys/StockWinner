@@ -17,21 +17,6 @@ class MarketDataService:
         pass
 
     @staticmethod
-    def _market_data_from_ohlcv(ohlcv: Dict[str, float], stock_code: str) -> MarketData:
-        """从 OHLCV 字典构造 MarketData（缓存数据，五档用现价填充）"""
-        close = ohlcv.get('close', 0)
-        return MarketData(
-            stock_code=stock_code, stock_name=stock_code,
-            current_price=close, change_percent=ohlcv.get('change_pct', 0),
-            high=ohlcv.get('high', close), low=ohlcv.get('low', close),
-            open_price=ohlcv.get('open', close), prev_close=close,
-            volume=int(ohlcv.get('volume', 0)), amount=ohlcv.get('amount', 0),
-            bid=[close] * 5, ask=[close] * 5,
-            bid_volume=[0] * 5, ask_volume=[0] * 5, trade_date='',
-            source=ohlcv.get('source', ''),
-        )
-
-    @staticmethod
     async def _fill_stale_from_kline_db(codes: Set[str]) -> Dict[str, MarketData]:
         """从 kline.db 读取最新收盘价兜底（仅非交易时段），计算涨跌幅"""
         from services.trading.trading_hours import can_trade
@@ -94,7 +79,7 @@ class MarketDataService:
             cache = get_price_cache()
             entry = cache.get_ohlcv_with_ttl(stock_code)
             if entry and entry.get('is_fresh') and entry.get('data', {}).get('close', 0) > 0:
-                return self._market_data_from_ohlcv(entry['data'], stock_code)
+                return MarketData.from_ohlcv(entry['data'], stock_code)
         except Exception:
             pass
 
@@ -151,24 +136,7 @@ class MarketDataService:
         if sdk_result:
             return sdk_result
         if fallback_result:
-            return MarketData(
-                stock_code=fallback_result.get("stock_code", stock_code),
-                stock_name=fallback_result.get("stock_name", ""),
-                current_price=float(fallback_result.get("current_price", 0)),
-                change_percent=float(fallback_result.get("change_percent", 0)),
-                high=float(fallback_result.get("high", 0)),
-                low=float(fallback_result.get("low", 0)),
-                open_price=float(fallback_result.get("open_price", 0)),
-                prev_close=float(fallback_result.get("prev_close", 0)),
-                volume=int(fallback_result.get("volume", 0)),
-                amount=float(fallback_result.get("amount", 0)),
-                bid=fallback_result.get("bid", []),
-                ask=fallback_result.get("ask", []),
-                bid_volume=fallback_result.get("bid_volume", []),
-                ask_volume=fallback_result.get("ask_volume", []),
-                trade_date=fallback_result.get("trade_date", ""),
-                source="channel",
-            )
+            return MarketData.from_fallback(fallback_result, stock_code)
         return None
 
     async def get_batch_market_data(self, stock_codes: List[str], connected: bool) -> Dict[str, Optional[MarketData]]:
@@ -188,7 +156,7 @@ class MarketDataService:
             norm = normalize_stock_code(code)
             entry = cache.get_ohlcv_with_ttl(norm)
             if entry and entry.get('is_fresh') and entry.get('data', {}).get('close', 0) > 0:
-                results[code] = self._market_data_from_ohlcv(entry['data'], code)
+                results[code] = MarketData.from_ohlcv(entry['data'], code)
             else:
                 stale_codes.add(norm)
 
@@ -233,23 +201,7 @@ class MarketDataService:
                 else:
                     fb = fallback_results.get(norm) or fallback_results.get(code)
                     if fb and fb.get("current_price", 0) > 0:
-                        results[code] = MarketData(
-                            stock_code=fb.get("stock_code", code),
-                            stock_name=fb.get("stock_name", ""),
-                            current_price=float(fb.get("current_price", 0)),
-                            change_percent=float(fb.get("change_percent", 0)),
-                            high=float(fb.get("high", 0)),
-                            low=float(fb.get("low", 0)),
-                            open_price=float(fb.get("open_price", 0)),
-                            prev_close=float(fb.get("prev_close", 0)),
-                            volume=int(fb.get("volume", 0)),
-                            amount=float(fb.get("amount", 0)),
-                            bid=fb.get("bid", []), ask=fb.get("ask", []),
-                            bid_volume=fb.get("bid_volume", []),
-                            ask_volume=fb.get("ask_volume", []),
-                            trade_date=fb.get("trade_date", ""),
-                            source="channel",
-                        )
+                        results[code] = MarketData.from_fallback(fb, code)
                     else:
                         results[code] = None
 

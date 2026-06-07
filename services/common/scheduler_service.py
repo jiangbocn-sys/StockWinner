@@ -1751,7 +1751,6 @@ class SchedulerService:
             elif task_type == "strategy":
                 # 代码型策略任务
                 from services.strategy.engine import get_strategy_engine
-                from services.common import technical_indicators
 
                 strategy = await db.fetchone("SELECT * FROM strategies WHERE id = ?", (task["strategy_id"],))
                 if not strategy:
@@ -1821,115 +1820,11 @@ class SchedulerService:
                     logger.warning(f"实时行情预取失败: {e}")
                     logger.warning(tb)
 
-                # ── 数据获取函数（策略沙盒中注入）──
+                # ── Context 构建 ──
+                from services.strategy.engine import build_strategy_context
 
-                # ① 本地 K 线查询（同步，不经过 TGW）
-                def _get_kline_local(stock_code: str, limit: int = 100, start_date: str = None):
-                    """从本地 kline.db 获取历史 K 线"""
-                    from services.data.local_data_service import get_local_data_service
-                    lds = get_local_data_service()
-                    return lds.get_kline_data(stock_code, start_date=start_date, limit=limit)
-
-                # ② 批量本地 K 线查询（同步）
-                def _get_batch_kline(stock_codes: list, limit: int = 100):
-                    """从本地 kline.db 批量获取 K 线"""
-                    from services.data.local_data_service import get_local_data_service
-                    lds = get_local_data_service()
-                    return lds.get_batch_kline(stock_codes, limit=limit)
-
-                # ③ 日频因子查询（同步）
-                def _get_factors(stock_code: str, date: str = None):
-                    """从 stock_daily_factors 获取指定日期因子"""
-                    from services.data.local_data_service import get_local_data_service
-                    lds = get_local_data_service()
-                    target_date = date or get_china_time().strftime("%Y-%m-%d")
-                    return lds.get_daily_factors(stock_code, target_date)
-
-                # ④ 批量日频因子查询（同步）
-                def _get_factors_batch(stock_codes: list, date: str = None):
-                    """批量获取多只股票指定日期因子"""
-                    from services.data.local_data_service import get_local_data_service
-                    lds = get_local_data_service()
-                    target_date = date or get_china_time().strftime("%Y-%m-%d")
-                    return lds.get_daily_factors_batch(stock_codes, target_date)
-
-                # ⑤ 拼接 K 线：本地历史 + 当日实时（同步，TGW 部分走 gateway 排队）
-                # 注：当日实时行情已在策略执行前预取，直接传入 _pre_fetched_realtime_quotes
-                def _get_kline_spliced(stock_codes: list, lookback: int = 100):
-                    """本地历史 + 当日实时行情拼接（仅当日走 TGW）"""
-                    from services.data.local_data_service import get_local_data_service, is_trading_hours
-                    lds = get_local_data_service()
-                    realtime_quotes = {}
-                    missing_codes = []
-                    for code in stock_codes:
-                        if code in _pre_fetched_realtime_quotes:
-                            realtime_quotes[code] = _pre_fetched_realtime_quotes[code]
-                        else:
-                            missing_codes.append(code)
-                    # 少数股票缺失（停牌等）→ 跳过，不影响整体筛选
-                    if is_trading_hours() and missing_codes:
-                        import logging
-                        logging.getLogger("scheduler").warning(
-                            f"策略执行: {len(missing_codes)}/{len(stock_codes)} 只股票无实时行情，跳过: {missing_codes[:5]}")
-                    return lds.get_kline_spliced(stock_codes, lookback=lookback, realtime_quotes=realtime_quotes if realtime_quotes else None)
-
-                # ⑤b 智能 K 线获取：根据交易时段自动选择数据源
-                def _get_kline_smart(stock_codes: list, lookback: int = 100):
-                    """
-                    盘中 → 本地历史 + 预取的当日实时 OHLCV 拼接
-                    盘后 → 纯本地数据（当日因子已计算完成）
-                    返回格式: Dict[str, List[Dict]] 与策略代码兼容
-                    """
-                    from services.data.local_data_service import get_local_data_service, is_trading_hours
-
-                    lds = get_local_data_service()
-
-                    if not is_trading_hours():
-                        # 盘后：直接返回本地数据
-                        raw = lds.get_batch_kline(stock_codes, limit=lookback)
-                    else:
-                        # 盘中：跳过缺失实时数据的股票（停牌等）
-                        realtime_quotes = {code: data for code, data in _pre_fetched_realtime_quotes.items() if code in stock_codes}
-                        missing = [c for c in stock_codes if c not in realtime_quotes]
-                        if missing:
-                            import logging
-                            logging.getLogger("scheduler").warning(
-                                f"策略执行: {len(missing)}/{len(stock_codes)} 只股票无实时行情，跳过: {missing[:5]}")
-                        raw = lds.get_kline_spliced(stock_codes, lookback=lookback, realtime_quotes=realtime_quotes)
-
-                    # DataFrame → List[Dict] 转换，兼容策略代码
-                    result = {}
-                    for code, df in raw.items():
-                        if hasattr(df, 'to_dict'):
-                            result[code] = df.to_dict('records')
-                        else:
-                            result[code] = df
-                    return result
-
-                # ⑥ 实时行情（使用预取数据）
-                def _get_realtime_quote(stock_code: str):
-                    """获取预取的当日实时 OHLCV"""
-                    return _pre_fetched_realtime_quotes.get(stock_code)
-
-                # ⑦ 单股 K 线（异步，走 gateway → sdk_connection_manager 排队）
-                async def _get_kline(stock_code: str, period: str = "day", start_date: str = None):
-                    gateway = await get_gateway()
-                    return await gateway.get_kline_data(stock_code, period=period, start_date=start_date)
-
-                # ⑧ 单股行情（异步，走 gateway → sdk_connection_manager 排队）
-                async def _get_market_data(stock_code: str):
-                    gateway = await get_gateway()
-                    return await gateway.get_market_data(stock_code)
-
-                # ⑨ 进度更新函数（策略代码可调用）
+                # 进度回调
                 def _update_progress(percent: float, message: str = "", current_stock: str = ""):
-                    """更新策略执行进度（同步函数，策略代码中调用）
-
-                    Args:
-                        percent: 进度百分比 (0-100)
-                        message: 进度消息
-                        current_stock: 当前处理的股票代码
-                    """
                     try:
                         from services.ui.dashboard import update_screening_progress
                         update_screening_progress(task["account_id"], task["strategy_id"], {
@@ -1944,42 +1839,70 @@ class SchedulerService:
                     except Exception as e:
                         logger.warning(f"进度更新失败: {e}")
 
-                # 导入公共数据库查询函数（用于 context 传递）
-                from services.common.database import query_kline_db as _query_kline_db
-                from services.common.database import query_db as _query_db
+                # 异步 gateway 函数
+                async def _get_kline(stock_code: str, period: str = "day", start_date: str = None):
+                    gateway = await get_gateway()
+                    return await gateway.get_kline_data(stock_code, period=period, start_date=start_date)
 
-                context = {
-                    "stocks": [dict(s) for s in stocks],
-                    "account_id": task["account_id"],
-                    "today": get_china_time().strftime("%Y-%m-%d"),
-                    "strategy": strategy,
-                    "group_id": task["group_id"],
-                    "code_scope": code_scope,
-                    "indicators": {
-                        "calculate_ma": technical_indicators.calculate_ma,
-                        "calculate_rsi": technical_indicators.calculate_rsi,
-                        "calculate_macd": technical_indicators.calculate_macd,
-                        "calculate_kdj": technical_indicators.calculate_kdj,
-                        "calculate_bollinger_bands": technical_indicators.calculate_bollinger_bands,
-                        "calculate_adx": technical_indicators.calculate_adx,
-                        "calculate_atr": technical_indicators.calculate_atr,
-                        "calculate_ema": technical_indicators.calculate_ema,
-                        "calculate_obv": technical_indicators.calculate_obv,
-                        "calculate_historical_volatility": technical_indicators.calculate_historical_volatility,
-                    },
-                    "get_kline": _get_kline,                          # 异步: 走 gateway TGW
-                    "get_market_data": _get_market_data,              # 异步: 走 gateway TGW
-                    "get_kline_local": _get_kline_local,              # 同步: 本地 kline.db
-                    "get_batch_kline": _get_batch_kline,              # 同步: 批量本地 K 线
-                    "get_factors": _get_factors,                      # 同步: stock_daily_factors
-                    "get_factors_batch": _get_factors_batch,          # 同步: 批量因子
-                    "get_kline_spliced": _get_kline_spliced,          # 同步: 本地历史+预取当日拼接
-                    "get_kline_smart": _get_kline_smart,              # 同步: 自动判断盘中/盘后
-                    "get_realtime_quote": _get_realtime_quote,        # 同步: 预取当日 OHLCV
-                    "update_progress": _update_progress,              # 同步: 进度更新函数
-                    "query_kline_db": _query_kline_db,                # 同步: kline.db SQL 查询
-                    "query_db": _query_db,                            # 同步: stockwinner.db SQL 查询
-                }
+                async def _get_market_data(stock_code: str):
+                    gateway = await get_gateway()
+                    return await gateway.get_market_data(stock_code)
+
+                context = build_strategy_context(
+                    stocks, task["account_id"],
+                    include_realtime=True,
+                    include_async_gateway=True,
+                    progress_callback=_update_progress,
+                    strategy=strategy,
+                    group_id=task["group_id"],
+                    code_scope=code_scope,
+                )
+                # 用预取的实时行情覆盖 get_realtime_quote
+                context["get_realtime_quote"] = lambda sc: _pre_fetched_realtime_quotes.get(sc)
+
+                # 覆盖 async gateway 函数
+                context["get_kline"] = _get_kline
+                context["get_market_data"] = _get_market_data
+
+                # 覆盖 spliced/smart 使用预取数据（盘中优化）
+                from services.data.local_data_service import get_local_data_service, is_trading_hours
+
+                def _get_kline_spliced_prefetched(stock_codes: list, lookback: int = 100):
+                    lds = get_local_data_service()
+                    realtime_quotes = {}
+                    missing_codes = []
+                    for code in stock_codes:
+                        if code in _pre_fetched_realtime_quotes:
+                            realtime_quotes[code] = _pre_fetched_realtime_quotes[code]
+                        else:
+                            missing_codes.append(code)
+                    if is_trading_hours() and missing_codes:
+                        logger.warning(
+                            f"策略执行: {len(missing_codes)}/{len(stock_codes)} 只股票无实时行情，跳过: {missing_codes[:5]}")
+                    return lds.get_kline_spliced(stock_codes, lookback=lookback,
+                                                  realtime_quotes=realtime_quotes if realtime_quotes else None)
+
+                def _get_kline_smart_prefetched(stock_codes: list, lookback: int = 100):
+                    lds = get_local_data_service()
+                    if not is_trading_hours():
+                        raw = lds.get_batch_kline(stock_codes, limit=lookback)
+                    else:
+                        realtime_quotes = {code: data for code, data in _pre_fetched_realtime_quotes.items() if code in stock_codes}
+                        missing = [c for c in stock_codes if c not in realtime_quotes]
+                        if missing:
+                            logger.warning(
+                                f"策略执行: {len(missing)}/{len(stock_codes)} 只股票无实时行情，跳过: {missing[:5]}")
+                        raw = lds.get_kline_spliced(stock_codes, lookback=lookback, realtime_quotes=realtime_quotes)
+                    result = {}
+                    for code, df in raw.items():
+                        if hasattr(df, 'to_dict'):
+                            result[code] = df.to_dict('records')
+                        else:
+                            result[code] = df
+                    return result
+
+                context["get_kline_spliced"] = _get_kline_spliced_prefetched
+                context["get_kline_smart"] = _get_kline_smart_prefetched
 
                 # 交易型策略：注入持仓数据（同步可用）
                 if code_scope == "trading":
