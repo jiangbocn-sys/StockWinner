@@ -100,8 +100,8 @@ class HealthTracker:
             return
 
         try:
-            from services.notifications import get_notification_service
-            notification = get_notification_service()
+            from services.notifications import get_notification_manager
+            notification = get_notification_manager()
 
             # 获取主事件循环（FastAPI/uvicorn 的循环）
             try:
@@ -117,7 +117,7 @@ class HealthTracker:
             for acct_id in self._account_ids:
                 # 提交到主循环执行，不创建临时循环
                 future = asyncio.run_coroutine_threadsafe(
-                    notification.emit(
+                    notification.trigger(
                         event_type="sdk_connection_error",
                         account_id=acct_id,
                         payload={

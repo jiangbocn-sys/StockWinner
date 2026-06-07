@@ -1113,8 +1113,8 @@ class SchedulerService:
         # --- 异常检测：发飞书通知 ---
         if not scheduler_ok:
             try:
-                from services.notifications import get_notification_service
-                notification = get_notification_service()
+                from services.notifications import get_notification_manager
+                notification = get_notification_manager()
                 # 尝试给所有有通知配置的账户发警报
                 conn = get_sync_connection(path=Path(__file__).parent.parent.parent / "data" / "stockwinner.db")
                 account_ids = [r["account_id"] for r in conn.execute(
@@ -1127,7 +1127,7 @@ class SchedulerService:
                 if main_loop and not main_loop.is_closed():
                     for acct_id in account_ids:
                         future = asyncio.run_coroutine_threadsafe(
-                            notification.emit(
+                            notification.trigger(
                                 event_type="scheduler_down",
                                 account_id=acct_id,
                                 payload={
@@ -1155,7 +1155,7 @@ class SchedulerService:
 
                 if is_today_trading_day() and _is_trading_hours():
                     from services.monitoring.service import get_trading_monitor
-                    from services.notifications import get_notification_service
+                    from services.notifications import get_notification_manager
 
                     monitor = get_trading_monitor()
 
@@ -1194,12 +1194,12 @@ class SchedulerService:
                                 logger.warning(f"交易监控重启失败: {result.get('message')}")
                                 # 重启失败才发通知
                                 if position_count > 0:
-                                    notification = get_notification_service()
+                                    notification = get_notification_manager()
                                     main_loop = _get_fastapi_loop()
                                     if main_loop and not main_loop.is_closed():
                                         for acct_id in [r["account_id"] for r in acct_rows]:
                                             future = asyncio.run_coroutine_threadsafe(
-                                                notification.emit(
+                                                notification.trigger(
                                                     event_type="monitor_interrupted",
                                                     account_id=acct_id,
                                                     payload={
@@ -1235,12 +1235,12 @@ class SchedulerService:
                         ).fetchall()
                         positions_conn.close()
                         if position_count > 0:
-                            notification = get_notification_service()
+                            notification = get_notification_manager()
                             main_loop = _get_fastapi_loop()
                             if main_loop and not main_loop.is_closed():
                                 for acct_id in [r["account_id"] for r in acct_rows]:
                                     future = asyncio.run_coroutine_threadsafe(
-                                        notification.emit(
+                                        notification.trigger(
                                             event_type="monitor_data_stale",
                                             account_id=acct_id,
                                             payload={

@@ -76,8 +76,15 @@ class BacktestEngine:
         initial_positions: Optional[List[Dict]] = None,
         initial_cash: Optional[float] = None,
         liquidate_at_end: bool = True,
+        trading_strategies: Optional[List[Dict]] = None,  # 预加载的策略代码
+        is_subprocess: bool = False,
     ) -> Dict:
-        """同步版本的 run_backtest，用于在线程池中执行。"""
+        """同步版本的 run_backtest，用于在线程池中执行。
+
+        Args:
+            trading_strategies: 预加载的交易策略代码 [{id, name, code, function_name}, ...]
+            is_subprocess: 子进程模式下跳过数据库写入，避免 database is locked 错误
+        """
         import asyncio
 
         # 在线程中创建新事件循环运行异步逻辑
@@ -102,6 +109,8 @@ class BacktestEngine:
                     initial_positions=initial_positions,
                     initial_cash=initial_cash,
                     liquidate_at_end=liquidate_at_end,
+                    trading_strategies=trading_strategies,
+                    is_subprocess=is_subprocess,
                 )
             )
         finally:
@@ -122,15 +131,22 @@ class BacktestEngine:
         stop_loss_pct: Optional[float] = None,
         take_profit_pct: Optional[float] = None,
         trailing_stop_pct: Optional[float] = None,
+        trading_strategies: Optional[List[Dict]] = None,  # 预加载的策略代码
+        is_subprocess: bool = False,
     ) -> Dict:
-        """同步版本的分段回测，用于在线程池中执行。"""
+        """同步版本的分段回测，用于在线程池中执行。
+
+        Args:
+            trading_strategies: 预加载的交易策略代码 [{id, name, code, function_name}, ...]
+            is_subprocess: 子进程模式下跳过数据库写入，避免 database is locked 错误
+        """
         import asyncio
 
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
-            # 先获取基准数据
-            benchmark_data = loop.run_until_complete(
+            # 先获取基准数据（子进程模式下跳过，主进程会处理）
+            benchmark_data = [] if is_subprocess else loop.run_until_complete(
                 self._fetch_benchmark_data(start_date, end_date)
             )
 
@@ -149,11 +165,13 @@ class BacktestEngine:
                     stop_loss_pct=stop_loss_pct,
                     take_profit_pct=take_profit_pct,
                     trailing_stop_pct=trailing_stop_pct,
+                    trading_strategies=trading_strategies,
+                    is_subprocess=is_subprocess,
                 )
             )
 
-            if "error" not in result:
-                # 保存结果（需要 benchmark_data 重新计算）
+            if "error" not in result and not is_subprocess:
+                # 子进程模式下不保存结果（由主进程处理）
                 try:
                     loop.run_until_complete(
                         self._save_results(run_id, result, benchmark_data)
@@ -184,15 +202,22 @@ class BacktestEngine:
         initial_positions: Optional[List[Dict]] = None,
         initial_cash: Optional[float] = None,
         liquidate_at_end: bool = True,
+        trading_strategies: Optional[List[Dict]] = None,  # 预加载的策略代码
+        is_subprocess: bool = False,
     ) -> Dict:
         """
         执行回测。
 
+        Args:
+            trading_strategies: 预加载的交易策略代码（子进程模式下传入）
+            is_subprocess: 子进程模式下跳过数据库写入（由主进程处理）
+
         Returns:
             回测结果字典
         """
-        # 1. 更新状态为 running
-        await self.db.execute(
+        # 1. 更新状态为 running（子进程模式下跳过）
+        if not is_subprocess:
+            await self.db.execute(
             "UPDATE backtest_runs SET status = 'running', started_at = ? WHERE id = ?",
             (get_china_time().isoformat(), run_id)
         )
@@ -208,26 +233,27 @@ class BacktestEngine:
             if not stock_pool:
                 stock_pool = self._resolve_stock_pool(strategy_config)
 
-            # 4. 数据完整性检查（股票池超过 1000 只时做采样检查，避免阻塞）
-            max_check_stocks = 1000
-            if len(stock_pool) > max_check_stocks:
-                import random
-                check_pool = random.sample(stock_pool, max_check_stocks)
-            else:
-                check_pool = stock_pool
+            # 4. 数据完整性检查（子进程模式下跳过，避免数据库访问）
+            if not is_subprocess:
+                max_check_stocks = 1000
+                if len(stock_pool) > max_check_stocks:
+                    import random
+                    check_pool = random.sample(stock_pool, max_check_stocks)
+                else:
+                    check_pool = stock_pool
 
-            gap_report = await self._check_data_completeness(
-                check_pool, start_date, end_date
-            )
-            if not gap_report.can_proceed:
-                await self._mark_failed(run_id, "数据完整性检查未通过", gap_report)
-                return {"error": "数据完整性检查未通过", "gap_report": gap_report.to_dict()}
+                gap_report = await self._check_data_completeness(
+                    check_pool, start_date, end_date
+                )
+                if not gap_report.can_proceed:
+                    await self._mark_failed(run_id, "数据完整性检查未通过", gap_report)
+                    return {"error": "数据完整性检查未通过", "gap_report": gap_report.to_dict()}
 
-            # 5. 保存数据完整性报告
-            await self.db.execute(
-                "UPDATE backtest_runs SET data_gap_report = ? WHERE id = ?",
-                (json.dumps(gap_report.to_dict(), ensure_ascii=False), run_id)
-            )
+                # 5. 保存数据完整性报告
+                await self.db.execute(
+                    "UPDATE backtest_runs SET data_gap_report = ? WHERE id = ?",
+                    (json.dumps(gap_report.to_dict(), ensure_ascii=False), run_id)
+                )
 
             # 6. 执行回测
             if mode == "simulated":
@@ -236,11 +262,14 @@ class BacktestEngine:
                     initial_capital, stock_pool, fee_config, position_limits,
                     slippage_pct, stop_loss_pct, take_profit_pct, trailing_stop_pct,
                     initial_positions, initial_cash, liquidate_at_end,
+                    trading_strategies, is_subprocess=is_subprocess,
                 )
             elif mode == "return_accumulation":
                 result = await self._run_return_accumulation(
                     run_id, strategy_config, start_date, end_date,
                     initial_capital, stock_pool,
+                    trading_strategies=trading_strategies,
+                    is_subprocess=is_subprocess,
                 )
             else:
                 result = {"error": f"不支持的回测模式: {mode}"}
@@ -249,7 +278,8 @@ class BacktestEngine:
 
         except Exception as e:
             logger.error("backtest", f"回测执行失败 (run_id={run_id}): {e}")
-            await self._mark_failed(run_id, str(e), None)
+            if not is_subprocess:
+                await self._mark_failed(run_id, str(e), None)
             return {"error": str(e)}
 
     async def _run_simulated(
@@ -257,8 +287,14 @@ class BacktestEngine:
         initial_capital, stock_pool, fee_config, position_limits,
         slippage_pct, stop_loss_pct, take_profit_pct, trailing_stop_pct,
         initial_positions=None, initial_cash=None, liquidate_at_end=True,
+        trading_strategies=None, is_subprocess=False,
     ) -> Dict:
-        """执行撮合模拟盘模式"""
+        """执行撮合模拟盘模式
+
+        Args:
+            trading_strategies: 预加载的交易策略代码
+            is_subprocess: 子进程模式下跳过数据库写入
+        """
         from services.backtest.modes.simulated_trading import SimulatedTradingEngine
 
         # 从 strategy_config 读取费率配置
@@ -299,12 +335,15 @@ class BacktestEngine:
             initial_positions=initial_positions,
             initial_cash=initial_cash,
             liquidate_at_end=liquidate_at_end,
+            trading_strategies=trading_strategies,  # 使用预加载的策略
         )
 
-        # 进度回调（同步版本，直接执行 DB 更新）
-        last_saved = [0]  # 用列表实现 mutable nonlocal
+        # 进度回调
+        last_saved = [0]
         def progress(current, total, trade_date=""):
             pct = round(current / total * 100, 1) if total > 0 else 0
+            # 子进程也用 sync 连接写进度到 DB，保持前端可见
+            # is_subprocess 只控制最终 skip _save_results / _mark_failed
             try:
                 import sqlite3
                 from services.common.database import get_sync_connection
@@ -334,6 +373,10 @@ class BacktestEngine:
                 logger.warn("backtest", f"保存回测进度失败: {e}")
 
         result = engine.run(progress_callback=progress)
+
+        # 子进程模式下不保存结果（由主进程通过队列处理）
+        if is_subprocess:
+            return result
 
         if "error" in result:
             await self._mark_failed(run_id, result["error"], None)
@@ -369,12 +412,20 @@ class BacktestEngine:
     async def _run_return_accumulation(
         self, run_id, strategy_config, start_date, end_date,
         initial_capital, stock_pool,
+        trading_strategies: Optional[List[Dict]] = None,
+        is_subprocess: bool = False,
     ) -> Dict:
-        """执行收益率累积模式"""
+        """执行收益率累积模式
+
+        Args:
+            trading_strategies: 预加载的交易策略代码
+            is_subprocess: 子进程模式下跳过数据库写入（由主进程处理）
+        """
         from services.backtest.modes.return_accumulation import ReturnAccumulationEngine
 
         stop_loss_pct = strategy_config.get("stop_loss_pct")
         take_profit_pct = strategy_config.get("take_profit_pct")
+        holding_period = strategy_config.get("holding_period")  # 不设默认值
 
         engine = ReturnAccumulationEngine(
             strategy_config=strategy_config,
@@ -384,10 +435,31 @@ class BacktestEngine:
             stock_pool=stock_pool,
             stop_loss_pct=stop_loss_pct,
             take_profit_pct=take_profit_pct,
-            holding_period=strategy_config.get("holding_period", 5),
+            holding_period=holding_period,  # 传入 None 时不启用固定持有天数
+            trading_strategies=trading_strategies,  # 传入交易策略
         )
 
-        result = engine.run()
+        # 进度回调（收益率累积模式）
+        # 子进程也用 sync 连接写进度到 DB，保持前端可见
+        def progress(current, total, trade_date=""):
+            pct = round(current / total * 100, 1) if total > 0 else 0
+            try:
+                import sqlite3
+                from services.common.database import get_sync_connection
+                conn = get_sync_connection("stockwinner")
+                conn.execute(
+                    "UPDATE backtest_runs SET progress = ?, current_trade_date = ? WHERE id = ?",
+                    (pct, trade_date, run_id)
+                )
+                conn.commit()
+            except Exception as e:
+                logger.warn("backtest", f"保存回测进度失败: {e}")
+
+        result = engine.run(progress_callback=progress)
+
+        # 子进程模式下不保存结果（由主进程通过队列处理）
+        if is_subprocess:
+            return result
 
         if "error" in result:
             await self._mark_failed(run_id, result["error"], None)
@@ -433,51 +505,67 @@ class BacktestEngine:
         # 1. 保存交易记录
         for trade in backtest_trades:
             if trade.get("trade_type") == "buy":
-                await self.db.insert("backtest_trades", {
-                    "backtest_run_id": run_id,
-                    "stock_code": trade["stock_code"],
-                    "stock_name": trade.get("stock_name", ""),
-                    "buy_date": trade["date"],
-                    "buy_price": trade["price"],
-                    "buy_quantity": trade["quantity"],
-                    "buy_commission": trade.get("commission", 0),
-                })
-            elif trade.get("trade_type") == "sell":
-                # 查找对应的买入记录并更新
-                buy_date = trade.get("buy_date", "")
-                stock_code = trade.get("stock_code", "")
+                # 检查是否已有未卖出的记录（同一股票）
+                stock_code = trade["stock_code"]
                 existing = await self.db.fetchone(
-                    "SELECT id FROM backtest_trades WHERE backtest_run_id = ? AND stock_code = ? AND buy_date = ?",
-                    (run_id, stock_code, buy_date)
+                    "SELECT id, buy_quantity, buy_price, buy_commission, remaining_quantity FROM backtest_trades "
+                    "WHERE backtest_run_id = ? AND stock_code = ? AND sell_date IS NULL",
+                    (run_id, stock_code)
                 )
                 if existing:
+                    # 加仓：更新数量和成本（加权平均）
+                    old_qty = existing["buy_quantity"] or 0
+                    old_price = existing["buy_price"] or 0
+                    new_qty = trade["quantity"]
+                    new_price = trade["price"]
+                    total_qty = old_qty + new_qty
+                    avg_price = (old_price * old_qty + new_price * new_qty) / total_qty if total_qty > 0 else new_price
                     await self.db.execute(
-                        "UPDATE backtest_trades SET sell_date = ?, sell_price = ?, sell_commission = ?, "
-                        "sell_reason = ?, pnl = ?, pnl_pct = ?, holding_days = ? WHERE id = ?",
-                        (
-                            trade["date"], trade["price"], trade.get("commission", 0),
-                            trade.get("reason", ""), trade.get("pnl", 0), trade.get("pnl_pct", 0),
-                            trade.get("holding_days", 0), existing["id"]
-                        )
+                        "UPDATE backtest_trades SET buy_quantity = ?, buy_price = ?, buy_commission = ?, remaining_quantity = ? WHERE id = ?",
+                        (total_qty, avg_price, existing["buy_commission"] + trade.get("commission", 0), total_qty, existing["id"])
                     )
                 else:
-                    # 找不到买入记录（可能是回测开始前就持仓的），直接插入
+                    # 新买入：插入记录
                     await self.db.insert("backtest_trades", {
                         "backtest_run_id": run_id,
                         "stock_code": stock_code,
                         "stock_name": trade.get("stock_name", ""),
-                        "buy_date": trade.get("buy_date", ""),
-                        "buy_price": trade.get("buy_price", 0),
-                        "buy_quantity": trade.get("quantity", 0),
-                        "buy_commission": trade.get("buy_commission", 0),
-                        "sell_date": trade["date"],
-                        "sell_price": trade["price"],
-                        "sell_commission": trade.get("commission", 0),
-                        "sell_reason": trade.get("reason", ""),
-                        "pnl": trade.get("pnl", 0),
-                        "pnl_pct": trade.get("pnl_pct", 0),
-                        "holding_days": trade.get("holding_days", 0),
+                        "buy_date": trade["date"],
+                        "buy_price": trade["price"],
+                        "buy_quantity": trade["quantity"],
+                        "remaining_quantity": trade["quantity"],  # 初始剩余 = 买入数量
+                        "buy_commission": trade.get("commission", 0),
                     })
+            elif trade.get("trade_type") == "sell":
+                stock_code = trade.get("stock_code", "")
+                sell_qty = trade.get("sell_quantity", trade.get("quantity", 0))
+                remaining_qty = trade.get("remaining_quantity", 0)
+
+                # 插入卖出记录
+                await self.db.insert("backtest_trades", {
+                    "backtest_run_id": run_id,
+                    "stock_code": stock_code,
+                    "stock_name": trade.get("stock_name", ""),
+                    "buy_date": trade.get("buy_date", ""),
+                    "buy_price": trade.get("buy_price", 0),
+                    "sell_date": trade["date"],
+                    "sell_price": trade["price"],
+                    "sell_quantity": sell_qty,
+                    "remaining_quantity": remaining_qty,
+                    "sell_commission": trade.get("commission", 0),
+                    "sell_reason": trade.get("reason", ""),
+                    "pnl": trade.get("pnl", 0),
+                    "pnl_pct": trade.get("pnl_pct", 0),
+                    "holding_days": trade.get("holding_days", 0),
+                })
+
+                # 如果全部卖出（remaining_quantity = 0），更新买入记录标记已清仓
+                if remaining_qty == 0:
+                    await self.db.execute(
+                        "UPDATE backtest_trades SET sell_date = ?, sell_reason = '已清仓' "
+                        "WHERE backtest_run_id = ? AND stock_code = ? AND sell_date IS NULL",
+                        (trade["date"], run_id, stock_code)
+                    )
 
         # 2. 保存每日净值
         for nav in nav_series:
@@ -494,7 +582,8 @@ class BacktestEngine:
                 )
             )
 
-        # 3. 保存每日持仓快照
+        # 3. 保存每日持仓快照（先删除旧数据防止重复）
+        await self.db.execute("DELETE FROM backtest_daily_positions WHERE backtest_run_id = ?", (run_id,))
         for pos in daily_positions:
             await self.db.insert("backtest_daily_positions", {
                 "backtest_run_id": run_id,
@@ -569,7 +658,9 @@ class BacktestEngine:
         stop_loss_pct: Optional[float] = None,
         take_profit_pct: Optional[float] = None,
         trailing_stop_pct: Optional[float] = None,
+        trading_strategies: Optional[List[Dict]] = None,  # 预加载的策略代码
         progress_callback=None,
+        is_subprocess: bool = False,
     ) -> Dict:
         """
         分段回测：每段独立运行，持仓和现金在段间传递。
@@ -580,6 +671,8 @@ class BacktestEngine:
                 {"start_date": "2024-01-01", "stock_pool": ["..."], "strategy_config": {...}},
                 ...
             ]
+            trading_strategies: 预加载的交易策略代码
+            is_subprocess: 子进程模式下跳过数据库写入
         """
         from services.backtest.modes.simulated_trading import SimulatedTradingEngine
         from datetime import datetime, timedelta
@@ -638,7 +731,7 @@ class BacktestEngine:
                            f"股票池 {len(seg_pool)} 只, 初始现金={carried_cash or initial_capital:.0f}, "
                            f"持仓 {len(carried_positions)} 只")
 
-            # 构造本段的进度回调
+            # 构造本段的进度回调（子进程模式下跳过数据库写入）
             def seg_progress(current, total, trade_date="", idx=seg_idx):
                 acc_days = sum(
                     len(self.km.get_all_trade_dates(s["start_date"], s["end_date"]))
@@ -646,6 +739,11 @@ class BacktestEngine:
                 ) if self.km else 0
                 acc = acc_days + current
                 pct = round(acc / total_trade_days * 100, 1) if total_trade_days > 0 else 0
+                if is_subprocess:
+                    # 子进程模式下不写数据库，只调用外部回调传递进度
+                    if progress_callback:
+                        progress_callback(acc, total_trade_days, trade_date)
+                    return
                 try:
                     import sqlite3
                     from services.common.database import get_sync_connection
@@ -693,6 +791,7 @@ class BacktestEngine:
                 initial_positions=carried_positions if carried_positions else None,
                 initial_cash=carried_cash,
                 liquidate_at_end=is_last,
+                trading_strategies=trading_strategies,  # 使用预加载的策略
             )
 
             # 执行本段

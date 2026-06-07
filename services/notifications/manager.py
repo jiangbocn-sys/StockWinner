@@ -366,6 +366,16 @@ class NotificationManager:
             ]
             return "\n".join(lines)
 
+        if event_type == EventType.MONITOR_DATA_STALE:
+            lines = [
+                f"**异常类型：** 行情数据过期",
+                f"**检测时间：** {payload.get('detected_at', '-')}",
+                f"**账户：** {payload.get('account_id', '-')}",
+                f"**最后数据时间：** {payload.get('last_data_time', '-')}",
+                f"**错误信息：** {payload.get('sdk_error_msg', '-')}",
+            ]
+            return "\n".join(lines)
+
         # 通用格式
         lines = []
         for key, value in payload.items():
@@ -393,6 +403,61 @@ class NotificationManager:
         self._rule_engine.reload_rules()
         self._channel_router.reload_channels()
         self._debounce_cache.clear()
+
+    # ── 配置 CRUD ──
+
+    async def get_config(self, account_id: str) -> Optional[Dict]:
+        """获取通知配置"""
+        db = get_db_manager()
+        rows = await db.fetchall(
+            "SELECT * FROM notification_config WHERE account_id = ?",
+            (account_id,),
+        )
+        return rows[0] if rows else None
+
+    async def save_config(self, account_id: str, config: Dict) -> int:
+        """保存通知配置"""
+        db = get_db_manager()
+        existing = await self.get_config(account_id)
+
+        data = {
+            "account_id": account_id,
+            "channel": config.get("channel", "feishu"),
+            "webhook_url": config["webhook_url"],
+            "enabled": config.get("enabled", 1),
+            "notify_on_trade": config.get("notify_on_trade", 1),
+            "notify_on_signal": config.get("notify_on_signal", 1),
+            "notify_on_task": config.get("notify_on_task", 1),
+        }
+
+        if existing:
+            await db.update("notification_config", data, "id = ?", (existing["id"],))
+            return existing["id"]
+        else:
+            return await db.insert("notification_config", data)
+
+    async def get_history(
+        self,
+        account_id: str,
+        limit: int = 50,
+        offset: int = 0,
+        event_type: Optional[str] = None,
+    ) -> List[Dict]:
+        """获取通知历史"""
+        db = get_db_manager()
+        where = "account_id = ?"
+        params: list = [account_id]
+
+        if event_type:
+            where += " AND event_type = ?"
+            params.append(event_type)
+
+        params.extend([limit, offset])
+
+        return await db.fetchall(
+            f"SELECT * FROM notification_history WHERE {where} ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            tuple(params),
+        )
 
 
 # 全局单例

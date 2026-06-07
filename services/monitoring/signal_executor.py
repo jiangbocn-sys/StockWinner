@@ -142,9 +142,9 @@ class SignalExecutor:
                 quantity=result['quantity']
             )
 
-            from services.notifications import get_notification_service
-            notification = get_notification_service()
-            await notification.emit(
+            from services.notifications import get_notification_manager
+            notification = get_notification_manager()
+            await notification.trigger(
                 event_type="trade_executed",
                 account_id=account_id,
                 payload={
@@ -182,9 +182,9 @@ class SignalExecutor:
                     f"风控拦截终止: {stock_code} pending → failed",
                     stock_code=stock_code, reason=result['message'])
 
-            from services.notifications import get_notification_service
-            notification = get_notification_service()
-            await notification.emit(
+            from services.notifications import get_notification_manager
+            notification = get_notification_manager()
+            await notification.trigger(
                 event_type="order_rejected",
                 account_id=account_id,
                 payload={
@@ -230,9 +230,9 @@ class SignalExecutor:
             await self._update_watchlist_status(account_id, stock_code, 'sold')
             await self._update_signal_status(account_id, stock_code, 'executed', result['quantity'])
 
-            from services.notifications import get_notification_service
-            notification = get_notification_service()
-            await notification.emit(
+            from services.notifications import get_notification_manager
+            notification = get_notification_manager()
+            await notification.trigger(
                 event_type="trade_executed",
                 account_id=account_id,
                 payload={
@@ -252,9 +252,9 @@ class SignalExecutor:
                                         stock_code=stock_code, reason=result['message'])
             await self._update_signal_status(account_id, stock_code, 'cancelled', 0)
 
-            from services.notifications import get_notification_service
-            notification = get_notification_service()
-            await notification.emit(
+            from services.notifications import get_notification_manager
+            notification = get_notification_manager()
+            await notification.trigger(
                 event_type="order_rejected",
                 account_id=account_id,
                 payload={

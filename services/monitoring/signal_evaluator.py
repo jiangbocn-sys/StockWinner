@@ -566,15 +566,38 @@ class SignalEvaluator:
         def _get_realtime_quote_sync(sc):
             return stock
 
+        today = get_china_time().strftime("%Y-%m-%d")
+        from services.common.database import query_kline_db
+        from services.common.price_adjuster import adjust_klines as _adjust_klines
+
+        # 构建与回测兼容的 context：stocks 列表 + query_kline_db + current_date
         context = {
-            "account_id": account_id, "stock_code": stock_code,
+            # 新版兼容字段（与回测一致）
+            "stocks": [{
+                "stock_code": stock_code,
+                "stock_name": stock.get("stock_name", stock_code),
+                "buy_price": stock.get("avg_cost", 0),
+                "buy_date": stock.get("buy_date", stock.get("created_at", "")),
+                "quantity": stock.get("quantity", 0),
+                "score": stock.get("score", 60),
+                "reduced_pct": stock.get("reduced_pct", 0) or 0,
+                "buy_pattern": stock.get("buy_pattern") or stock.get("details"),
+                "eval_price": current_price,
+                "ohlc_low": stock.get("low", current_price),
+            }],
+            "query_kline_db": query_kline_db,
+            "current_date": today,
+            "adjust_klines": _adjust_klines,
+            # 旧版兼容字段（策略可能仍在使用）
+            "account_id": account_id,
+            "stock_code": stock_code,
             "stock_name": stock.get("stock_name", stock_code),
             "current_price": current_price,
             "trigger_price": stock.get("trigger_price", 0),
             "stop_loss_price": stock.get("stop_loss_price", 0),
             "take_profit_price": stock.get("take_profit_price", 0),
             "kline_data": kline_data,
-            "today": get_china_time().strftime("%Y-%m-%d"),
+            "today": today,
             "get_kline_local": _get_kline_local,
             "get_realtime_quote": _get_realtime_quote_sync,
             "indicators": {
@@ -599,12 +622,17 @@ class SignalEvaluator:
             return {"should_sell": False, "reason": f"strategy_execution_error: {e}"}
 
         for signal in signals:
-            if signal.get("action") == "sell":
+            action = signal.get("action", "")
+            if action == "sell":
                 return {
                     "should_sell": True,
                     "reason": signal.get("reason", "sell_strategy_code"),
                     "stop_loss_price": signal.get("stop_loss_price", 0),
                     "take_profit_price": signal.get("take_profit_price", 0),
                 }
+            elif action == "hold":
+                get_logger("monitor").log_event("strategy_hold",
+                    f"策略 #{sell_strategy_id} 持有 {stock_code}: {signal.get('reason')}",
+                    strategy_id=sell_strategy_id, stock_code=stock_code)
 
         return {"should_sell": False, "reason": "no_sell_signal"}

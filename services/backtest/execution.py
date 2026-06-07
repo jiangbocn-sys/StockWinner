@@ -29,6 +29,8 @@ class Position:
     buy_date: str = ""  # 买入日期（用于 T+1 检查）
     highest_price: float = 0.0  # 最高价（用于移动止盈）
     total_cost: float = 0.0  # 总买入成本（含佣金），用于 pnl_pct 计算
+    buy_pattern: Optional[Dict] = None  # 选股策略的关键点位（p1,p2,p3,p4,b1,r等）
+    reduced_pct: float = 0.0  # 累计减仓比例（0~1），用于策略知悉已减仓状态
 
 
 @dataclass
@@ -47,6 +49,8 @@ class Trade:
     buy_date: str = ""
     buy_price: float = 0.0
     holding_days: int = 0
+    sell_quantity: int = 0  # 卖出数量
+    remaining_quantity: int = 0  # 卖出后剩余数量
 
 
 @dataclass
@@ -91,6 +95,7 @@ class BacktestExecutionEngine:
         date: str,
         stock_name: str = "",
         prev_close: float = 0.0,
+        buy_pattern: Optional[Dict] = None,  # 选股策略的关键点位
     ) -> Optional[Trade]:
         """
         模拟买入。
@@ -152,6 +157,7 @@ class BacktestExecutionEngine:
                 buy_date=date,
                 highest_price=fill_price,
                 total_cost=cost,
+                buy_pattern=buy_pattern,  # 保存选股策略关键点位
             )
 
         trade = Trade(
@@ -214,6 +220,9 @@ class BacktestExecutionEngine:
 
         self.cash += revenue
 
+        sell_qty = pos.quantity  # 全部卖出
+        remaining_qty = 0  # 卖出后剩余
+
         trade = Trade(
             stock_code=stock_code,
             stock_name=pos.stock_name,
@@ -228,6 +237,8 @@ class BacktestExecutionEngine:
             buy_date=pos.buy_date,
             buy_price=pos.avg_cost,
             holding_days=holding_days,
+            sell_quantity=sell_qty,
+            remaining_quantity=remaining_qty,
         )
         self.trades.append(trade)
 
@@ -244,6 +255,102 @@ class BacktestExecutionEngine:
                 break
 
         del self.positions[stock_code]
+        return trade
+
+    def sell_partial(
+        self,
+        stock_code: str,
+        price: float,
+        sell_quantity: int,
+        date: str,
+        reason: str = "",
+        prev_close: float = 0.0,
+    ) -> Optional[Trade]:
+        """
+        部分卖出（减仓）。
+
+        Args:
+            sell_quantity: 要卖出的数量（不是剩余数量）
+
+        Returns:
+            Trade 记录，或 None（如果无法卖出）
+        """
+        if stock_code not in self.positions:
+            return None
+
+        pos = self.positions[stock_code]
+        if pos.quantity <= 0:
+            return None
+
+        # T+1 检查
+        if pos.buy_date == date:
+            return None  # 今日买入不可卖
+
+        if price <= 0:
+            return None
+
+        # 涨跌停检查
+        if prev_close > 0:
+            limit_down = prev_close * 0.90
+            if price <= limit_down:
+                return None  # 跌停无法卖出
+
+        # 数量检查：必须是 100 的整数倍
+        if sell_quantity >= pos.quantity:
+            # 全部卖出，调用 sell 方法
+            return self.sell(stock_code, price, date, reason, prev_close)
+
+        # 调整为 100 的整数倍
+        sell_quantity = (sell_quantity // 100) * 100
+        if sell_quantity < 100:
+            return None  # 不足 100 股
+
+        # 滑点
+        fill_price = price * (1 - self.slippage_pct)
+
+        # 计算费用
+        revenue, commission = self._calc_sell_revenue(fill_price, sell_quantity)
+
+        # 部分卖出的成本比例
+        cost_ratio = sell_quantity / pos.quantity
+        partial_cost = pos.total_cost * cost_ratio
+
+        # 执行部分卖出
+        pnl = revenue - partial_cost
+        pnl_pct = (pnl / partial_cost * 100) if partial_cost > 0 else 0
+        holding_days = self._days_between(pos.buy_date, date)
+
+        remaining_qty = pos.quantity - sell_quantity  # 卖出后剩余数量
+
+        self.cash += revenue
+
+        # 更新持仓
+        pos.quantity -= sell_quantity
+        pos.total_cost -= partial_cost
+        # avg_cost 保持不变
+
+        trade = Trade(
+            stock_code=stock_code,
+            stock_name=pos.stock_name,
+            trade_type="sell",
+            date=date,
+            price=fill_price,
+            quantity=sell_quantity,
+            commission=commission,
+            pnl=pnl,
+            pnl_pct=pnl_pct,
+            reason=reason,
+            buy_date=pos.buy_date,
+            buy_price=pos.avg_cost,
+            holding_days=holding_days,
+            sell_quantity=sell_quantity,
+            remaining_quantity=remaining_qty,
+        )
+        self.trades.append(trade)
+
+        # 更新累计减仓比例
+        pos.reduced_pct += cost_ratio
+
         return trade
 
     def update_position_mark(self, stock_code: str, price: float):

@@ -27,6 +27,7 @@ async def create_backtest_run(
     {
         "name": "回测名称",
         "strategy_id": 1,  // 可选
+        "trading_strategy_ids": [87, 35],  // 可选，交易策略ID列表
         "mode": "simulated",  // simulated | return_accumulation
         "start_date": "2024-01-01",
         "end_date": "2024-12-31",
@@ -77,6 +78,7 @@ async def create_backtest_run(
     name = body.get("name", "未命名回测")
     description = body.get("description", "")
     strategy_id = body.get("strategy_id")
+    trading_strategy_ids = body.get("trading_strategy_ids")  # 交易策略ID列表
     mode = body.get("mode", "simulated")
     start_date = body.get("start_date")
     end_date = body.get("end_date")
@@ -86,7 +88,7 @@ async def create_backtest_run(
     group_ids = body.get("group_ids")
     config = body.get("config", {})
 
-    # 如果指定了候选组，解析为股票代码
+    # 如果指定了候选组，解析为股票代码（并剔除ST/退市）
     if group_ids:
         placeholders = ",".join(["?"] * len(group_ids))
         rows = await db.fetchall(
@@ -203,6 +205,9 @@ async def create_backtest_run(
     if pool_schedule is not None:
         await db.execute("UPDATE backtest_runs SET pool_schedule = ? WHERE id = ?",
                          (json.dumps(pool_schedule), run_id))
+    if trading_strategy_ids is not None:
+        await db.execute("UPDATE backtest_runs SET trading_strategy_ids = ? WHERE id = ?",
+                         (json.dumps(trading_strategy_ids), run_id))
 
     # 使用子进程模式执行回测（完全隔离，不阻塞主事件循环）
     import asyncio
@@ -241,6 +246,7 @@ async def create_backtest_run(
                 stop_loss_pct=strategy_config.get("stop_loss_pct"),
                 take_profit_pct=strategy_config.get("take_profit_pct"),
                 trailing_stop_pct=strategy_config.get("trailing_stop_pct"),
+                trading_strategy_ids=trading_strategy_ids,
             )
         except Exception as e:
             logger.error("backtest", f"子进程回测异常 (run_id={run_id}): {e}")
@@ -304,7 +310,7 @@ async def list_backtest_runs(
     result = []
     for run in runs:
         r = dict(run)
-        for json_key in ("config", "data_gap_report", "result_summary", "markets", "group_ids", "stock_pool", "pool_schedule"):
+        for json_key in ("config", "data_gap_report", "result_summary", "markets", "group_ids", "stock_pool", "pool_schedule", "trading_strategy_ids"):
             if r.get(json_key):
                 try:
                     r[json_key] = json.loads(r[json_key])
@@ -339,7 +345,7 @@ async def get_backtest_run(
         raise HTTPException(status_code=404, detail="回测任务不存在")
 
     r = dict(run)
-    for json_key in ("config", "data_gap_report", "result_summary", "markets", "group_ids", "stock_pool", "pool_schedule"):
+    for json_key in ("config", "data_gap_report", "result_summary", "markets", "group_ids", "stock_pool", "pool_schedule", "trading_strategy_ids"):
         if r.get(json_key):
             try:
                 r[json_key] = json.loads(r[json_key])
@@ -555,6 +561,7 @@ async def retry_backtest_run(
 
     stock_pool = json.loads(run["stock_pool"]) if run.get("stock_pool") else None
     pool_schedule = json.loads(run["pool_schedule"]) if run.get("pool_schedule") else None
+    trading_strategy_ids = json.loads(run["trading_strategy_ids"]) if run.get("trading_strategy_ids") else None
 
     # 如果 pool_schedule 只有 group_ids，需要重新解析为 stock_codes
     if pool_schedule:
@@ -605,6 +612,7 @@ async def retry_backtest_run(
                 stop_loss_pct=run.get("stop_loss_pct"),
                 take_profit_pct=run.get("take_profit_pct"),
                 trailing_stop_pct=run.get("trailing_stop_pct"),
+                trading_strategy_ids=trading_strategy_ids,
             )
         except Exception as e:
             logger.error("backtest", f"重试任务 {run_id} 子进程异常: {e}")

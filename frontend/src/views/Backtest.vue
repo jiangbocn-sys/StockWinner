@@ -30,10 +30,19 @@
               </el-form-item>
             </el-col>
             <el-col :span="8">
-              <el-form-item label="选择策略">
+              <el-form-item label="选股策略">
                 <el-tooltip content="可选。选择后使用该策略的买入条件和止盈止损参数；不选则使用下方手动配置" placement="top">
                   <el-select v-model="form.strategy_id" placeholder="可选" clearable style="width: 100%">
                     <el-option v-for="s in strategies" :key="s.id" :label="s.name" :value="s.id" />
+                  </el-select>
+                </el-tooltip>
+              </el-form-item>
+            </el-col>
+            <el-col :span="8">
+              <el-form-item label="交易策略">
+                <el-tooltip content="可选。卖出信号策略，用于判断持仓何时卖出。支持多选，按顺序执行" placement="top">
+                  <el-select v-model="form.trading_strategy_ids" multiple placeholder="可选（卖出策略）" clearable style="width: 100%">
+                    <el-option v-for="s in tradingStrategies" :key="s.id" :label="s.name" :value="s.id" />
                   </el-select>
                 </el-tooltip>
               </el-form-item>
@@ -460,22 +469,25 @@
             <el-table-column prop="stock_code" label="股票代码" width="110" />
             <el-table-column prop="stock_name" label="股票名称" width="100" />
             <el-table-column label="买入日期" width="110">
-              <template #default="{ row }">{{ row.buy_date }}</template>
+              <template #default="{ row }">{{ row.buy_date || '-' }}</template>
+            </el-table-column>
+            <el-table-column label="买入数量" width="90">
+              <template #default="{ row }">{{ row.buy_quantity || '-' }}</template>
             </el-table-column>
             <el-table-column label="买入价格" width="90">
-              <template #default="{ row }">{{ row.buy_price?.toFixed(2) }}</template>
+              <template #default="{ row }">{{ row.buy_price?.toFixed(2) || '-' }}</template>
             </el-table-column>
             <el-table-column label="卖出日期" width="110">
               <template #default="{ row }">{{ row.sell_date || '-' }}</template>
             </el-table-column>
+            <el-table-column label="卖出数量" width="90">
+              <template #default="{ row }">{{ row.sell_quantity || '-' }}</template>
+            </el-table-column>
+            <el-table-column label="剩余持仓" width="90">
+              <template #default="{ row }">{{ row.remaining_quantity || '-' }}</template>
+            </el-table-column>
             <el-table-column label="卖出价格" width="90">
               <template #default="{ row }">{{ row.sell_price?.toFixed(2) || '-' }}</template>
-            </el-table-column>
-            <el-table-column label="买入佣金" width="90">
-              <template #default="{ row }">{{ row.buy_commission?.toFixed(2) || '-' }}</template>
-            </el-table-column>
-            <el-table-column label="卖出费用" width="90">
-              <template #default="{ row }">{{ row.sell_commission?.toFixed(2) || '-' }}</template>
             </el-table-column>
             <el-table-column label="盈亏(%)" width="100">
               <template #default="{ row }">
@@ -567,6 +579,7 @@ const form = ref({
   name: '',
   mode: 'simulated',
   strategy_id: null,
+  trading_strategy_ids: [],
   start_date: '2024-01-01',
   end_date: '2025-12-31',
   initial_capital: 1000000,
@@ -585,6 +598,7 @@ const form = ref({
 const candidateGroups = ref([])
 
 const strategies = ref([])
+const tradingStrategies = ref([])
 const history = ref([])
 const running = ref(false)
 const loadingHistory = ref(false)
@@ -665,7 +679,10 @@ const loadStrategies = async () => {
   try {
     const res = await fetch(`/api/v1/ui/${currentAccountId.value}/strategies`)
     const data = await res.json()
-    strategies.value = data.strategies || []
+    const allStrategies = data.strategies || []
+    // 分类：选股策略（screening）和交易策略（trading）
+    strategies.value = allStrategies.filter(s => s.code_scope === 'screening' || !s.code_scope)
+    tradingStrategies.value = allStrategies.filter(s => s.code_scope === 'trading')
   } catch (e) {
     console.error('加载策略失败:', e)
   }
@@ -835,6 +852,7 @@ const handleStartBacktest = async () => {
       name: form.value.name || `回测 ${form.value.start_date} ~ ${form.value.end_date}`,
       mode: form.value.mode,
       strategy_id: form.value.strategy_id,
+      trading_strategy_ids: form.value.trading_strategy_ids.length > 0 ? form.value.trading_strategy_ids : null,
       start_date: form.value.start_date,
       end_date: form.value.end_date,
       initial_capital: form.value.initial_capital,
@@ -1305,6 +1323,7 @@ const handleRowDblclick = async (row) => {
     form.value.name = run.name || ''
     form.value.mode = run.mode || 'simulated'
     form.value.strategy_id = run.strategy_id || null
+    form.value.trading_strategy_ids = run.trading_strategy_ids || []
     form.value.start_date = run.start_date || '2024-01-01'
     form.value.end_date = run.end_date || '2025-12-31'
     form.value.initial_capital = run.initial_capital || 1000000

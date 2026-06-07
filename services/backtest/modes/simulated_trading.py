@@ -18,6 +18,7 @@ from services.backtest.metrics import PerformanceMetrics, BacktestResult
 from services.screening.condition_parser import get_condition_parser, normalize_conditions
 from services.factors.kline_manager import get_kline_manager
 from services.common.technical_indicators import calculate_indicators_for_screening
+from services.common.price_adjuster import adjust_klines
 from services.common.structured_logger import get_logger
 
 logger = get_logger("backtest")
@@ -43,6 +44,8 @@ class SimulatedTradingEngine:
         initial_positions: Optional[List[Dict]] = None,
         initial_cash: Optional[float] = None,
         liquidate_at_end: bool = True,
+        trading_strategy_ids: Optional[List[int]] = None,
+        trading_strategies: Optional[List[Dict]] = None,  # 预加载的策略代码
     ):
         self.strategy_config = strategy_config
         self.initial_capital = initial_capital
@@ -57,6 +60,7 @@ class SimulatedTradingEngine:
         self.initial_cash = initial_cash  # 分段回测用：上一段继承的现金
         self.liquidate_at_end = liquidate_at_end  # 是否在段末清仓
         self._pending_signals: List[Dict] = []  # 当日策略信号，次日执行
+        self._trading_strategies: List[Dict] = []  # 交易策略列表（卖出信号）
 
         # 策略类型检测
         self.is_code_strategy = strategy_config.get("strategy_type") == "python"
@@ -69,6 +73,14 @@ class SimulatedTradingEngine:
 
         # 买入条件（配置型策略用）
         self.buy_conditions = self._extract_buy_conditions(strategy_config) if not self.is_code_strategy else None
+
+        # 加载交易策略（卖出信号策略）
+        # 如果传入预加载的策略代码，直接使用（避免子进程访问数据库）
+        if trading_strategies:
+            self._trading_strategies = trading_strategies
+        elif trading_strategy_ids:
+            # 主进程模式下从数据库加载
+            self._load_trading_strategies(trading_strategy_ids)
 
         # 撮合引擎
         self.execution = BacktestExecutionEngine(
@@ -181,7 +193,9 @@ class SimulatedTradingEngine:
             try:
                 self._step(trade_date)
             except Exception as e:
-                logger.warn("backtest", f"回测日 {trade_date} 处理失败: {e}")
+                import traceback
+                tb = traceback.format_exc()
+                logger.warn("backtest", f"回测日 {trade_date} 处理失败: {e}\n{tb}")
 
             # 进度回调（传入当前交易日）
             if progress_callback:
@@ -232,7 +246,11 @@ class SimulatedTradingEngine:
         self._execute_pending_buys(trade_date, prices, ohlc_data)
 
         # 3. 检查持仓卖出信号
+        position_count_before = self.execution.get_position_count()
+        logger.log_event("backtest_step", f"date={trade_date}, positions_before_sell={position_count_before}, trading_strategies={len(self._trading_strategies)}")
         self._check_sell_signals(trade_date, prices, ohlc_data)
+        position_count_after = self.execution.get_position_count()
+        logger.log_event("backtest_sell_done", f"date={trade_date}, positions_after_sell={position_count_after}, sold={position_count_before - position_count_after}")
 
         # 4. 更新持仓标记价格（移动止盈用）
         for code, price in prices.items():
@@ -268,6 +286,7 @@ class SimulatedTradingEngine:
     def _check_sell_signals(self, trade_date: str, prices: Dict[str, float], ohlc_data: Dict[str, Dict[str, float]]):
         """检查持仓的卖出信号"""
         codes_to_check = list(self.execution.positions.keys())
+        print(f"[CHECK_SELL_SIGNALS] date={trade_date}, positions={len(codes_to_check)}, trading_strategies={len(self._trading_strategies)}")
 
         for code in codes_to_check:
             if code not in self.execution.positions:
@@ -278,24 +297,66 @@ class SimulatedTradingEngine:
             ohlc = ohlc_data.get(code, {})
             prev_close = self._get_prev_close(code, trade_date)
 
-            # Priority 1: 固定止盈止损
+            print(f"[CHECK_SELL_SIGNALS] code={code}, buy_date={pos.buy_date}, price={price:.2f}, cost={pos.avg_cost:.2f}")
+
+            # Priority 1: 交易策略卖出信号（用户策略优先）
+            if self._check_trading_strategy_sell(code, price, pos, trade_date, prev_close, ohlc):
+                print(f"[CHECK_SELL_SIGNALS] 交易策略卖出触发: {code}")
+                continue
+
+            # Priority 2: 固定止盈止损（风控兜底）
             if self._check_fixed_stop(code, price, pos, trade_date, prev_close, ohlc):
                 continue
 
-            # Priority 2: 移动止盈
+            # Priority 3: 移动止盈（风控兜底）
             if self._check_trailing_stop(code, price, pos, trade_date, prev_close, ohlc):
                 continue
 
-            # Priority 3: 策略代码型卖出信号
+            # Priority 4: 选股策略卖出信号
             if self._check_strategy_sell(code, price, pos, trade_date, prev_close):
                 continue
+
+    @staticmethod
+    def _adjust_klines_wrapper(klines, stock_code):
+        """策略沙箱中的K线复权包装函数"""
+        return adjust_klines(klines, stock_code)
+
+    @staticmethod
+    def _auto_adjust_query_result(rows, sql_lower, params):
+        """自动对K线查询结果进行复权。
+
+        检测条件：SQL 中包含 kline_data 或 weekly_kline_data，
+        且 params[0] 是单个股票代码（非 IN 批量查询）。
+        """
+        if not rows or not params:
+            return rows
+        if "kline_data" not in sql_lower and "weekly_kline_data" not in sql_lower:
+            return rows
+        # 批量查询（IN 子句）跳过自动复权
+        if " in " in sql_lower and "(" in sql_lower:
+            return rows
+        stock_code = params[0]
+        if not isinstance(stock_code, str) or "." not in stock_code:
+            return rows
+        date_field = "week_start_date" if "weekly_kline_data" in sql_lower else "trade_date"
+        return adjust_klines(rows, stock_code, date_field=date_field)
 
     def _check_fixed_stop(
         self, code: str, price: float, pos: Position,
         date: str, prev_close: float, ohlc: Optional[Dict] = None
     ) -> bool:
         """固定止盈止损检查"""
-        if self.stop_loss_pct is not None:
+        # 检查策略是否标记为"继续持有"（跳过固定止损和固定止盈）
+        if getattr(pos, '_strategy_hold', False):
+            debug_file = "/tmp/backtest_debug.log"
+            with open(debug_file, "a") as f:
+                f.write(f"[FIXED_STOP_SKIPPED] code={code}, reason=策略标记继续持有\n")
+            # 清除标记（仅对当日有效）
+            delattr(pos, '_strategy_hold')
+            return False
+
+        # 只有参数 > 0 时才启用止损止盈
+        if self.stop_loss_pct is not None and self.stop_loss_pct > 0:
             stop_price = pos.avg_cost * (1 - self.stop_loss_pct)
             if ohlc and self.stop_execution_price == "trigger":
                 low = ohlc.get("low", price)
@@ -307,7 +368,7 @@ class SimulatedTradingEngine:
                 self.execution.sell(code, price, date, reason="止损", prev_close=prev_close)
                 return True
 
-        if self.take_profit_pct is not None:
+        if self.take_profit_pct is not None and self.take_profit_pct > 0:
             take_price = pos.avg_cost * (1 + self.take_profit_pct)
             if ohlc and self.stop_execution_price == "trigger":
                 high = ohlc.get("high", price)
@@ -326,7 +387,8 @@ class SimulatedTradingEngine:
         date: str, prev_close: float, ohlc: Optional[Dict] = None
     ) -> bool:
         """移动止盈：最高价须先超过成本价 × (1 + 阈值) 才生效"""
-        if self.trailing_stop_pct is None:
+        # 只有参数 > 0 时才启用移动止盈
+        if self.trailing_stop_pct is None or self.trailing_stop_pct <= 0:
             return False
 
         # 更新当日最高价（用 OHLC 的 high 如果可用）
@@ -438,6 +500,7 @@ class SimulatedTradingEngine:
                 "trigger_price": candidate.get("trigger_price", 0),  # 策略建议买入价
                 "stop_loss_pct": candidate.get("stop_loss_pct", 0.05),
                 "take_profit_pct": candidate.get("take_profit_pct", 0.15),
+                "buy_pattern": candidate.get("details"),  # 选股策略关键点位（直接传递details）
             })
 
     def _execute_pending_buys(self, trade_date: str, prices: Dict[str, float],
@@ -463,8 +526,8 @@ class SimulatedTradingEngine:
             if not ohlc:
                 continue
 
-            trigger = sig.get("trigger_price", 0)
-            signal_price = sig.get("signal_price", 0)
+            trigger = sig.get("trigger_price") or 0
+            signal_price = sig.get("signal_price") or 0
 
             if self.stop_execution_price == "trigger" and trigger > 0:
                 low = ohlc.get("low", trigger)
@@ -487,6 +550,7 @@ class SimulatedTradingEngine:
                 date=trade_date,
                 stock_name=sig.get("stock_name", code),
                 prev_close=prev_close,
+                buy_pattern=sig.get("buy_pattern"),  # 传递选股策略关键点位
             )
             executed.append(code)
 
@@ -581,6 +645,7 @@ class SimulatedTradingEngine:
                 "stock_name": signal.get("stock_name", code),
                 "stop_loss_pct": signal.get("stop_loss_pct", 0.05),
                 "take_profit_pct": signal.get("take_profit_pct", 0.15),
+                "details": signal.get("details"),  # 选股策略输出的特征数据
             })
 
         return candidates
@@ -880,6 +945,112 @@ class SimulatedTradingEngine:
         def _kronos_predict(df_hist, pred_len=5, future_dates=None, **kwargs):
             return kronos_service.predict(df_hist, pred_len=pred_len, future_dates=future_dates, **kwargs)
 
+        # 回测用数据库查询函数（截断到 trade_date）
+        def _query_kline_db(sql: str, params: tuple = None):
+            """回测用K线数据库查询，自动截断到 trade_date
+
+            对于包含 trade_date/week_start_date 的查询，自动添加日期截断条件。
+            正确处理 LIMIT 子句：在 SQL 中添加日期过滤后执行，而非后置过滤。
+            """
+            import re
+            from services.common.database import get_sync_connection
+            conn = get_sync_connection("kline")
+            cursor = conn.cursor()
+
+            sql_upper = sql.strip().upper()
+
+            if not sql_upper.startswith("SELECT"):
+                # 非 SELECT 查询
+                if params:
+                    cursor.execute(sql, params)
+                else:
+                    cursor.execute(sql)
+                return cursor.rowcount
+
+            # 检查是否有日期字段
+            sql_lower = sql.lower()
+            has_trade_date = "trade_date" in sql_lower
+            has_week_start_date = "week_start_date" in sql_lower
+
+            if not (has_trade_date or has_week_start_date):
+                # 无日期字段的查询，直接执行
+                if params:
+                    cursor.execute(sql, params)
+                else:
+                    cursor.execute(sql)
+                return [dict(r) for r in cursor.fetchall()]
+
+            # 有日期字段，需要修改 SQL 添加截断条件
+            # 检测日期字段名称
+            date_field = "week_start_date" if has_week_start_date else "trade_date"
+
+            # 提取 LIMIT 子句
+            limit_match = re.search(r'\bLIMIT\s+(\d+)', sql_upper)
+            limit_count = int(limit_match.group(1)) if limit_match else None
+
+            # 构建新的 SQL：添加日期截断 WHERE 条件
+            # 检查是否已有 WHERE 子句
+            where_match = re.search(r'\bWHERE\b', sql_upper)
+            order_match = re.search(r'\bORDER\s+BY\b', sql_upper)
+            limit_match_pos = re.search(r'\bLIMIT\b', sql_upper)
+
+            if where_match:
+                # 已有 WHERE，添加 AND 条件
+                # 找到 WHERE 后面第一个关键字（ORDER BY 或 LIMIT 或结尾）
+                where_end = where_match.end()
+                next_clause_pos = len(sql)
+                for m in [order_match, limit_match_pos]:
+                    if m and m.start() > where_end:
+                        next_clause_pos = min(next_clause_pos, m.start())
+
+                # 在 WHERE 条件后插入 AND
+                before_where = sql[:where_end]
+                after_where_clause = sql[where_end:next_clause_pos]
+                rest = sql[next_clause_pos:]
+
+                # 确保格式正确：添加 AND 和日期条件
+                insert_pos = where_end + len(after_where_clause.rstrip())
+                new_sql = sql[:insert_pos] + f" AND {date_field} <= '{trade_date}'" + sql[insert_pos:]
+            else:
+                # 没有 WHERE，需要添加 WHERE
+                # 找到 ORDER BY 或 LIMIT 或结尾的位置
+                insert_pos = len(sql)
+                for m in [order_match, limit_match_pos]:
+                    if m:
+                        insert_pos = min(insert_pos, m.start())
+
+                new_sql = sql[:insert_pos] + f" WHERE {date_field} <= '{trade_date}'" + sql[insert_pos:]
+
+            # 执行修改后的 SQL
+            if params:
+                cursor.execute(new_sql, params)
+            else:
+                cursor.execute(new_sql)
+
+            rows = [dict(r) for r in cursor.fetchall()]
+
+            # 如果原 SQL 有 LIMIT 但我们没有保留它，需要截取
+            if limit_count and len(rows) > limit_count:
+                rows = rows[:limit_count]
+
+            # 自动复权：K线查询自动应用后复权
+            rows = SimulatedTradingEngine._auto_adjust_query_result(rows, sql_lower, params)
+
+            return rows
+
+        def _query_db(sql: str, params: tuple = None):
+            """回测用stockwinner数据库查询"""
+            from services.common.database import get_sync_connection
+            conn = get_sync_connection("stockwinner")
+            cursor = conn.cursor()
+            if params:
+                cursor.execute(sql, params)
+            else:
+                cursor.execute(sql)
+            if sql.strip().upper().startswith("SELECT"):
+                return [dict(r) for r in cursor.fetchall()]
+            return cursor.rowcount
+
         context = {
             "stocks": [
                 {"stock_code": sc, "stock_name": self._stock_name_map.get(sc, sc)}
@@ -908,11 +1079,291 @@ class SimulatedTradingEngine:
             },
             "kronos_predict": _kronos_predict,
             "kronos_available": kronos_service.is_available,
+            "query_kline_db": _query_kline_db,
+            "query_db": _query_db,
         }
 
-        # 导入公共数据库查询函数（用于 context 传递）
-        from services.common.database import query_kline_db, query_db
-        context["query_db"] = query_db
-        context["query_kline_db"] = query_kline_db
-
         return context
+
+    def _load_trading_strategies(self, trading_strategy_ids: List[int]) -> None:
+        """从数据库加载交易策略代码"""
+        # 写入调试文件
+        debug_file = "/tmp/backtest_debug.log"
+        with open(debug_file, "a") as f:
+            f.write(f"[LOAD_TRADING_STRATEGIES] 开始加载交易策略, ids={trading_strategy_ids}\n")
+
+        if not trading_strategy_ids:
+            self._trading_strategies = []
+            with open(debug_file, "a") as f:
+                f.write(f"[LOAD_TRADING_STRATEGIES] 无交易策略ID，跳过\n")
+            return
+
+        from services.common.database import get_sync_connection
+        conn = get_sync_connection("stockwinner")
+        cursor = conn.cursor()
+
+        placeholders = ",".join(["?"] * len(trading_strategy_ids))
+        cursor.execute(
+            f"SELECT id, name, code, function_name FROM strategies WHERE id IN ({placeholders}) AND code_scope = 'trading'",
+            trading_strategy_ids
+        )
+
+        self._trading_strategies = []
+        for row in cursor.fetchall():
+            strategy = {
+                "id": row[0],
+                "name": row[1],
+                "code": row[2],
+                "function_name": row[3] or "run",
+            }
+            self._trading_strategies.append(strategy)
+            with open(debug_file, "a") as f:
+                code_preview = row[2][:100] if row[2] else "EMPTY"
+                f.write(f"[LOAD_TRADING_STRATEGIES] 加载策略: id={row[0]}, name={row[1]}, code_len={len(row[2]) if row[2] else 0}, preview={code_preview}\n")
+        conn.close()
+        with open(debug_file, "a") as f:
+            f.write(f"[LOAD_TRADING_STRATEGIES] 已加载 {len(self._trading_strategies)} 个交易策略\n")
+        logger.log_event("trading_strategies_loaded", f"已加载 {len(self._trading_strategies)} 个交易策略")
+
+    def _check_trading_strategy_sell(
+        self, code: str, price: float, pos: Position,
+        date: str, prev_close: float, ohlc: Optional[Dict] = None
+    ) -> bool:
+        """调用交易策略检查卖出信号"""
+        debug_file = "/tmp/backtest_debug.log"
+        with open(debug_file, "a") as f:
+            f.write(f"[CHECK_TRADING_STRATEGY] code={code}, date={date}, strategies={len(self._trading_strategies)}\n")
+            f.write(f"[BUY_PATTERN_CHECK] code={code}, pos.buy_pattern={pos.buy_pattern}\n")
+
+        if not self._trading_strategies:
+            with open(debug_file, "a") as f:
+                f.write(f"[CHECK_TRADING_STRATEGY] 无交易策略，跳过\n")
+            return False
+
+        logger.log_event("trading_strategy_check", f"code={code}, date={date}, strategies={len(self._trading_strategies)}")
+
+        # 计算触发止损的有效价格（考虑trigger模式用最低价）
+        stop_price = pos.avg_cost * (1 - (self.stop_loss_pct or 0.05))
+        if ohlc and self.stop_execution_price == "trigger":
+            low = ohlc.get("low", price)
+            eval_price = low if low <= stop_price else price
+        else:
+            eval_price = price
+
+        # 构造 context
+        stocks = [{
+            "stock_code": pos.stock_code,
+            "stock_name": pos.stock_name,
+            "buy_date": pos.buy_date,
+            "buy_price": pos.avg_cost,
+            "quantity": pos.quantity,
+            "score": 60,  # 默认值
+            "reduced_pct": pos.reduced_pct,  # 累计减仓比例
+            "buy_pattern": pos.buy_pattern,  # 选股策略关键点位（用于形态验证）
+            "eval_price": eval_price,  # 止损评估用价格（trigger模式=最低价，否则=收盘价）
+            "ohlc_low": ohlc.get("low", price) if ohlc else price,  # 当日最低价
+            "ohlc_high": ohlc.get("high", price) if ohlc else price,  # 当日最高价
+        }]
+
+        # 创建截断到回测日期的 query_kline_db 函数
+        def _query_kline_db_truncated(sql: str, params: tuple = None):
+            """回测用K线数据库查询，自动截断到回测日期"""
+            import re
+            from services.common.database import get_sync_connection
+            conn = get_sync_connection("kline")
+            cursor = conn.cursor()
+
+            sql_upper = sql.strip().upper()
+
+            if not sql_upper.startswith("SELECT"):
+                if params:
+                    cursor.execute(sql, params)
+                else:
+                    cursor.execute(sql)
+                return cursor.rowcount
+
+            sql_lower = sql.lower()
+            has_trade_date = "trade_date" in sql_lower
+            has_week_start_date = "week_start_date" in sql_lower
+
+            if not (has_trade_date or has_week_start_date):
+                if params:
+                    cursor.execute(sql, params)
+                else:
+                    cursor.execute(sql)
+                rows = [dict(r) for r in cursor.fetchall()]
+                return rows
+
+            date_field = "week_start_date" if has_week_start_date else "trade_date"
+
+            # 检测并添加日期截断条件
+            where_match = re.search(r'\bWHERE\b', sql_upper)
+            order_match = re.search(r'\bORDER\s+BY\b', sql_upper)
+            limit_match_pos = re.search(r'\bLIMIT\b', sql_upper)
+
+            if where_match:
+                where_end = where_match.end()
+                next_clause_pos = len(sql)
+                for m in [order_match, limit_match_pos]:
+                    if m and m.start() > where_end:
+                        next_clause_pos = min(next_clause_pos, m.start())
+                insert_pos = where_end
+                after_where = sql[where_end:next_clause_pos].rstrip()
+                if after_where:
+                    insert_pos = where_end + len(after_where)
+                new_sql = sql[:insert_pos] + f" AND {date_field} <= '{date}'" + sql[insert_pos:]
+            else:
+                insert_pos = len(sql)
+                for m in [order_match, limit_match_pos]:
+                    if m:
+                        insert_pos = min(insert_pos, m.start())
+                new_sql = sql[:insert_pos] + f" WHERE {date_field} <= '{date}'" + sql[insert_pos:]
+
+            if params:
+                cursor.execute(new_sql, params)
+            else:
+                cursor.execute(new_sql)
+
+            rows = [dict(r) for r in cursor.fetchall()]
+
+            # 自动复权
+            sql_lower2 = sql.lower()
+            rows = SimulatedTradingEngine._auto_adjust_query_result(rows, sql_lower2, params)
+
+            # 写入调试文件
+            debug_file = "/tmp/backtest_debug.log"
+            with open(debug_file, "a") as f:
+                f.write(f"[QUERY_KLINE] sql={sql[:100]}..., params={params}, rows_count={len(rows)}\n")
+
+            return rows
+
+        context = {
+            "stocks": stocks,
+            "query_kline_db": _query_kline_db_truncated,  # 使用截断版本
+            "current_date": date,
+            "adjust_klines": self._adjust_klines_wrapper,  # K线复权处理
+        }
+
+        # 执行所有交易策略
+        for strategy in self._trading_strategies:
+            try:
+                signals = self._execute_trading_strategy(strategy, context)
+                debug_file = "/tmp/backtest_debug.log"
+                with open(debug_file, "a") as f:
+                    stop_price = pos.avg_cost * (1 - (self.stop_loss_pct or 0.05))
+                    engine_pnl = (price - pos.avg_cost) / pos.avg_cost * 100
+                    trigger = price <= stop_price
+                    f.write(f"[TRADING_STRATEGY_RESULT] 策略={strategy['name']}, code={code}, signals={len(signals)}\n")
+                    f.write(f"[PNL_DIAG] code={code}, engine_pnl={engine_pnl:.2f}%, engine_price={price:.4f}, cost={pos.avg_cost:.4f}, stop_price={stop_price:.4f}, trigger={trigger}, signals={len(signals)}\n")
+                    for s in signals:
+                        f.write(f"[TRADING_STRATEGY_SIGNAL] {s}\n")
+                logger.log_event("trading_strategy_signals", f"策略={strategy['name']}, code={code}, signals={len(signals)}, actions={[s.get('action') for s in signals]}")
+                for signal in signals:
+                    # 匹配股票：信号有 stock_code 则匹配，无则默认当前股票
+                    signal_code = signal.get("stock_code")
+                    if signal_code and signal_code != code and signal_code != pos.stock_code:
+                        continue  # 不匹配当前股票，跳过
+
+                    action = signal.get("action", "")
+                    if action == "hold":
+                        # hold 信号：阻止后续的固定止损，但允许其他策略继续检查
+                        # 返回 True 会跳过后续检查，返回 False 会继续执行固定止损
+                        # 这里记录日志但不返回 True，让其他策略（如移动止盈）有机会检查
+                        debug_file = "/tmp/backtest_debug.log"
+                        with open(debug_file, "a") as f:
+                            f.write(f"[TRADING_STRATEGY_HOLD] code={code}, reason={signal.get('reason', 'hold')}\n")
+                        logger.log_event("trading_strategy_hold", f"code={code}, reason={signal.get('reason', 'hold')}")
+                        # 设置标记，让固定止损跳过此股票
+                        setattr(pos, '_strategy_hold', True)
+                        return False  # 继续检查其他策略，但固定止损会检查 _strategy_hold 标记
+                    elif action in ("sell", "reduce_half", "reduce_30"):
+                        # 执行卖出或减仓
+                        reason = f"交易策略({strategy['name']}): {signal.get('reason', action)}"
+                        with open(debug_file, "a") as f:
+                            f.write(f"[TRADING_STRATEGY_SELL_TRIGGERED] code={code}, action={action}, reason={reason}\n")
+                        logger.log_event("trading_strategy_sell_triggered", f"code={code}, action={action}, reason={reason}")
+                        if action == "sell":
+                            self.execution.sell(code, price, date, reason=reason, prev_close=prev_close)
+                            return True
+                        elif action in ("reduce_half", "reduce_30"):
+                            # 减仓处理
+                            reduce_pct = 0.5 if action == "reduce_half" else 0.3
+                            new_qty = int(pos.quantity * (1 - reduce_pct))
+                            if new_qty > 0:
+                                # 使用 sell 方法部分卖出
+                                sell_qty = pos.quantity - new_qty
+                                self.execution.sell_partial(code, price, sell_qty, date, reason=reason, prev_close=prev_close)
+                                return True
+            except Exception as e:
+                import traceback
+                debug_file = "/tmp/backtest_debug.log"
+                with open(debug_file, "a") as f:
+                    f.write(f"[TRADING_STRATEGY_ERROR] 策略 {strategy['name']} 执行失败: {e}\n{traceback.format_exc()}\n")
+                logger.warn("backtest", f"交易策略执行失败 ({strategy['name']}, {code}): {e}")
+
+        return False
+
+    def _execute_trading_strategy(self, strategy: Dict, context: Dict) -> List[Dict]:
+        """在沙箱中执行交易策略代码"""
+        code = strategy.get("code", "")
+        function_name = strategy.get("function_name", "run")
+
+        if not code:
+            logger.log_event("trading_strategy_no_code", f"策略 {strategy.get('name')} 没有代码")
+            return []
+
+        # 写入调试文件 - 检查 context 内容
+        debug_file = "/tmp/backtest_debug.log"
+        with open(debug_file, "a") as f:
+            f.write(f"[EXECUTE_STRATEGY] name={strategy['name']}, context_keys={list(context.keys())}\n")
+            f.write(f"[EXECUTE_STRATEGY] stocks={len(context.get('stocks', []))}, query_kline_db={context.get('query_kline_db') is not None}\n")
+            # 打印 stocks 中的 buy_pattern 信息
+            for s in context.get("stocks", []):
+                f.write(f"[CONTEXT_STOCK] code={s.get('stock_code')}, buy_price={s.get('buy_price')}, buy_pattern={s.get('buy_pattern')}\n")
+
+        # 沙箱执行（与选股策略类似）
+        # 创建受限的 __import__，只允许导入安全模块
+        ALLOWED_MODULES = {"typing", "datetime", "collections", "math", "re", "time"}
+        def safe_import(name, *args, **kwargs):
+            if name in ALLOWED_MODULES:
+                return __import__(name, *args, **kwargs)
+            raise ImportError(f"模块 '{name}' 不允许在策略沙箱中导入")
+
+        safe_globals = {
+            "__builtins__": {
+                "abs": abs, "min": min, "max": max, "sum": sum, "len": len,
+                "round": round, "int": int, "float": float, "str": str,
+                "list": list, "dict": dict, "True": True, "False": False,
+                "None": None, "sorted": sorted, "enumerate": enumerate,
+                "range": range, "zip": zip, "map": map, "filter": filter,
+                "any": any, "all": all, "isinstance": isinstance,
+                "datetime": datetime,
+                "reversed": reversed,  # 添加 reversed 函数
+                "__import__": safe_import,  # 受限的导入函数
+            },
+            "datetime": datetime,
+            "List": List,
+            "Dict": Dict,
+        }
+
+        try:
+            debug_file2 = "/tmp/backtest_debug.log"
+            with open(debug_file2, "a") as f:
+                f.write(f"[EXEC_CODE] len={len(code)}, first200={code[:200]}\n")
+            exec(code, safe_globals)
+            func = safe_globals.get(function_name)
+            if func and callable(func):
+                result = func(context) or []
+                with open(debug_file, "a") as f:
+                    f.write(f"[EXECUTE_STRATEGY_RESULT] signals={len(result)}\n")
+                logger.log_event("trading_strategy_result", f"策略={strategy['name']}, stocks={len(context.get('stocks', []))}, signals={len(result)}")
+                return result
+            else:
+                logger.log_event("trading_strategy_no_func", f"策略 {strategy['name']} 没有找到函数 {function_name}")
+        except Exception as e:
+            import traceback
+            with open(debug_file, "a") as f:
+                f.write(f"[EXECUTE_STRATEGY_ERROR] {e}\n{traceback.format_exc()}\n")
+            logger.log_event("trading_strategy_error", f"策略 {strategy['name']} 执行失败: {e}\\n{traceback.format_exc()}")
+
+        return []

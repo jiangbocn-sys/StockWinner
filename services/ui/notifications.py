@@ -50,9 +50,9 @@ class NotificationChannel(BaseModel):
 @router.get("/api/v1/ui/{account_id}/notifications/config")
 async def get_notification_config(account_id: str):
     """获取通知配置"""
-    from services.notifications import get_notification_service
+    from services.notifications import get_notification_manager
 
-    svc = get_notification_service()
+    svc = get_notification_manager()
     config = await svc.get_config(account_id)
     return {"success": True, "data": config}
 
@@ -60,9 +60,9 @@ async def get_notification_config(account_id: str):
 @router.post("/api/v1/ui/{account_id}/notifications/config")
 async def save_notification_config(account_id: str, config: NotificationConfig):
     """保存通知配置"""
-    from services.notifications import get_notification_service
+    from services.notifications import get_notification_manager
 
-    svc = get_notification_service()
+    svc = get_notification_manager()
     config_id = await svc.save_config(account_id, config.model_dump())
     return {
         "success": True,
@@ -79,9 +79,9 @@ async def get_notification_history(
     event_type: Optional[str] = None,
 ):
     """获取通知历史"""
-    from services.notifications import get_notification_service
+    from services.notifications import get_notification_manager
 
-    svc = get_notification_service()
+    svc = get_notification_manager()
     history = await svc.get_history(account_id, limit=limit, offset=offset, event_type=event_type)
     return {"success": True, "data": history, "total": len(history)}
 
@@ -89,9 +89,9 @@ async def get_notification_history(
 @router.post("/api/v1/ui/{account_id}/notifications/test")
 async def send_test_notification(account_id: str):
     """发送测试通知"""
-    from services.notifications import get_notification_service
+    from services.notifications import get_notification_manager
 
-    svc = get_notification_service()
+    svc = get_notification_manager()
 
     # 获取配置
     config = await svc.get_config(account_id)
@@ -99,7 +99,7 @@ async def send_test_notification(account_id: str):
         raise HTTPException(status_code=404, detail="未配置通知渠道")
 
     # 发送测试通知
-    await svc.emit(
+    result = await svc.trigger_sync(
         event_type="task_completed",
         account_id=account_id,
         payload={
@@ -110,7 +110,11 @@ async def send_test_notification(account_id: str):
         },
     )
 
-    return {"success": True, "message": "测试通知已发送"}
+    return {
+        "success": result.get("sent", False),
+        "message": "测试通知已发送" if result.get("sent") else f"发送失败: {result.get('error', result.get('skipped_reason', '未知错误'))}",
+        "detail": result,
+    }
 
 
 # ==================== 规则配置 API ====================

@@ -437,6 +437,16 @@ class StrategyEngine:
         env["get_kline_smart"] = context.get("get_kline_smart", lambda *a, **k: {})
         env["get_kline_spliced"] = context.get("get_kline_spliced", lambda *a, **k: {})
 
+        # 注入 K线复权函数（显式调用版本）
+        from services.common.price_adjuster import adjust_klines as _adjust
+        def _adjust_klines_wrapper(klines, stock_code):
+            return _adjust(klines, stock_code)
+        env["adjust_klines"] = context.get("adjust_klines", _adjust_klines_wrapper)
+
+        # 注入不复权版本的 DB 查询（用于原始价格展示/K线弹窗）
+        from services.common.database import query_kline_db_raw as _qkdb_raw
+        env["query_kline_db_raw"] = context.get("query_kline_db_raw", _qkdb_raw)
+
         # 注入数据获取函数 — 实时/TGW（走 gateway → sdk_connection_manager 排队）
         # 注意：_get_kline 和 _get_market_data 是异步函数，策略代码中直接调用会返回协程对象
         env["get_market_data"] = context.get("get_market_data", lambda *a, **k: None)
@@ -490,6 +500,7 @@ class StrategyEngine:
             "take_profit_pct": item.get("take_profit_pct", 0.15),
             "reason": item.get("reason", ""),
             "expire_at": item.get("expire_at"),
+            "details": item.get("details"),  # 选股策略输出的特征数据
         }
 
     async def write_signals_to_watchlist(

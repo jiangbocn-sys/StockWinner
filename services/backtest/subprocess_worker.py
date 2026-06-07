@@ -32,6 +32,37 @@ load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 from services.common.structured_logger import get_logger
 
 
+def _reinit_logging_for_subprocess():
+    """子进程 fork 后重新初始化日志，修复 AsyncLogHandler 线程死亡问题。"""
+    import logging
+    from services.common.structured_logger import LOG_DIR
+
+    # 清除父进程继承的所有 handler（后台线程已死）
+    root = logging.getLogger("StockWinner")
+    for h in list(root.handlers):
+        root.removeHandler(h)
+
+    # 只在子进程中用同步 StreamHandler 写日志（不经过队列）
+    fmt = logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(fmt)
+    handler.setLevel(logging.INFO)
+    root.addHandler(handler)
+
+    # 同时写一份到日志文件
+    from logging.handlers import TimedRotatingFileHandler
+    file_handler = TimedRotatingFileHandler(
+        LOG_DIR / "stockwinner.log",
+        when="midnight", backupCount=10, encoding="utf-8",
+    )
+    file_handler.setFormatter(fmt)
+    file_handler.setLevel(logging.INFO)
+    root.addHandler(file_handler)
+
+
 def backtest_worker_process(
     run_id: int,
     strategy_config: Dict,
@@ -47,14 +78,12 @@ def backtest_worker_process(
     stop_loss_pct: Optional[float],
     take_profit_pct: Optional[float],
     trailing_stop_pct: Optional[float],
+    trading_strategies: Optional[list],  # 预加载的策略代码
     progress_queue: mp.Queue,
     result_queue: mp.Queue,
 ):
-    """
-    子进程中的回测执行函数。
-
-    参数通过主进程传入，结果通过队列返回。
-    """
+    """子进程中的回测执行函数。参数通过主进程传入，结果通过队列返回。"""
+    _reinit_logging_for_subprocess()
     logger = get_logger("backtest_worker")
     logger.log_event("backtest_worker_started", f"子进程启动: run_id={run_id}, PID={os.getpid()}")
 
@@ -86,6 +115,7 @@ def backtest_worker_process(
                 pass  # 队列满则忽略
 
         # 5. 执行回测（同步方法，不依赖主进程事件循环）
+        # 注意：is_subprocess=True 确保子进程不写数据库，避免 database locked
         if pool_schedule:
             # 分段回测
             result = engine._run_segmented_backtest_sync(
@@ -102,6 +132,8 @@ def backtest_worker_process(
                 stop_loss_pct=stop_loss_pct,
                 take_profit_pct=take_profit_pct,
                 trailing_stop_pct=trailing_stop_pct,
+                trading_strategies=trading_strategies,  # 预加载的策略
+                is_subprocess=True,  # 子进程模式：不写数据库
             )
         else:
             # 普通回测
@@ -119,6 +151,8 @@ def backtest_worker_process(
                 stop_loss_pct=stop_loss_pct,
                 take_profit_pct=take_profit_pct,
                 trailing_stop_pct=trailing_stop_pct,
+                trading_strategies=trading_strategies,  # 预加载的策略
+                is_subprocess=True,  # 子进程模式：不写数据库
             )
 
         # 6. 发送最终结果（包含 trades, nav_series, daily_positions）
@@ -158,6 +192,7 @@ def spawn_backtest_process(
     stop_loss_pct: Optional[float] = None,
     take_profit_pct: Optional[float] = None,
     trailing_stop_pct: Optional[float] = None,
+    trading_strategy_ids: Optional[list] = None,
 ) -> tuple:
     """
     启动回测子进程。
@@ -168,6 +203,27 @@ def spawn_backtest_process(
         - progress_queue: 进度更新队列
         - result_queue: 最终结果队列
     """
+    # 主进程预加载交易策略代码（避免子进程访问 stockwinner.db）
+    trading_strategies = []
+    if trading_strategy_ids:
+        from services.common.database import get_sync_connection
+        conn = get_sync_connection("stockwinner")
+        cursor = conn.cursor()
+        # 从 strategies 表加载当前有效的交易策略
+        placeholders = ",".join(["?"] * len(trading_strategy_ids))
+        cursor.execute(
+            f"SELECT id, name, code, function_name FROM strategies WHERE id IN ({placeholders}) AND code_scope = 'trading'",
+            trading_strategy_ids
+        )
+        for row in cursor.fetchall():
+            trading_strategies.append({
+                "id": row[0],
+                "name": row[1],
+                "code": row[2],
+                "function_name": row[3] or "run",
+            })
+        conn.close()
+
     # 创建队列
     progress_queue = mp.Queue(maxsize=100)  # 进度更新，避免阻塞
     result_queue = mp.Queue(maxsize=1)       # 最终结果，只存一条
@@ -190,6 +246,7 @@ def spawn_backtest_process(
             stop_loss_pct,
             take_profit_pct,
             trailing_stop_pct,
+            trading_strategies,  # 预加载的策略代码
             progress_queue,
             result_queue,
         ),
@@ -198,6 +255,120 @@ def spawn_backtest_process(
 
     process.start()
     return process, progress_queue, result_queue
+
+
+def _save_results_to_db_sync(run_id: int, result: Dict, benchmark_data: list):
+    """
+    保存回测结果到数据库（同步连接，批量写入，减少锁持有时间）
+
+    在主进程中执行，通过 asyncio.to_thread 调用。
+    """
+    from services.common.database import get_sync_connection
+    from services.common.timezone import get_china_time
+    from services.backtest.metrics import PerformanceMetrics
+    import json
+
+    trades = result.get("trades", [])
+    nav_series = result.get("nav_series", [])
+    daily_positions = result.get("daily_positions", [])
+    summary = result.get("result", {})
+
+    # 如果有基准数据，重新计算含对比的指标
+    if benchmark_data and nav_series and trades:
+        initial_capital = summary.get("initial_capital", 1000000)
+        first_date = nav_series[0]["trade_date"] if nav_series else ""
+        last_date = nav_series[-1]["trade_date"] if nav_series else ""
+        recomputed = PerformanceMetrics.compute(
+            nav_series=nav_series,
+            trades=trades,
+            initial_capital=initial_capital,
+            start_date=first_date,
+            end_date=last_date,
+            benchmark_series=benchmark_data,
+        )
+        summary = recomputed.to_dict()
+
+    conn = get_sync_connection("stockwinner")
+    cursor = conn.cursor()
+
+    try:
+        # 批量保存交易记录
+        for trade in trades:
+            if trade.get("trade_type") == "buy":
+                cursor.execute(
+                    """INSERT INTO backtest_trades
+                       (backtest_run_id, stock_code, stock_name, buy_date, buy_price,
+                        buy_quantity, remaining_quantity, buy_commission)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (run_id, trade["stock_code"], trade.get("stock_name", ""),
+                     trade["date"], trade["price"], trade["quantity"],
+                     trade["quantity"], trade.get("commission", 0))
+                )
+            elif trade.get("trade_type") == "sell":
+                sell_qty = trade.get("sell_quantity", trade.get("quantity", 0))
+                remaining_qty = trade.get("remaining_quantity", 0)
+                cursor.execute(
+                    """INSERT INTO backtest_trades
+                       (backtest_run_id, stock_code, stock_name, buy_date, buy_price,
+                        buy_quantity, buy_commission,
+                        sell_date, sell_price, sell_quantity, remaining_quantity,
+                        sell_commission, sell_reason, pnl, pnl_pct, holding_days)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (run_id, trade.get("stock_code", ""), trade.get("stock_name", ""),
+                     trade.get("buy_date", ""), trade.get("buy_price", 0),
+                     trade.get("quantity", 0), trade.get("buy_commission", 0),
+                     trade["date"], trade["price"], sell_qty, remaining_qty,
+                     trade.get("commission", 0), trade.get("reason", ""),
+                     trade.get("pnl", 0), trade.get("pnl_pct", 0), trade.get("holding_days", 0))
+                )
+
+        # 批量保存每日净值
+        for nav in nav_series:
+            cursor.execute(
+                """INSERT OR REPLACE INTO backtest_daily_nav
+                   (backtest_run_id, trade_date, nav, total_value, cash,
+                    positions_value, position_count, drawdown, max_drawdown, daily_return)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (run_id, nav["trade_date"], nav.get("nav", 1.0), nav.get("total_value", 0),
+                 nav.get("cash", 0), nav.get("positions_value", 0), nav.get("position_count", 0),
+                 nav.get("drawdown", 0), nav.get("max_drawdown", 0), nav.get("daily_return", 0))
+            )
+
+        # 批量保存每日持仓
+        cursor.execute("DELETE FROM backtest_daily_positions WHERE backtest_run_id = ?", (run_id,))
+        for pos in daily_positions:
+            cursor.execute(
+                """INSERT INTO backtest_daily_positions
+                   (backtest_run_id, trade_date, stock_code, stock_name,
+                    quantity, avg_cost, close_price, market_value, unrealized_pnl)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (run_id, pos["trade_date"], pos["stock_code"], pos.get("stock_name", ""),
+                 pos.get("quantity", 0), pos.get("avg_cost", 0), pos.get("close_price", 0),
+                 pos.get("market_value", 0), pos.get("unrealized_pnl", 0))
+            )
+
+        # 更新状态为完成
+        cursor.execute(
+            "UPDATE backtest_runs SET status = 'completed', completed_at = ?, result_summary = ? WHERE id = ?",
+            (get_china_time().isoformat(), json.dumps(summary, ensure_ascii=False), run_id)
+        )
+
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _mark_backtest_failed_sync(run_id: int, error_msg: str):
+    """同步函数：标记回测失败（通过 asyncio.to_thread 调用）"""
+    from services.common.database import get_sync_connection
+    from services.common.timezone import get_china_time
+    conn = get_sync_connection("stockwinner")
+    conn.execute(
+        "UPDATE backtest_runs SET status = 'failed', error_message = ?, completed_at = ? WHERE id = ?",
+        (error_msg, get_china_time().isoformat(), run_id)
+    )
+    conn.commit()
+    conn.close()
 
 
 class BacktestProcessManager:
@@ -231,6 +402,7 @@ class BacktestProcessManager:
         stop_loss_pct: Optional[float] = None,
         take_profit_pct: Optional[float] = None,
         trailing_stop_pct: Optional[float] = None,
+        trading_strategy_ids: Optional[list] = None,
     ) -> Dict:
         """
         执行回测并返回结果。
@@ -238,13 +410,24 @@ class BacktestProcessManager:
         在主进程事件循环中异步等待，但回测逻辑在子进程中同步执行。
         """
         import asyncio
-        from services.common.database import get_db_manager
         from services.common.timezone import get_china_time
 
-        db = get_db_manager()
         logger = get_logger("backtest_manager")
 
-        # 1. 启动子进程
+        # 1. 更新状态为 running（通过线程隔离，避免阻塞事件循环）
+        from services.common.database import get_sync_connection
+        now = get_china_time().isoformat()
+        def _set_running():
+            conn = get_sync_connection("stockwinner")
+            conn.execute(
+                "UPDATE backtest_runs SET status = 'running', started_at = ? WHERE id = ?",
+                (now, run_id)
+            )
+            conn.commit()
+            conn.close()
+        await asyncio.to_thread(_set_running)
+
+        # 2. 启动子进程
         process, progress_queue, result_queue = spawn_backtest_process(
             run_id=run_id,
             strategy_config=strategy_config,
@@ -260,36 +443,39 @@ class BacktestProcessManager:
             stop_loss_pct=stop_loss_pct,
             take_profit_pct=take_profit_pct,
             trailing_stop_pct=trailing_stop_pct,
+            trading_strategy_ids=trading_strategy_ids,
         )
 
         self._active_processes[run_id] = (process, progress_queue, result_queue)
         logger.log_event("backtest_process_spawned", f"启动子进程: run_id={run_id}, PID={process.pid}")
 
-        # 2. 异步监听进度和结果
+        # 3. 异步监听进度和结果
         final_result = None
         start_time = time.monotonic()
 
         async def _poll_progress():
-            """轮询进度更新"""
+            """轮询进度队列（DB写入通过线程隔离，不阻塞事件循环）"""
             while process.is_alive() and final_result is None:
                 try:
-                    # 非阻塞检查进度队列
                     if not progress_queue.empty():
                         msg = progress_queue.get(block=False)
                         if msg.get("type") == "progress":
-                            # 写入数据库（使用同步连接，避免跨循环问题）
-                            from services.common.database import get_sync_connection
-                            conn = get_sync_connection("stockwinner")
-                            conn.execute(
-                                "UPDATE backtest_runs SET progress = ?, current_trade_date = ? WHERE id = ?",
-                                (msg["progress"], msg["trade_date"], run_id)
+                            # 通过线程池执行同步写入，避免 blocked event loop
+                            def _write_progress(p, td, rid):
+                                conn = get_sync_connection("stockwinner")
+                                conn.execute(
+                                    "UPDATE backtest_runs SET progress = ?, current_trade_date = ? WHERE id = ?",
+                                    (p, td, rid)
+                                )
+                                conn.commit()
+                                conn.close()
+                            await asyncio.to_thread(
+                                _write_progress, msg["progress"], msg["trade_date"], run_id
                             )
-                            conn.commit()
-                            conn.close()
                 except Exception as e:
                     logger.warn("backtest_progress", f"进度更新失败: {e}")
 
-                await asyncio.sleep(0.5)  # 500ms 轮询间隔
+                await asyncio.sleep(0.5)
 
         async def _poll_result():
             """等待最终结果"""
@@ -362,11 +548,10 @@ class BacktestProcessManager:
                 await self._save_results_to_db(run_id, result_data, benchmark_data)
                 return result_data
             else:
-                # 标记失败
+                # 标记失败（使用同步连接，通过线程隔离）
                 error_msg = final_result.get("error", "未知错误")
-                await db.execute(
-                    "UPDATE backtest_runs SET status = 'failed', error_message = ?, completed_at = ? WHERE id = ?",
-                    (error_msg, get_china_time().isoformat(), run_id)
+                await asyncio.to_thread(
+                    _mark_backtest_failed_sync, run_id, error_msg
                 )
                 return {"error": error_msg}
 
@@ -392,114 +577,9 @@ class BacktestProcessManager:
         return []
 
     async def _save_results_to_db(self, run_id: int, result: Dict, benchmark_data: list):
-        """保存回测结果到数据库"""
-        from services.common.database import get_db_manager
-        from services.common.timezone import get_china_time
-        from services.backtest.metrics import PerformanceMetrics
-
-        db = get_db_manager()
-        trades = result.get("trades", [])
-        nav_series = result.get("nav_series", [])
-        daily_positions = result.get("daily_positions", [])
-        summary = result.get("result", {})
-
-        # 如果有基准数据，重新计算含对比的指标
-        if benchmark_data and nav_series and trades:
-            initial_capital = summary.get("initial_capital", 1000000)
-            first_date = nav_series[0]["trade_date"] if nav_series else ""
-            last_date = nav_series[-1]["trade_date"] if nav_series else ""
-            recomputed = PerformanceMetrics.compute(
-                nav_series=nav_series,
-                trades=trades,
-                initial_capital=initial_capital,
-                start_date=first_date,
-                end_date=last_date,
-                benchmark_series=benchmark_data,
-            )
-            summary = recomputed.to_dict()
-
-        # 1. 保存交易记录
-        for trade in trades:
-            if trade.get("trade_type") == "buy":
-                await db.insert("backtest_trades", {
-                    "backtest_run_id": run_id,
-                    "stock_code": trade["stock_code"],
-                    "stock_name": trade.get("stock_name", ""),
-                    "buy_date": trade["date"],
-                    "buy_price": trade["price"],
-                    "buy_quantity": trade["quantity"],
-                    "buy_commission": trade.get("commission", 0),
-                })
-            elif trade.get("trade_type") == "sell":
-                buy_date = trade.get("buy_date", "")
-                stock_code = trade.get("stock_code", "")
-                existing = await db.fetchone(
-                    "SELECT id FROM backtest_trades WHERE backtest_run_id = ? AND stock_code = ? AND buy_date = ?",
-                    (run_id, stock_code, buy_date)
-                )
-                if existing:
-                    await db.execute(
-                        "UPDATE backtest_trades SET sell_date = ?, sell_price = ?, sell_commission = ?, "
-                        "sell_reason = ?, pnl = ?, pnl_pct = ?, holding_days = ? WHERE id = ?",
-                        (
-                            trade["date"], trade["price"], trade.get("commission", 0),
-                            trade.get("reason", ""), trade.get("pnl", 0), trade.get("pnl_pct", 0),
-                            trade.get("holding_days", 0), existing["id"]
-                        )
-                    )
-                else:
-                    await db.insert("backtest_trades", {
-                        "backtest_run_id": run_id,
-                        "stock_code": stock_code,
-                        "stock_name": trade.get("stock_name", ""),
-                        "buy_date": trade.get("buy_date", ""),
-                        "buy_price": trade.get("buy_price", 0),
-                        "buy_quantity": trade.get("quantity", 0),
-                        "buy_commission": trade.get("buy_commission", 0),
-                        "sell_date": trade["date"],
-                        "sell_price": trade["price"],
-                        "sell_commission": trade.get("commission", 0),
-                        "sell_reason": trade.get("reason", ""),
-                        "pnl": trade.get("pnl", 0),
-                        "pnl_pct": trade.get("pnl_pct", 0),
-                        "holding_days": trade.get("holding_days", 0),
-                    })
-
-        # 2. 保存每日净值
-        for nav in nav_series:
-            await db.execute(
-                """INSERT OR REPLACE INTO backtest_daily_nav
-                   (backtest_run_id, trade_date, nav, total_value, cash,
-                    positions_value, position_count, drawdown, max_drawdown, daily_return)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    run_id, nav["trade_date"], nav["nav"], nav["total_value"],
-                    nav["cash"], nav["positions_value"], nav.get("position_count", 0),
-                    nav.get("drawdown", 0), nav.get("max_drawdown", 0),
-                    nav.get("daily_return", 0),
-                )
-            )
-
-        # 3. 保存每日持仓快照
-        for pos in daily_positions:
-            await db.insert("backtest_daily_positions", {
-                "backtest_run_id": run_id,
-                "trade_date": pos["trade_date"],
-                "stock_code": pos["stock_code"],
-                "stock_name": pos.get("stock_name", ""),
-                "quantity": pos["quantity"],
-                "avg_cost": pos["avg_cost"],
-                "close_price": pos["close_price"],
-                "market_value": pos["market_value"],
-                "unrealized_pnl": pos.get("unrealized_pnl", 0),
-            })
-
-        # 4. 更新状态为完成
-        await db.execute(
-            "UPDATE backtest_runs SET status = 'completed', progress = 100, "
-            "result_summary = ?, completed_at = ? WHERE id = ?",
-            (json.dumps(summary, ensure_ascii=False), get_china_time().isoformat(), run_id)
-        )
+        """保存回测结果到数据库（使用同步连接，批量写入）"""
+        import asyncio
+        await asyncio.to_thread(_save_results_to_db_sync, run_id, result, benchmark_data)
 
     def get_active_count(self) -> int:
         """获取活跃回测进程数量"""

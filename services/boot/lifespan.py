@@ -18,7 +18,7 @@ def create_lifespan():
     import os
     import json
 
-    MIGRATION_VERSION = 17
+    MIGRATION_VERSION = 19
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -818,6 +818,18 @@ async def _run_migrations(db_manager, log, migration_version: int):
         """ALTER TABLE notification_history ADD COLUMN context TEXT DEFAULT '{}'""",
         """ALTER TABLE notification_history ADD COLUMN payload TEXT DEFAULT '{}'""",
         """ALTER TABLE notification_history ADD COLUMN rule_id INTEGER DEFAULT NULL""",
+    ])
+
+    # v18: 回测支持交易策略
+    await run_migration(18, "回测支持交易策略", [
+        "ALTER TABLE backtest_runs ADD COLUMN trading_strategy_ids TEXT DEFAULT NULL",
+    ])
+
+    # v19: 回测交易记录增加卖出数量字段
+    await run_migration(19, "回测交易记录增加卖出数量", [
+        "ALTER TABLE backtest_trades ADD COLUMN buy_quantity INTEGER DEFAULT 0",
+        "ALTER TABLE backtest_trades ADD COLUMN sell_quantity INTEGER DEFAULT 0",
+        "ALTER TABLE backtest_trades ADD COLUMN remaining_quantity INTEGER DEFAULT 0",
     ])
 
     # v7 数据源配置 seed

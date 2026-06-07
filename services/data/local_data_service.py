@@ -560,12 +560,71 @@ class LocalKlineDataService:
         return result
 
     def get_all_stocks(self) -> List[str]:
-        """获取数据库中所有股票代码"""
+        """获取数据库中所有股票代码
+
+        排除：
+        - 行业指数(801xxx.SI)
+        - 深证指数(399xxx.SZ)
+        - 上证指数(000xxx.SH, xxx <= 999)
+        - 板块指数(880xxx.SH)
+        - 北交所创新层/基础层(4xxxxx/8xxxxx.BJ)
+        - ST股票（名称含ST、*ST、SST等）
+        - 退市/拟退市股票（security_status含退市，或delist_date已设定）
+        """
         conn = self._get_conn(timeout=30)
         cursor = conn.cursor()
+
+        # 先从 stock_base_info 获取股票名称和状态
+        cursor.execute('SELECT stock_code, stock_name, security_status, delist_date FROM stock_base_info')
+        stock_info = {row[0]: {'name': row[1] or '', 'status': row[2] or '', 'delist_date': row[3]} for row in cursor.fetchall()}
+
         cursor.execute('SELECT DISTINCT stock_code FROM kline_data')
         stocks = [row[0] for row in cursor.fetchall()]
-        return stocks
+
+        # 过滤指数和非股票代码
+        filtered = []
+        for code in stocks:
+            # 排除行业指数
+            if code.startswith('801') and code.endswith('.SI'):
+                continue
+            # 排除深证指数(399xxx.SZ)
+            if code.startswith('399') and code.endswith('.SZ'):
+                continue
+            # 排除上证指数(000xxx.SH, xxx <= 999)
+            if code.endswith('.SH'):
+                base_code = code.split('.')[0]
+                if base_code.startswith('000') and len(base_code) == 6:
+                    try:
+                        num = int(base_code)
+                        if num <= 999:
+                            continue
+                    except ValueError:
+                        pass
+            # 排除板块指数(880xxx.SH)
+            if code.startswith('880') and code.endswith('.SH'):
+                continue
+            # 排除北交所创新层(4xxxxx)和基础层(8xxxxx)
+            if code.endswith('.BJ'):
+                base_code = code.split('.')[0]
+                if base_code.startswith('4') or base_code.startswith('8'):
+                    continue
+
+            # 排除ST股票（名称含ST）
+            info = stock_info.get(code, {})
+            name = info.get('name', '')
+            if name and ('ST' in name.upper() or '*ST' in name or 'SST' in name.upper()):
+                continue
+            # 排除退市/拟退市股票
+            status = info.get('status', '')
+            if status and ('退市' in status or '终止上市' in status):
+                continue
+            delist_date = info.get('delist_date')
+            if delist_date:  # 有退市日期的股票
+                continue
+
+            filtered.append(code)
+
+        return filtered
 
     def get_stocks_date_ranges_batch(self, stock_codes: List[str], start_date: str, end_date: str) -> Dict[str, Dict]:
         """

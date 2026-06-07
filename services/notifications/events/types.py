@@ -35,6 +35,7 @@ class EventType(Enum):
     SCHEDULER_DOWN = "scheduler_down"       # 调度服务异常
     MONITOR_INTERRUPTED = "monitor_interrupted"  # 交易监控中断
     SDK_CONNECTION_ERROR = "sdk_connection_error"  # SDK连接异常
+    MONITOR_DATA_STALE = "monitor_data_stale"      # 行情数据过期
 
     # 风控类
     POSITION_LIMIT_EXCEEDED = "position_limit_exceeded"  # 仓位超限
@@ -144,6 +145,15 @@ EVENT_META_REGISTRY: Dict[EventType, EventMeta] = {
         event_type=EventType.SDK_CONNECTION_ERROR,
         category=EventCategory.SYSTEM,
         title_template="SDK连接异常",
+        color="red",
+        priority=1,
+        debounce_seconds=300,
+        config_flag_key="notify_on_system",
+    ),
+    EventType.MONITOR_DATA_STALE: EventMeta(
+        event_type=EventType.MONITOR_DATA_STALE,
+        category=EventCategory.SYSTEM,
+        title_template="行情数据过期",
         color="red",
         priority=1,
         debounce_seconds=300,

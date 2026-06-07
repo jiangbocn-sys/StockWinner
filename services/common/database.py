@@ -358,7 +358,7 @@ DATABASE_PATHS = {
 def _configure_connection(conn: sqlite3.Connection):
     """配置 SQLite 连接：WAL mode、busy timeout、foreign keys"""
     conn.execute("PRAGMA journal_mode = WAL")
-    conn.execute("PRAGMA busy_timeout = 10000")
+    conn.execute("PRAGMA busy_timeout = 30000")  # 30秒，避免多线程写入竞争
     conn.execute("PRAGMA foreign_keys = ON")
 
 
@@ -446,10 +446,16 @@ def get_sync_connection(db_name: str = "stockwinner",
     return conn
 
 
-def query_kline_db(sql: str, params: tuple = None):
+def query_kline_db(sql: str, params: tuple = None, adjusted: bool = True):
     """同步查询 kline.db（只读）。返回 List[Dict] 或 int。
 
     用于策略沙盒环境，统一封装数据库查询操作。
+    默认自动对 kline_data/weekly_kline_data 查询结果应用后复权。
+
+    Args:
+        sql: SQL 查询语句
+        params: 参数元组
+        adjusted: 是否自动复权（默认 True）
     """
     conn = get_sync_connection("kline")
     cursor = conn.cursor()
@@ -460,11 +466,43 @@ def query_kline_db(sql: str, params: tuple = None):
             cursor.execute(sql)
         if sql.strip().upper().startswith("SELECT"):
             rows = [dict(r) for r in cursor.fetchall()]
+            if adjusted:
+                rows = _auto_adjust_kline_result(rows, sql, params)
             return rows
         return cursor.rowcount
     except Exception:
         conn.rollback()
         raise
+
+
+def query_kline_db_raw(sql: str, params: tuple = None):
+    """同步查询 kline.db（不复权）。返回 List[Dict] 或 int。
+
+    用于K线图表等需要展示原始价格的场景。
+    """
+    return query_kline_db(sql, params, adjusted=False)
+
+
+def _auto_adjust_kline_result(rows, sql, params):
+    """自动对K线查询结果应用后复权。
+
+    检测条件：SQL 查询 kline_data 或 weekly_kline_data 表，
+    且 params[0] 是单个股票代码（非 IN 批量查询）。
+    """
+    if not rows or not params:
+        return rows
+    sql_lower = sql.lower()
+    if "kline_data" not in sql_lower and "weekly_kline_data" not in sql_lower:
+        return rows
+    # 批量查询（IN 子句）跳过
+    if " in " in sql_lower and "(" in sql_lower:
+        return rows
+    stock_code = params[0]
+    if not isinstance(stock_code, str) or "." not in stock_code:
+        return rows
+    from services.common.price_adjuster import adjust_klines
+    date_field = "week_start_date" if "weekly_kline_data" in sql_lower else "trade_date"
+    return adjust_klines(rows, stock_code, date_field=date_field)
 
 
 def query_db(sql: str, params: tuple = None):
