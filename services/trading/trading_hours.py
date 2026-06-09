@@ -225,10 +225,10 @@ def get_next_trading_window(dt: datetime = None) -> tuple[datetime | None, str]:
         否则返回下一个交易时段的开始时间和原因描述。
 
     时段规则：
-        09:15-11:30  上午交易
+        09:25-11:30  上午交易（监控从09:25开始，避开复权因子更新）
         11:30-13:00  午间休市 → 等 13:00
         13:00-15:00  下午交易
-        15:00-次日09:15 → 等下一个交易日 09:15
+        15:00-次日09:25 → 等下一个交易日 09:25
     """
     if dt is None:
         dt = get_china_time()
@@ -243,14 +243,14 @@ def get_next_trading_window(dt: datetime = None) -> tuple[datetime | None, str]:
         for _ in range(7):
             # 未来日期用 weekday 判断（周一到周五）
             if next_day.weekday() < 5:
-                target = next_day.replace(hour=9, minute=15, second=0, microsecond=0)
-                return target, f"等待下一个交易日 {next_day.strftime('%Y-%m-%d')} 09:15"
+                target = next_day.replace(hour=9, minute=25, second=0, microsecond=0)
+                return target, f"等待下一个交易日 {next_day.strftime('%Y-%m-%d')} 09:25"
             next_day += timedelta(days=1)
         return None, "7 天内无交易日"
 
     t = dt.time()
 
-    if dtime(9, 15) <= t < dtime(11, 30):
+    if dtime(9, 25) <= t < dtime(11, 30):
         return None, "trading"  # 上午交易中
 
     if dtime(13, 0) <= t < dtime(15, 0):
@@ -267,14 +267,14 @@ def get_next_trading_window(dt: datetime = None) -> tuple[datetime | None, str]:
         next_day = next_day.replace(hour=0, minute=0, second=0, microsecond=0)
         for _ in range(7):
             if next_day.weekday() < 5:
-                target = next_day.replace(hour=9, minute=15, second=0, microsecond=0)
-                return target, f"收盘，等待 {next_day.strftime('%Y-%m-%d')} 09:15"
+                target = next_day.replace(hour=9, minute=25, second=0, microsecond=0)
+                return target, f"收盘，等待 {next_day.strftime('%Y-%m-%d')} 09:25"
             next_day += timedelta(days=1)
         return None, "7 天内无交易日"
 
-    # t < 09:15 → 等今天 09:15
-    target = dt.replace(hour=9, minute=15, second=0, microsecond=0)
-    return target, "等待开盘 09:15"
+    # t < 09:25 → 等今天 09:25
+    target = dt.replace(hour=9, minute=25, second=0, microsecond=0)
+    return target, "等待开盘 09:25"
 
 
 def get_previous_trading_day(dt: datetime = None) -> str:

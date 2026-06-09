@@ -47,11 +47,18 @@ class TradingGateway(TradingGatewayInterface):
 
     @property
     def connected(self) -> bool:
-        """从 SDKManager 读取连接状态"""
+        """检查 SDK 连接状态（使用 SDKProxyClient）"""
         if not self.sdk_available:
             return False
-        from services.common.sdk_manager import get_sdk_manager
-        return get_sdk_manager().is_connected()
+        try:
+            from services.common.sdk_proxy_client import SDKProxyClient
+            client = SDKProxyClient.get_instance()
+            # 如果 IPC 连接断开，尝试重连
+            if not client._connected:
+                client.connect_to_subprocess(timeout=5.0)
+            return client._connected
+        except Exception:
+            return False
 
     async def connect(self) -> bool:
         """连接交易服务器 — 委托给 SDKManager"""

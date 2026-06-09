@@ -74,8 +74,9 @@ async def get_industry_list(
     await validate_account_active(account_id)
 
     try:
+        import asyncio
         sdk_mgr = get_sdk_manager()
-        df = sdk_mgr.get_industry_base_info()
+        df = await asyncio.to_thread(sdk_mgr.get_industry_base_info)
         if df.empty:
             return {"success": True, "data": [], "count": 0}
         filtered = df[df["LEVEL_TYPE"] == level]
@@ -99,8 +100,9 @@ async def get_industry_kline(
     await validate_account_active(account_id)
 
     try:
+        import asyncio
         sdk_mgr = get_sdk_manager()
-        result = sdk_mgr.get_industry_daily(code_list=[index_code])
+        result = await asyncio.to_thread(sdk_mgr.get_industry_daily, code_list=[index_code])
         if not result or index_code not in result:
             return {"success": True, "data": {"index_code": index_code, "kline": []}}
         df = result[index_code]
@@ -130,8 +132,9 @@ async def get_industry_constituent(
     await validate_account_active(account_id)
 
     try:
+        import asyncio
         sdk_mgr = get_sdk_manager()
-        df = sdk_mgr.get_industry_constituent(index_codes=[index_code])
+        df = await asyncio.to_thread(sdk_mgr.get_industry_constituent, index_codes=[index_code])
         if df.empty:
             return {"success": True, "data": {"index_code": index_code, "constituents": []}}
         df.columns = df.columns.str.lower()
@@ -154,8 +157,9 @@ async def get_index_constituent(
     await validate_account_active(account_id)
 
     try:
+        import asyncio
         sdk_mgr = get_sdk_manager()
-        df = sdk_mgr.get_index_constituent(index_codes=[index_code])
+        df = await asyncio.to_thread(sdk_mgr.get_index_constituent, index_codes=[index_code])
         if df.empty:
             return {"success": True, "data": {"index_code": index_code, "constituents": []}}
         df.columns = df.columns.str.lower()
@@ -226,8 +230,9 @@ async def get_income_statement(
     await validate_account_active(account_id)
 
     try:
+        import asyncio
         sdk_mgr = get_sdk_manager()
-        df = sdk_mgr.get_income_statement(stock_codes=[stock_code])
+        df = await asyncio.to_thread(sdk_mgr.get_income_statement, stock_codes=[stock_code])
         records = _financial_to_records(df, stock_code)
         return {"success": True, "data": {"stock_code": stock_code, "records": records, "count": len(records)}}
     except Exception as e:
@@ -244,8 +249,9 @@ async def get_balance_sheet(
     await validate_account_active(account_id)
 
     try:
+        import asyncio
         sdk_mgr = get_sdk_manager()
-        df = sdk_mgr.get_balance_sheet(stock_codes=[stock_code])
+        df = await asyncio.to_thread(sdk_mgr.get_balance_sheet, stock_codes=[stock_code])
         records = _financial_to_records(df, stock_code)
         return {"success": True, "data": {"stock_code": stock_code, "records": records, "count": len(records)}}
     except Exception as e:
@@ -262,8 +268,9 @@ async def get_cash_flow(
     await validate_account_active(account_id)
 
     try:
+        import asyncio
         sdk_mgr = get_sdk_manager()
-        df = sdk_mgr.get_cash_flow_statement(stock_codes=[stock_code])
+        df = await asyncio.to_thread(sdk_mgr.get_cash_flow_statement, stock_codes=[stock_code])
         records = _financial_to_records(df, stock_code)
         return {"success": True, "data": {"stock_code": stock_code, "records": records, "count": len(records)}}
     except Exception as e:
@@ -280,8 +287,9 @@ async def get_profit_notice(
     await validate_account_active(account_id)
 
     try:
+        import asyncio
         sdk_mgr = get_sdk_manager()
-        df = sdk_mgr.get_profit_notice(stock_codes=[stock_code])
+        df = await asyncio.to_thread(sdk_mgr.get_profit_notice, stock_codes=[stock_code])
         if df.empty:
             return {"success": True, "data": {"stock_code": stock_code, "records": []}}
         df.columns = df.columns.str.lower()
@@ -304,8 +312,9 @@ async def get_profit_express(
     await validate_account_active(account_id)
 
     try:
+        import asyncio
         sdk_mgr = get_sdk_manager()
-        df = sdk_mgr.get_profit_express(stock_codes=[stock_code])
+        df = await asyncio.to_thread(sdk_mgr.get_profit_express, stock_codes=[stock_code])
         if df.empty:
             return {"success": True, "data": {"stock_code": stock_code, "records": []}}
         df.columns = df.columns.str.lower()
@@ -337,8 +346,9 @@ async def get_dragon_tiger(
     await validate_account_active(account_id)
 
     try:
+        import asyncio
         sdk_mgr = get_sdk_manager()
-        df = sdk_mgr.get_long_hu_bang(stock_codes=[stock_code], begin_date=start_date, end_date=end_date)
+        df = await asyncio.to_thread(sdk_mgr.get_long_hu_bang, stock_codes=[stock_code], begin_date=start_date, end_date=end_date)
         if df.empty:
             return {"success": True, "data": {"stock_code": stock_code, "records": []}}
         df.columns = df.columns.str.lower()
@@ -369,8 +379,9 @@ async def get_margin_summary(
     await validate_account_active(account_id)
 
     try:
+        import asyncio
         sdk_mgr = get_sdk_manager()
-        df = sdk_mgr.get_margin_summary(begin_date=start_date, end_date=end_date)
+        df = await asyncio.to_thread(sdk_mgr.get_margin_summary, begin_date=start_date, end_date=end_date)
         if df.empty:
             return {"success": True, "data": {"records": []}}
         df.columns = df.columns.str.lower()
@@ -398,8 +409,9 @@ async def get_margin_detail(
     await validate_account_active(account_id)
 
     try:
+        import asyncio
         sdk_mgr = get_sdk_manager()
-        df = sdk_mgr.get_margin_detail(stock_codes=[stock_code], begin_date=start_date, end_date=end_date)
+        df = await asyncio.to_thread(sdk_mgr.get_margin_detail, stock_codes=[stock_code], begin_date=start_date, end_date=end_date)
         if df.empty:
             return {"success": True, "data": {"stock_code": stock_code, "records": []}}
         df.columns = df.columns.str.lower()
@@ -431,8 +443,9 @@ async def get_block_trading(
     await validate_account_active(account_id)
 
     try:
+        import asyncio
         sdk_mgr = get_sdk_manager()
-        df = sdk_mgr.get_block_trading(stock_codes=[stock_code], begin_date=start_date, end_date=end_date)
+        df = await asyncio.to_thread(sdk_mgr.get_block_trading, stock_codes=[stock_code], begin_date=start_date, end_date=end_date)
         if df.empty:
             return {"success": True, "data": {"stock_code": stock_code, "records": []}}
         df.columns = df.columns.str.lower()
@@ -458,8 +471,9 @@ async def get_treasury_yield(
     await validate_account_active(account_id)
 
     try:
+        import asyncio
         sdk_mgr = get_sdk_manager()
-        df = sdk_mgr.get_treasury_yield()
+        df = await asyncio.to_thread(sdk_mgr.get_treasury_yield)
         if df.empty:
             return {"success": True, "data": {"records": []}}
         df.columns = df.columns.str.lower()

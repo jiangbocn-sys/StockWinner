@@ -203,6 +203,11 @@ class SchedulerService:
             industry_result = self._run_industry_indices_download()
             self._task_status['industry_indices_status'] = industry_result
 
+            # Step 3.5: A股指数下载（上证指数、深证指数等）
+            logger.info("下载A股指数数据...")
+            a_stock_indices_result = self._run_a_stock_indices_download()
+            self._task_status['a_stock_indices_status'] = a_stock_indices_result
+
             # Step 4: 检查因子覆盖率并补充缺失因子（无论K线是否下载）
             logger.info("检查因子覆盖率...")
             factor_check = self._check_factor_coverage(expected_date)
@@ -461,26 +466,23 @@ class SchedulerService:
         end_date_offset = 1  # 结束日期 = 今天 + 1天
 
         if latest_date:
-            # 检查最新日期的数据量是否完整
+            # 检查最新日期的数据覆盖度（而非与前一日比较，因前一日可能非交易日）
             latest_count = km.get_stock_count_on_date(latest_date)
+            total_count = km.get_total_stock_count()
 
-            # 获取前一天数据量
-            prev_dt = datetime.strptime(latest_date, '%Y-%m-%d') - timedelta(days=1)
-            prev_date = prev_dt.strftime('%Y-%m-%d')
-            prev_count = km.get_stock_count_on_date(prev_date)
+            logger.info(f"最新日期 {latest_date}: {latest_count} 只, 总股票数: {total_count}")
 
-            logger.info(f"最新日期 {latest_date}: {latest_count} 只, 前一日 {prev_date}: {prev_count} 只")
-
-            if latest_count < prev_count:
-                # 最新日期数据不完整，删除后重新下载
+            # 覆盖度判断：低于 95% 认为数据不完整，需删除重下载
+            coverage_pct = latest_count / total_count * 100 if total_count > 0 else 0
+            if total_count > 0 and coverage_pct < 95:
                 deleted = km.delete_by_date(latest_date)
-                logger.info(f"最新日期数据不完整，已删除 {deleted} 条记录，从 {latest_date} 开始重新下载")
+                logger.info(f"最新日期覆盖度不足 {coverage_pct:.1f}%，已删除 {deleted} 条记录，从 {latest_date} 开始重新下载")
                 start_date = latest_date
             else:
                 # 最新日期数据完整，从下一天开始增量下载
                 next_dt = datetime.strptime(latest_date, '%Y-%m-%d') + timedelta(days=1)
                 start_date = next_dt.strftime('%Y-%m-%d')
-                logger.info(f"最新日期数据完整（{latest_count} >= {prev_count}），从 {start_date} 开始增量下载")
+                logger.info(f"最新日期覆盖度 {coverage_pct:.1f}%（>= 95%），从 {start_date} 开始增量下载")
 
         # 结束日期 = 今天 + 1天
         end_date = (datetime.now(CHINA_TZ) + timedelta(days=1)).strftime('%Y-%m-%d')
@@ -797,6 +799,36 @@ class SchedulerService:
             logger.info(f"申万行业指数下载完成: {result.get('saved', 0)} 条")
         else:
             logger.warning(f"申万行业指数下载失败: {result.get('message', '未知错误')}")
+
+        return result
+
+    def _run_a_stock_indices_download(self) -> Dict:
+        """执行A股指数下载（上证指数、深证指数等，带5分钟超时保护）"""
+        logger.info("开始A股指数下载...")
+
+        from dotenv import load_dotenv
+        load_dotenv()
+
+        result: Dict = {}
+        def _do_download():
+            try:
+                from services.data.data_download import download_a_stock_indices
+                result.update(download_a_stock_indices(months=3))
+            except Exception as e:
+                result.update({'success': False, 'message': str(e)})
+
+        thread = threading.Thread(target=_do_download)
+        thread.start()
+        thread.join(timeout=300)  # 5分钟超时
+
+        if thread.is_alive():
+            logger.error("A股指数下载超时（5分钟）")
+            return {'success': False, 'message': '下载超时（5分钟）'}
+
+        if result.get('success'):
+            logger.info(f"A股指数下载完成: {result.get('indices_count', 0)} 个指数，最新 {result.get('latest_date', 'N/A')}")
+        else:
+            logger.warning(f"A股指数下载失败: {result.get('message', '未知错误')}")
 
         return result
 
@@ -1369,11 +1401,11 @@ class SchedulerService:
             for acct in accounts:
                 acct_id = acct["account_id"]
 
-                # 开盘前启动监控（09:20）
+                # 开盘后启动监控（09:25，避开复权因子更新任务）
                 start_job_id = f'monitor_start_{acct_id}'
                 self._scheduler.add_job(
                     self._auto_start_monitor_job,
-                    CronTrigger.from_crontab("20 9 * * mon-fri", timezone=CHINA_TZ),
+                    CronTrigger.from_crontab("25 9 * * mon-fri", timezone=CHINA_TZ),
                     id=start_job_id,
                     name=f"自动启动监控: {acct_id}",
                     args=[acct_id],
@@ -1819,6 +1851,40 @@ class SchedulerService:
                     tb = traceback.format_exc()
                     logger.warning(f"实时行情预取失败: {e}")
                     logger.warning(tb)
+
+                # ── 实时行情可用性检查（盘中必须）──
+                if is_trading_hours() and stock_codes:
+                    realtime_coverage = len(_pre_fetched_realtime_quotes) / len(stock_codes) if len(stock_codes) > 0 else 0
+                    if realtime_coverage < 0.5:
+                        # 覆盖率低于 50%，中止策略执行
+                        logger.error(f"策略执行中止: 实时行情覆盖率仅 {realtime_coverage:.1%}，无法确保数据正确性")
+                        await db.execute(
+                            "UPDATE strategy_tasks SET last_status = 'aborted', last_output = ? WHERE id = ?",
+                            (json.dumps({
+                                "message": "实时行情数据不足，中止执行",
+                                "coverage": f"{realtime_coverage:.1%}",
+                                "available": len(_pre_fetched_realtime_quotes),
+                                "required": len(stock_codes),
+                            }, ensure_ascii=False), task_id)
+                        )
+                        # 发送通知
+                        try:
+                            from services.notifications import get_notification_manager
+                            nm = get_notification_manager()
+                            await nm.trigger(
+                                event_type="strategy_aborted",
+                                account_id=task["account_id"],
+                                payload={
+                                    "strategy_name": strategy.get("name", "策略"),
+                                    "reason": f"实时行情覆盖率仅 {realtime_coverage:.1%}",
+                                    "coverage": realtime_coverage,
+                                },
+                            )
+                        except Exception:
+                            pass
+                        return
+                    else:
+                        logger.info(f"实时行情覆盖率: {realtime_coverage:.1%} ({len(_pre_fetched_realtime_quotes)}/{len(stock_codes)})")
 
                 # ── Context 构建 ──
                 from services.strategy.engine import build_strategy_context

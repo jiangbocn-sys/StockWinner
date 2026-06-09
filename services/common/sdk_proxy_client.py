@@ -46,6 +46,17 @@ class SDKProxyClient:
             self._connected = False
             self._subprocess_pid = None
 
+    def _trigger_reconnect_async(self):
+        """在后台线程触发 SDK 子进程重连，不阻塞当前请求"""
+        import threading
+        try:
+            from services.common.sdk_proxy_client import get_subprocess_manager
+            sub_mgr = get_subprocess_manager()
+            t = threading.Thread(target=sub_mgr.restart_with_retry, daemon=True)
+            t.start()
+        except Exception:
+            pass
+
     def connect_to_subprocess(self, timeout: float = 5.0) -> bool:
         """连接 SDK 子进程"""
         logger = get_logger("sdk_proxy")
@@ -103,7 +114,20 @@ class SDKProxyClient:
                     else:
                         raise ConnectionError("未连接 SDK 子进程（重连失败）")
                 else:
-                    raise ConnectionError("未连接 SDK 子进程（socket 不存在）")
+                    # socket 不存在 → 同步重启子进程（等 12s，留 3s 给 IPC 连接）
+                    # 成功则继续执行请求，失败则抛异常让上层走 channel fallback
+                    from services.common.sdk_proxy_client import get_subprocess_manager
+                    sub_mgr = get_subprocess_manager()
+                    if sub_mgr.start_subprocess(ready_timeout=12.0):
+                        # 子进程重启成功，重置并建立 IPC 连接
+                        self.reset_instance()
+                        if self.connect_to_subprocess(timeout=5.0):
+                            logger.log_event("sdk_ipc_reconnect_after_restart",
+                                "子进程重启后 IPC 连接成功")
+                        else:
+                            raise ConnectionError("子进程重启成功但 IPC 连接失败")
+                    else:
+                        raise ConnectionError("SDK 子进程启动失败（TGW 可能仍不可用），将使用多数据源兜底")
 
             # 动态设置 socket 超时（不同方法需要不同超时时间）
             prev_timeout = self._socket.gettimeout()
@@ -518,13 +542,36 @@ class SDKSubprocessManager:
         self._subprocess_pid: Optional[int] = None
         self._ready_event = threading.Event()
         self._lock = threading.Lock()
+        self._reconnect_attempts = 0  # 当前重连尝试次数
+        self._max_reconnect_attempts = 3  # 最大重连次数
+        self._reconnect_intervals = [30, 60, 120]  # 重连间隔：30秒、1分钟、2分钟（后台非阻塞）
+        self._last_reconnect_time: Optional[float] = None  # 上次重连时间
+        self._last_start_time: Optional[float] = None  # 上次启动子进程时间（用于冷却控制）
 
-    def start_subprocess(self) -> bool:
-        """启动 SDK 子进程"""
+    def start_subprocess(self, ready_timeout: float = 30.0) -> bool:
+        """启动 SDK 子进程
+
+        内置冷却：上次启动后 5 分钟内不再重新 login TGW，防止频繁重启耗尽连接槽。
+
+        Args:
+            ready_timeout: 等待子进程就绪的超时时间（默认 30s）
+        """
         import subprocess
         logger = get_logger("sdk_subprocess_mgr")
 
         with self._lock:
+            # 冷却检查：5 分钟内不重复 login
+            if self._last_start_time and (time.time() - self._last_start_time) < 300:
+                # 如果子进程还活着，尝试重建 IPC 连接
+                if self._subprocess and self._subprocess.poll() is None:
+                    logger.log_event("sdk_start_cooldown",
+                        f"距上次启动仅 {int(time.time() - self._last_start_time)}s，跳过 login，尝试 IPC 重连")
+                    self._ready_event.set()  # 标记为已就绪（子进程已在运行）
+                    return True
+                else:
+                    logger.log_event("sdk_start_cooldown_blocked",
+                        "冷却期内且无运行中的子进程，拒绝重新 login")
+                    return False
             # 强制终止旧子进程（确保完全清理）
             if self._subprocess and self._subprocess.poll() is None:
                 logger.log_event("sdk_subprocess_stopping_old",
@@ -550,12 +597,13 @@ class SDKSubprocessManager:
                 cwd=str(Path(__file__).resolve().parents[2]),
             )
             self._subprocess_pid = self._subprocess.pid
+            self._last_start_time = time.time()  # 记录启动时间，用于冷却控制
             logger.log_event("sdk_subprocess_started",
                 f"SDK 子进程已启动 PID: {self._subprocess_pid}")
 
             # 等待子进程就绪（读取 stdout 中的 sdk_ready 消息）
             self._ready_event.clear()
-            self._wait_for_ready()
+            self._wait_for_ready(timeout=ready_timeout)
 
             if not self._ready_event.is_set():
                 logger.log_event("sdk_subprocess_start_timeout",
@@ -658,6 +706,62 @@ class SDKSubprocessManager:
         if self._subprocess is None:
             return False
         return self._subprocess.poll() is None
+
+    def restart_with_retry(self) -> tuple[bool, str]:
+        """带重试限制的 SDK 子进程重连
+
+        Returns:
+            (success, message) - 成功与否及消息
+        """
+        import time
+        logger = get_logger("sdk_reconnect")
+
+        # 检查是否超过最大重连次数
+        if self._reconnect_attempts >= self._max_reconnect_attempts:
+            msg = f"SDK 重连已达到最大次数 ({self._max_reconnect_attempts})，请手动检查或联系银河技术支持"
+            logger.error("sdk_reconnect_exhausted", msg)
+            return False, msg
+
+        # 计算等待时间
+        wait_seconds = self._reconnect_intervals[self._reconnect_attempts]
+        self._reconnect_attempts += 1
+
+        logger.log_event("sdk_reconnect_attempt",
+            f"尝试重连 SDK 子进程 (第 {self._reconnect_attempts} 次，等待 {wait_seconds}s)")
+
+        # 等待指定时间
+        time.sleep(wait_seconds)
+
+        # 尝试启动子进程
+        success = self.start_subprocess()
+
+        if success:
+            self._reconnect_attempts = 0  # 成功后重置计数
+            logger.log_event("sdk_reconnect_success", "SDK 子进程重连成功")
+            return True, "SDK 子进程重连成功"
+        else:
+            if self._reconnect_attempts >= self._max_reconnect_attempts:
+                msg = f"SDK 重连失败，已达到最大次数 ({self._max_reconnect_attempts})"
+                logger.error("sdk_reconnect_failed_final", msg)
+                # 发送通知
+                try:
+                    from services.notifications.dispatcher import NotificationDispatcher
+                    dispatcher = NotificationDispatcher.get_instance()
+                    dispatcher.dispatch("sdk_connection_error", {
+                        "message": msg,
+                        "attempts": self._reconnect_attempts
+                    })
+                except Exception:
+                    pass
+                return False, msg
+            else:
+                msg = f"SDK 重连失败 (第 {self._reconnect_attempts} 次)，将在 {self._reconnect_intervals[self._reconnect_attempts]}s 后重试"
+                logger.warn("sdk_reconnect_failed", msg)
+                return False, msg
+
+    def reset_reconnect_attempts(self):
+        """重置重连计数（成功连接后调用）"""
+        self._reconnect_attempts = 0
 
 
 # ================================================================

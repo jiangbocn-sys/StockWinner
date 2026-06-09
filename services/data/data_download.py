@@ -433,7 +433,8 @@ async def download_incremental_kline_data(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     download_industry: bool = True,
-    download_etf: bool = True
+    download_etf: bool = True,
+    security_type: str = 'EXTRA_STOCK_A'
 ) -> bool:
     """
     增量下载 K 线数据（带交易时间检查）
@@ -473,7 +474,8 @@ async def download_incremental_kline_data(
         broker_password=broker_password,
         calculate_factors=calculate_factors,
         download_industry=download_industry,
-        download_etf=download_etf
+        download_etf=download_etf,
+        security_type=security_type
     )
 
 
@@ -487,7 +489,8 @@ def download_incremental_kline_data_sync(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     download_industry: bool = True,
-    download_etf: bool = True
+    download_etf: bool = True,
+    security_type: str = 'EXTRA_STOCK_A'
 ) -> bool:
     """同步版本的增量下载函数"""
     async def _async_download():
@@ -501,7 +504,8 @@ def download_incremental_kline_data_sync(
             start_date=start_date,
             end_date=end_date,
             download_industry=download_industry,
-            download_etf=download_etf
+            download_etf=download_etf,
+            security_type=security_type
         )
 
     # 使用 async_helper 模块统一处理事件循环冲突
@@ -854,3 +858,64 @@ def download_etf_special_data(etf_codes: List[str] = None) -> dict:
 
     logger.log_event("etf_special_done", f"ETF 专项数据下载完成：pcf={result['pcf_count']}, share={result['share_count']}, iopv={result['iopv_count']}")
     return result
+
+
+# A股指数下载
+def download_a_stock_indices(months: int = 3) -> dict:
+    """下载A股指数K线数据（上证指数、深证指数等）
+
+    A股指数代码格式：
+    - 上证指数: 000xxx.SH (如 000001.SH 上证指数)
+    - 深证指数: 399xxx.SZ (如 399001.SZ 深证成指)
+    - 创业板指数: 399xxx.SZ (如 399006.SZ 创业板指)
+
+    使用 download_incremental_kline_data_sync 的 security_type='EXTRA_INDEX_A' 参数。
+
+    Args:
+        months: 下载的月数（默认3个月，指数数据量小）
+
+    Returns:
+        下载结果字典
+    """
+    from services.common.timezone import get_china_time
+    from datetime import timedelta
+
+    # 计算日期范围
+    end_date = (get_china_time() + timedelta(days=1)).strftime('%Y-%m-%d')
+    start_date = (get_china_time() - timedelta(days=months * 31)).strftime('%Y-%m-%d')
+
+    print(f"[LocalData] [A股指数] 开始下载，范围: {start_date} ~ {end_date}")
+
+    try:
+        # 使用现有的K线下载函数，指定指数类型
+        success = download_incremental_kline_data_sync(
+            start_date=start_date,
+            end_date=end_date,
+            calculate_factors=False,  # 指数不需要计算因子
+            download_industry=False,
+            security_type='EXTRA_INDEX_A'
+        )
+
+        if success:
+            # 查询最新数据状态
+            from services.common.database import get_sync_connection
+            conn = get_sync_connection("kline")
+            cursor = conn.cursor()
+
+            cursor.execute('''
+                SELECT MAX(trade_date), COUNT(DISTINCT stock_code)
+                FROM kline_data
+                WHERE (stock_code LIKE '000%.SH' OR stock_code LIKE '399%.SZ')
+                  AND stock_code NOT LIKE '00000%.SH'
+            ''')
+            latest, count = cursor.fetchone()
+            conn.close()
+
+            print(f"[LocalData] [A股指数] 下载完成：{count} 个指数，最新日期 {latest}")
+            return {'success': True, 'indices_count': count, 'latest_date': latest}
+        else:
+            return {'success': False, 'message': '下载失败'}
+
+    except Exception as e:
+        print(f"[LocalData] [A股指数] 下载异常: {e}")
+        return {'success': False, 'message': str(e)}

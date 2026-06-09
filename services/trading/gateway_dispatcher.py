@@ -282,8 +282,15 @@ class GatewayDispatcher:
 
         # ③ 仍有 None → 尝试多数据源 channel provider（AKShare/新浪/腾讯等）
         still_none = [c for c in codes if results.get(c) is None]
+        get_logger("dispatcher").log_event("channel_fallback_check",
+            f"still_none={len(still_none)}, total_codes={len(codes)}, results_none={sum(1 for v in results.values() if v is None)}")
         if still_none:
+            get_logger("dispatcher").log_event("channel_fallback_try",
+                f"SDK 不可用，尝试多数据源兜底获取 {len(still_none)} 只股票行情")
             channel_results = await self._fallback_channel_providers(still_none)
+            valid_from_channel = sum(1 for md in channel_results.values() if md and md.current_price > 0)
+            get_logger("dispatcher").log_event("channel_fallback_done",
+                f"多数据源返回 {valid_from_channel}/{len(still_none)} 只有效行情")
             for code, md in channel_results.items():
                 if md and md.current_price > 0:
                     results[code] = md
@@ -474,8 +481,10 @@ class GatewayDispatcher:
 
     @staticmethod
     async def _fallback_channel_providers(codes: List[str]) -> Dict[str, Any]:
-        """SDK kline 失败后，通过多数据源 channel provider（AKShare/新浪/腾讯等）获取行情"""
-        import asyncio
+        """SDK kline 失败后，通过多数据源 channel provider（AKShare/新浪/腾讯等）获取行情
+
+        分批调用（每批 50 只），避免 sina/tencent URL 过长报 414/431。
+        """
         from services.trading.gateway import MarketData
 
         if not codes:
@@ -483,35 +492,43 @@ class GatewayDispatcher:
 
         results: Dict[str, Any] = {}
         try:
-            from services.data.channel import get_channel_router, ChannelType
+            from services.data.channel.router import get_channel_router, ChannelType
             router = get_channel_router()
-            batch_result = await router.execute(
-                ChannelType.TRADING, "get_batch_market_data",
-                stock_codes=codes,
-            )
-            if batch_result and isinstance(batch_result, dict):
-                for code, raw in batch_result.items():
-                    if raw and raw.get("current_price", 0) > 0:
-                        results[code] = MarketData(
-                            stock_code=raw.get("stock_code", code),
-                            stock_name=raw.get("stock_name", ""),
-                            current_price=float(raw.get("current_price", 0)),
-                            change_percent=float(raw.get("change_percent", 0)),
-                            high=float(raw.get("high", 0)),
-                            low=float(raw.get("low", 0)),
-                            open_price=float(raw.get("open_price", 0)),
-                            prev_close=float(raw.get("prev_close", 0)),
-                            volume=int(raw.get("volume", 0)),
-                            amount=float(raw.get("amount", 0)),
-                            bid=raw.get("bid", []),
-                            ask=raw.get("ask", []),
-                            bid_volume=raw.get("bid_volume", []),
-                            ask_volume=raw.get("ask_volume", []),
-                            trade_date=raw.get("trade_date", ""),
-                            source="channel",
-                        )
-        except Exception:
-            pass
+            batch_size = 50  # sina/tencent URL 长度限制
+            for i in range(0, len(codes), batch_size):
+                batch = codes[i:i + batch_size]
+                try:
+                    batch_result = await router.execute(
+                        ChannelType.TRADING, "get_batch_market_data",
+                        stock_codes=batch,
+                    )
+                    if batch_result and isinstance(batch_result, dict):
+                        for code, raw in batch_result.items():
+                            if raw and raw.get("current_price", 0) > 0:
+                                results[code] = MarketData(
+                                    stock_code=raw.get("stock_code", code),
+                                    stock_name=raw.get("stock_name", ""),
+                                    current_price=float(raw.get("current_price", 0)),
+                                    change_percent=float(raw.get("change_percent", 0)),
+                                    high=float(raw.get("high", 0)),
+                                    low=float(raw.get("low", 0)),
+                                    open_price=float(raw.get("open_price", 0)),
+                                    prev_close=float(raw.get("prev_close", 0)),
+                                    volume=int(raw.get("volume", 0)),
+                                    amount=float(raw.get("amount", 0)),
+                                    bid=raw.get("bid", []),
+                                    ask=raw.get("ask", []),
+                                    bid_volume=raw.get("bid_volume", []),
+                                    ask_volume=raw.get("ask_volume", []),
+                                    trade_date=raw.get("trade_date", ""),
+                                    source="channel",
+                                )
+                except Exception:
+                    pass  # 单批失败继续下一批
+        except Exception as e:
+            import traceback
+            get_logger("dispatcher").log_event("channel_fallback_error",
+                f"多数据源 fallback 失败: {e}\n{traceback.format_exc()}")
         return results
 
     @staticmethod

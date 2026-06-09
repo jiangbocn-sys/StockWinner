@@ -39,7 +39,12 @@ class ChannelConfig:
 
 
 class ChannelRouter:
-    """通道路由器 — 管理数据源选择和自动降级"""
+    """通道路由器 — 管理数据源选择和自动降级
+
+    失败通道冷却机制：通道失败后 30 分钟内不再重试，避免每次请求都浪费资源。
+    """
+
+    FAILED_PROVIDER_COOLDOWN = 600  # 失败通道冷却 10 分钟
 
     def __init__(self):
         self._providers: Dict[str, DataProvider] = {}  # provider_id -> instance
@@ -48,6 +53,7 @@ class ChannelRouter:
         self._initialized = False
         self._call_counts: Dict[str, int] = {}  # provider_id -> total calls (内存缓存)
         self._success_counts: Dict[str, int] = {}  # provider_id -> total successes
+        self._provider_cooldowns: Dict[str, float] = {}  # provider_id -> cooldown_until (time.time() + 1800)
 
     # ============================================================
     # 注册和配置
@@ -99,8 +105,18 @@ class ChannelRouter:
 
         last_error = None
         tried = []
+        now_ts = time.time()
 
         for provider_id in config.provider_order:
+            # 检查冷却：失败通道 30 分钟内跳过
+            cooldown_until = self._provider_cooldowns.get(provider_id, 0)
+            if now_ts < cooldown_until:
+                remaining = int(cooldown_until - now_ts)
+                if remaining > 60:
+                    logger.debug("channel_cooldown_skip",
+                        f"跳过冷却中的通道 {provider_id}（剩余 {remaining}s）")
+                continue
+
             provider = self._providers.get(provider_id)
             if not provider:
                 continue
@@ -118,7 +134,15 @@ class ChannelRouter:
                     timeout=config.timeout_seconds,
                 )
 
-                # 成功：记录统计
+                # 验证结果：batch market data 如果全为 None 则视为失败，降级到下一个 provider
+                if method_name == "get_batch_market_data" and isinstance(result, dict):
+                    valid = sum(1 for v in result.values()
+                               if v is not None and v.get("current_price", 0) > 0)
+                    if valid == 0:
+                        raise DataProviderError(provider_id, f"返回 {len(result)} 只股票但全部无效，降级到下一数据源")
+
+                # 成功：清除冷却，记录统计
+                self._provider_cooldowns.pop(provider_id, None)
                 elapsed_ms = (time.monotonic() - start_time) * 1000
                 self._failure_counts[provider_id] = 0
                 self._call_counts[provider_id] = self._call_counts.get(provider_id, 0) + 1
@@ -136,32 +160,35 @@ class ChannelRouter:
                 return result
 
             except asyncio.TimeoutError:
+                self._provider_cooldowns[provider_id] = time.time() + self.FAILED_PROVIDER_COOLDOWN
                 elapsed_ms = (time.monotonic() - start_time) * 1000
                 self._failure_counts[provider_id] = self._failure_counts.get(provider_id, 0) + 1
                 self._call_counts[provider_id] = self._call_counts.get(provider_id, 0) + 1
                 self._record_usage(provider_id, channel_type.value, method_name, False, elapsed_ms, "timeout")
                 last_error = DataProviderError(provider_id, f"超时 ({config.timeout_seconds}s)")
-                logger.warning("channel_timeout", f"Provider {provider_id} 超时: {method_name} ({elapsed_ms:.0f}ms)")
+                logger.warning("channel_timeout", f"Provider {provider_id} 超时: {method_name} ({elapsed_ms:.0f}ms)，冷却 {self.FAILED_PROVIDER_COOLDOWN}s")
                 from services.common.events import emit_provider_status
                 emit_provider_status(provider_id, False, f"超时 ({config.timeout_seconds}s)")
 
             except DataProviderError as e:
+                self._provider_cooldowns[provider_id] = time.time() + self.FAILED_PROVIDER_COOLDOWN
                 elapsed_ms = (time.monotonic() - start_time) * 1000
                 self._failure_counts[provider_id] = self._failure_counts.get(provider_id, 0) + 1
                 self._call_counts[provider_id] = self._call_counts.get(provider_id, 0) + 1
                 self._record_usage(provider_id, channel_type.value, method_name, False, elapsed_ms, str(e))
                 last_error = e
-                logger.warning("channel_error", f"Provider {provider_id} 失败: {e}")
+                logger.warning("channel_error", f"Provider {provider_id} 失败: {e}，冷却 {self.FAILED_PROVIDER_COOLDOWN}s")
                 from services.common.events import emit_provider_status
                 emit_provider_status(provider_id, False, str(e))
 
             except Exception as e:
+                self._provider_cooldowns[provider_id] = time.time() + self.FAILED_PROVIDER_COOLDOWN
                 elapsed_ms = (time.monotonic() - start_time) * 1000
                 self._failure_counts[provider_id] = self._failure_counts.get(provider_id, 0) + 1
                 self._call_counts[provider_id] = self._call_counts.get(provider_id, 0) + 1
                 self._record_usage(provider_id, channel_type.value, method_name, False, elapsed_ms, str(e))
                 last_error = DataProviderError(provider_id, str(e), e)
-                logger.warning("channel_error", f"Provider {provider_id} 异常: {method_name}: {e}")
+                logger.warning("channel_error", f"Provider {provider_id} 异常: {method_name}: {e}，冷却 {self.FAILED_PROVIDER_COOLDOWN}s")
                 from services.common.events import emit_provider_status
                 emit_provider_status(provider_id, False, str(e))
 

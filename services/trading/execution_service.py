@@ -258,6 +258,11 @@ class TradeExecutionService:
         订单流转：pending → submitted → filled
         若任何环节失败，订单标记为 rejected
 
+        成交价确定逻辑：
+        1. 获取实时行情（卖一价 ask[0]）
+        2. 若触发价 > 卖一价 → 按卖一价成交（更优价格）
+        3. 若 SDK 不可用 → 按触发价成交（模拟模式兜底）
+
         资金检查优先：所有资金/风控检查在订单创建前完成，避免无效委托
 
         Returns:
@@ -271,6 +276,31 @@ class TradeExecutionService:
                 "quantity": 0,
                 "fees": {"commission": 0, "transfer_fee": 0, "stamp_tax": 0, "total_fee": 0}
             }
+
+        # ========== 获取实时行情确定成交价 ==========
+        execution_price = price  # 默认使用触发价（模拟兜底）
+        realtime_source = "trigger_price"  # 记录价格来源
+
+        try:
+            from services.trading.gateway import get_gateway
+            gateway = await get_gateway()
+            market_data = await gateway.get_market_data(stock_code)
+
+            if market_data and market_data.current_price > 0:
+                # 有实时行情
+                ask_price = market_data.ask[0] if market_data.ask and len(market_data.ask) > 0 else 0
+
+                if ask_price > 0 and price > ask_price:
+                    # 触发价 > 卖一价 → 按卖一价成交（买入时卖一价是对手盘）
+                    execution_price = ask_price
+                    realtime_source = "realtime_ask"
+                elif market_data.current_price > 0:
+                    # 无卖一价但有现价 → 按现价成交
+                    execution_price = market_data.current_price
+                    realtime_source = "realtime_current"
+        except Exception as e:
+            # SDK 不可用或获取失败 → 使用触发价（模拟模式）
+            pass
 
         # ========== 资金预检查（订单创建前）==========
         # 1. 获取账户可用资金
@@ -288,7 +318,7 @@ class TradeExecutionService:
 
         # 3. 计算最小买入金额（一手 + 最低手续费）
         fees_cfg = await self._get_fee_config()
-        min_buy_amount = price * 100 + fees_cfg["min_commission"]
+        min_buy_amount = execution_price * 100 + fees_cfg["min_commission"]
 
         # 4. 检查账户资金是否足够买一手
         if available_cash < min_buy_amount:
@@ -310,7 +340,7 @@ class TradeExecutionService:
 
         # ========== 计算可买数量 ==========
         quantity, total_amount, fees = await self.calculate_buy_quantity(
-            stock_code, price, target_quantity, strategy_id=strategy_id
+            stock_code, execution_price, target_quantity, strategy_id=strategy_id
         )
 
         if quantity <= 0:
@@ -325,7 +355,7 @@ class TradeExecutionService:
         try:
             from services.trading.risk_service import get_risk_service
             risk = get_risk_service(self.account_id)
-            passed, reason = await risk.check_buy(stock_code, price, quantity)
+            passed, reason = await risk.check_buy(stock_code, execution_price, quantity)
             if not passed:
                 return {
                     "success": False,
@@ -336,7 +366,7 @@ class TradeExecutionService:
 
             # 策略级仓位上限检查
             if strategy_id:
-                passed, reason = await risk.check_strategy_position(stock_code, price, quantity, strategy_id)
+                passed, reason = await risk.check_strategy_position(stock_code, execution_price, quantity, strategy_id)
                 if not passed:
                     return {
                         "success": False,
@@ -367,7 +397,7 @@ class TradeExecutionService:
             stock_code=stock_code,
             stock_name=stock_name,
             trade_type="buy",
-            price=price,
+            price=execution_price,
             quantity=quantity,
             trigger_source=trigger_source,
             stop_loss_price=None,
@@ -377,13 +407,21 @@ class TradeExecutionService:
         # 更新订单为 submitted
         await order_svc.update_status(db_order_id, "submitted")
 
+        # 记录价格来源日志
+        from services.common.structured_logger import get_logger
+        logger = get_logger("execution")
+        logger.log_event("buy_execution_price",
+            f"买入 {stock_code}: 触发价={price:.2f}, 成交价={execution_price:.2f}, 来源={realtime_source}",
+            stock_code=stock_code, trigger_price=price, execution_price=execution_price,
+            realtime_source=realtime_source, quantity=quantity)
+
         # 通过网关下单（mock 模式直接返回成功，实盘调用券商 SDK）
         try:
             from services.trading.gateway import get_gateway
             gateway = await get_gateway()
             order_result = await gateway.buy(
                 stock_code=stock_code,
-                price=price,
+                price=execution_price,
                 quantity=quantity,
                 account_id=self.account_id,
             )
@@ -432,7 +470,7 @@ class TradeExecutionService:
                     old_available = existing_position.get("available_quantity", 0)
                     new_qty = old_qty + quantity
                     # 加权成本 = (旧持仓总成本 + 本次含费总成本) / 新持仓数量
-                    new_cost = (old_qty * old_cost + total_amount) / new_qty if new_qty > 0 else price
+                    new_cost = (old_qty * old_cost + total_amount) / new_qty if new_qty > 0 else execution_price
                     new_available = old_available
 
                     await conn.execute(
@@ -440,7 +478,7 @@ class TradeExecutionService:
                            SET quantity = ?, avg_cost = ?, available_quantity = ?, market_value = ?,
                                updated_at = ?, strategy_id = COALESCE(?, strategy_id)
                            WHERE account_id = ? AND stock_code = ?""",
-                        (new_qty, new_cost, new_available, new_qty * price,
+                        (new_qty, new_cost, new_available, new_qty * execution_price,
                          format_china_time(), strategy_id, self.account_id, stock_code)
                     )
                 else:
@@ -449,8 +487,8 @@ class TradeExecutionService:
                            (account_id, user_id, stock_code, stock_name, quantity, available_quantity,
                             avg_cost, market_value, strategy_id, created_at, updated_at)
                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                        (self.account_id, user_id, stock_code, stock_name, quantity, 0, price,
-                         quantity * price, strategy_id, format_china_time(), format_china_time())
+                        (self.account_id, user_id, stock_code, stock_name, quantity, 0, execution_price,
+                         quantity * execution_price, strategy_id, format_china_time(), format_china_time())
                     )
 
                 # 3. 记录交易
@@ -462,7 +500,7 @@ class TradeExecutionService:
                     "stock_name": stock_name,
                     "trade_type": "buy",
                     "quantity": quantity,
-                    "price": price,
+                    "price": execution_price,
                     "amount": total_amount - fees["total_fee"],
                     "commission": fees["commission"],
                     "trade_time": format_china_time(),
@@ -517,7 +555,9 @@ class TradeExecutionService:
                 "success": True,
                 "message": "买入成功",
                 "quantity": quantity,
-                "price": price,
+                "price": execution_price,
+                "trigger_price": price,  # 保留触发价用于对比
+                "realtime_source": realtime_source,
                 "total_amount": total_amount,
                 "fees": fees,
                 "trade_record_id": trade_record_id,
@@ -549,6 +589,11 @@ class TradeExecutionService:
         """
         执行卖出交易（订单状态机 + 原子事务）
 
+        成交价确定逻辑：
+        1. 获取实时行情（买一价 bid[0]）
+        2. 若触发价 < 买一价 → 按买一价成交（更优价格）
+        3. 若 SDK 不可用 → 按触发价成交（模拟模式兜底）
+
         Returns:
             交易结果
         """
@@ -559,6 +604,31 @@ class TradeExecutionService:
                 "message": f"无效价格: {price}，拒绝卖出",
             }
 
+        # ========== 获取实时行情确定成交价 ==========
+        execution_price = price  # 默认使用触发价（模拟兜底）
+        realtime_source = "trigger_price"  # 记录价格来源
+
+        try:
+            from services.trading.gateway import get_gateway
+            gateway = await get_gateway()
+            market_data = await gateway.get_market_data(stock_code)
+
+            if market_data and market_data.current_price > 0:
+                # 有实时行情
+                bid_price = market_data.bid[0] if market_data.bid and len(market_data.bid) > 0 else 0
+
+                if bid_price > 0 and price < bid_price:
+                    # 触发价 < 买一价 → 按买一价成交（卖出时买一价是对手盘）
+                    execution_price = bid_price
+                    realtime_source = "realtime_bid"
+                elif market_data.current_price > 0:
+                    # 无买一价但有现价 → 按现价成交
+                    execution_price = market_data.current_price
+                    realtime_source = "realtime_current"
+        except Exception as e:
+            # SDK 不可用或获取失败 → 使用触发价（模拟模式）
+            pass
+
         # 创建订单（pending 状态）
         from services.trading.order_service import get_order_service
         order_svc = get_order_service(self.account_id)
@@ -566,14 +636,22 @@ class TradeExecutionService:
             stock_code=stock_code,
             stock_name=stock_name,
             trade_type="sell",
-            price=price,
+            price=execution_price,
             quantity=target_quantity or 0,
             trigger_source=trigger_source,
         )
 
+        # 记录价格来源日志
+        from services.common.structured_logger import get_logger
+        logger = get_logger("execution")
+        logger.log_event("sell_execution_price",
+            f"卖出 {stock_code}: 触发价={price:.2f}, 成交价={execution_price:.2f}, 来源={realtime_source}",
+            stock_code=stock_code, trigger_price=price, execution_price=execution_price,
+            realtime_source=realtime_source, quantity=target_quantity)
+
         # 计算可卖数量和费用
         quantity, net_amount, fees = await self.calculate_sell_quantity(
-            stock_code, price, target_quantity
+            stock_code, execution_price, target_quantity
         )
 
         if quantity <= 0:
@@ -594,7 +672,7 @@ class TradeExecutionService:
             gateway = await get_gateway()
             order_result = await gateway.sell(
                 stock_code=stock_code,
-                price=price,
+                price=execution_price,
                 quantity=quantity,
                 account_id=self.account_id,
             )
@@ -617,8 +695,8 @@ class TradeExecutionService:
 
         # 获取持仓信息
         position = await self.get_position(stock_code)
-        avg_cost = position.get("avg_cost", price)
-        profit_loss = (price - avg_cost) * quantity
+        avg_cost = position.get("avg_cost", execution_price)
+        profit_loss = (execution_price - avg_cost) * quantity
 
         old_qty = position.get("quantity", 0)
         old_available = position.get("available_quantity", 0)
@@ -656,7 +734,7 @@ class TradeExecutionService:
                            SET quantity = ?, available_quantity = ?, avg_cost = ?,
                                market_value = ?, updated_at = ?
                            WHERE account_id = ? AND stock_code = ?""",
-                        (new_qty, new_available, new_cost, new_qty * price, format_china_time(),
+                        (new_qty, new_available, new_cost, new_qty * execution_price, format_china_time(),
                          self.account_id, stock_code)
                     )
 
@@ -689,7 +767,7 @@ class TradeExecutionService:
                     "stock_name": stock_name,
                     "trade_type": "sell",
                     "quantity": quantity,
-                    "price": price,
+                    "price": execution_price,
                     "amount": net_amount + fees["total_fee"],
                     "commission": fees["commission"],
                     "profit_loss": profit_loss,
@@ -733,7 +811,9 @@ class TradeExecutionService:
                 "success": True,
                 "message": "卖出成功",
                 "quantity": quantity,
-                "price": price,
+                "price": execution_price,
+                "trigger_price": price,  # 保留触发价用于对比
+                "realtime_source": realtime_source,
                 "net_amount": net_amount,
                 "fees": fees,
                 "profit_loss": profit_loss,

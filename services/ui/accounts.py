@@ -35,11 +35,13 @@ async def list_accounts():
                 "stamp_tax": float(acc.get("stamp_tax", 0.0005)),
                 "transfer_fee": float(acc.get("transfer_fee", 0.00002)),
                 "min_commission": float(acc.get("min_commission", 5.0)),
+                "trade_mode": acc.get("trade_mode", "mock"),
                 "broker_account": acc.get("broker_account", ""),
                 "broker_company": acc.get("broker_company", ""),
                 "broker_server_ip": acc.get("broker_server_ip", ""),
                 "broker_server_port": acc.get("broker_server_port", ""),
                 "broker_status": acc.get("broker_status", ""),
+                "broker_qmt_userdata_path": acc.get("broker_qmt_userdata_path", ""),
                 "notes": acc.get("notes", ""),
                 "created_at": acc.get("created_at", ""),
                 "updated_at": acc.get("updated_at", "")
@@ -94,12 +96,15 @@ async def get_account(account_id: str = Path(..., description="账户 ID")):
             "display_name": account["display_name"],
             "is_active": bool(account["is_active"]),
             "available_cash": float(account["available_cash"] or 0),
+            "trade_mode": account.get("trade_mode", "mock"),
             "broker_account": account.get("broker_account", ""),
             "broker_password": account.get("broker_password", ""),
             "broker_company": account.get("broker_company", ""),
             "broker_server_ip": account.get("broker_server_ip", ""),
             "broker_server_port": account.get("broker_server_port", ""),
             "broker_status": account.get("broker_status", ""),
+            "broker_qmt_userdata_path": account.get("broker_qmt_userdata_path", ""),
+            "broker_qmt_session": account.get("broker_qmt_session", ""),
             "notes": account.get("notes", ""),
             "created_at": account.get("created_at", ""),
             "updated_at": account.get("updated_at", "")
@@ -172,8 +177,9 @@ async def update_account(account_id: str, account_data: dict = Body(...)):
     # 构建动态更新语句
     updatable_fields = [
         "name", "display_name", "is_active", "available_cash",
-        "broker_account", "broker_password", "broker_company",
+        "trade_mode", "broker_account", "broker_password", "broker_company",
         "broker_server_ip", "broker_server_port", "broker_status", "notes",
+        "broker_qmt_userdata_path", "broker_qmt_session",
         "commission_rate", "stamp_tax", "transfer_fee", "min_commission"
     ]
 
@@ -267,6 +273,48 @@ async def update_position_strategy(
     )
 
     return {"success": True, "message": "持仓策略已更新"}
+
+
+@router.get("/api/v1/ui/accounts/{account_id}/broker-status")
+async def get_broker_status(account_id: str = Path(..., description="账户 ID")):
+    """获取券商连接状态"""
+    # 检查账户是否存在
+    await validate_account_exists(account_id)
+
+    db = get_db_manager()
+    acc = await db.fetchone(
+        "SELECT trade_mode, broker_account, broker_qmt_userdata_path FROM accounts WHERE account_id = ?",
+        (account_id,)
+    )
+
+    trade_mode = acc.get("trade_mode", "mock")
+
+    # mock 模式直接返回
+    if trade_mode == "mock":
+        return {
+            "success": True,
+            "data": {
+                "broker_type": "mock",
+                "connected": True,
+                "message": "模拟交易模式"
+            }
+        }
+
+    # 实盘模式检查连接
+    from services.trading.trading_executor import TradingExecutorService
+    executor = TradingExecutorService()
+
+    health = await executor.health_check(account_id)
+
+    return {
+        "success": True,
+        "data": {
+            "broker_type": trade_mode,
+            "connected": health.get("ok", False),
+            "message": health.get("message", ""),
+            **{k: v for k, v in health.items() if k not in ["ok", "message"]}
+        }
+    }
 
 
 @router.get("/api/v1/ui/accounts/statistics")

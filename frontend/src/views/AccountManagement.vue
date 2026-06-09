@@ -178,6 +178,27 @@
             <span class="field-hint">默认 5 元，单笔佣金最低收取</span>
           </el-form-item>
 
+          <el-divider content-position="left">交易模式配置</el-divider>
+
+          <el-form-item label="交易模式" prop="trade_mode">
+            <el-select v-model="accountForm.trade_mode" placeholder="请选择交易模式" style="width: 200px">
+              <el-option label="模拟交易（mock）" value="mock" />
+              <el-option label="QMT 实盘" value="qmt" />
+            </el-select>
+            <span class="field-hint">模拟交易不执行实际下单，QMT 实盘需配置券商信息</span>
+          </el-form-item>
+
+          <!-- QMT 配置（trade_mode == 'qmt' 时显示） -->
+          <template v-if="accountForm.trade_mode === 'qmt'">
+            <el-form-item label="QMT userdata 路径" prop="broker_qmt_userdata_path">
+              <el-input v-model="accountForm.broker_qmt_userdata_path" placeholder="如: C:\国金QMT\userdata_mini" />
+              <span class="field-hint">miniQmt 客户端的 userdata_mini 目录路径（Windows）</span>
+            </el-form-item>
+            <el-form-item label="QMT Session" prop="broker_qmt_session">
+              <el-input v-model="accountForm.broker_qmt_session" placeholder="可选，默认 'default'" />
+            </el-form-item>
+          </template>
+
           <el-divider content-position="left">银河证券账户信息</el-divider>
 
           <el-form-item label="资金账号" prop="broker_account">
@@ -262,6 +283,7 @@ const accountForm = ref({
   password: '',
   display_name: '',
   available_cash: 0,
+  trade_mode: 'mock',
   commission_rate: 0.0003,
   stamp_tax: 0.0005,
   transfer_fee: 0.00002,
@@ -272,6 +294,8 @@ const accountForm = ref({
   broker_server_ip: '',
   broker_server_port: 8600,
   broker_status: 'normal',
+  broker_qmt_userdata_path: '',
+  broker_qmt_session: '',
   notes: '',
   is_active: 1
 })
@@ -367,6 +391,7 @@ const resetForm = () => {
     password: '',
     display_name: '',
     available_cash: 0,
+    trade_mode: 'mock',
     commission_rate: 0.0003,
     stamp_tax: 0.0005,
     transfer_fee: 0.00002,
@@ -377,6 +402,8 @@ const resetForm = () => {
     broker_server_ip: '',
     broker_server_port: 8600,
     broker_status: 'normal',
+    broker_qmt_userdata_path: '',
+    broker_qmt_session: '',
     notes: '',
     is_active: 1
   }
@@ -393,6 +420,7 @@ const handleEdit = (row) => {
     password: '',
     display_name: row.display_name,
     available_cash: row.available_cash || 0,
+    trade_mode: row.trade_mode || 'mock',
     commission_rate: row.commission_rate || 0.0003,
     stamp_tax: row.stamp_tax || 0.0005,
     transfer_fee: row.transfer_fee || 0.00002,
@@ -403,6 +431,8 @@ const handleEdit = (row) => {
     broker_server_ip: row.broker_server_ip || '',
     broker_server_port: row.broker_server_port || 8600,
     broker_status: row.broker_status || 'normal',
+    broker_qmt_userdata_path: row.broker_qmt_userdata_path || '',
+    broker_qmt_session: row.broker_qmt_session || '',
     notes: row.notes || '',
     is_active: row.is_active
   }

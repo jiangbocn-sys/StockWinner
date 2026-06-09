@@ -251,6 +251,7 @@ class AmazingDataProvider(DataProvider):
                         flat[code] = df
 
         output = {}
+        valid_count = 0
         for code in stock_codes:
             snap = flat.get(code)
             if snap is None or (hasattr(snap, "empty") and snap.empty) or len(snap) == 0:
@@ -258,6 +259,13 @@ class AmazingDataProvider(DataProvider):
             else:
                 row = snap.iloc[0] if hasattr(snap, "iloc") else snap[0] if isinstance(snap, list) else snap
                 output[code] = self._normalize_market_data(row, code)
+                if output[code] and output[code].get("current_price", 0) > 0:
+                    valid_count += 1
+
+        # 如果全部无效，抛异常让 router 降级到下一个 provider
+        if valid_count == 0:
+            raise DataProviderError(self.provider_id, "银河证券 SDK 不可用，所有股票返回空数据")
+
         return output
 
     # ============================================================

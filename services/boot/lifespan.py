@@ -18,7 +18,7 @@ def create_lifespan():
     import os
     import json
 
-    MIGRATION_VERSION = 19
+    MIGRATION_VERSION = 20
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -58,6 +58,9 @@ def create_lifespan():
         from services.common.scheduler_service import start_scheduler, get_scheduler, _set_fastapi_loop
         start_scheduler()
         log.log_event("scheduler_started", "调度服务已启动")
+
+        # 初始化多数据源 ChannelRouter（必须在 dispatcher 之前，保证 fallback 可用）
+        await _init_channel_router(db_manager, log)
 
         # 启动行情调度器
         from services.trading.gateway_dispatcher import get_gateway_dispatcher
@@ -117,9 +120,6 @@ def create_lifespan():
 
         # ========== 数据库迁移 ==========
         await _run_migrations(db_manager, log, MIGRATION_VERSION)
-
-        # 初始化多数据源 ChannelRouter
-        await _init_channel_router(db_manager, log)
 
         # ========== 启动时同步所有持仓止盈止损 ==========
         try:
@@ -830,6 +830,12 @@ async def _run_migrations(db_manager, log, migration_version: int):
         "ALTER TABLE backtest_trades ADD COLUMN buy_quantity INTEGER DEFAULT 0",
         "ALTER TABLE backtest_trades ADD COLUMN sell_quantity INTEGER DEFAULT 0",
         "ALTER TABLE backtest_trades ADD COLUMN remaining_quantity INTEGER DEFAULT 0",
+    ])
+
+    # v20: QMT 交易接口配置字段
+    await run_migration(20, "QMT 交易接口配置", [
+        "ALTER TABLE accounts ADD COLUMN broker_qmt_userdata_path TEXT DEFAULT ''",
+        "ALTER TABLE accounts ADD COLUMN broker_qmt_session TEXT DEFAULT ''",
     ])
 
     # v7 数据源配置 seed

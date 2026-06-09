@@ -1520,10 +1520,11 @@ async def query_data_etf_pcf(
         ip_address=request.client.host if request.client else None,
     )
     try:
+        import asyncio
         from services.common.sdk_manager import get_sdk_manager
         codes_list = [c.strip() for c in etf_codes.split(",") if c.strip()]
         sdk = get_sdk_manager()
-        pcf_info, constituents = sdk.get_etf_pcf(codes_list)
+        pcf_info, constituents = await asyncio.to_thread(sdk.get_etf_pcf, codes_list)
         # 处理 NaN 值：先转 object 类型，再替换 NaN 为 None
         pcf_records = pcf_info.astype(object).where(pcf_info.notnull(), None).to_dict('records') if not pcf_info.empty else []
         constituents_data = {}
@@ -1559,10 +1560,11 @@ async def query_data_etf_share(
         ip_address=request.client.host if request.client else None,
     )
     try:
+        import asyncio
         from services.common.sdk_manager import get_sdk_manager
         codes_list = [c.strip() for c in etf_codes.split(",") if c.strip()]
         sdk = get_sdk_manager()
-        result = sdk.get_fund_share(codes_list)
+        result = await asyncio.to_thread(sdk.get_fund_share, codes_list)
         # 处理 NaN 值：先转 object 类型，再替换 NaN 为 None
         data = {}
         for k, v in result.items():
@@ -1590,10 +1592,11 @@ async def query_data_etf_iopv(
         ip_address=request.client.host if request.client else None,
     )
     try:
+        import asyncio
         from services.common.sdk_manager import get_sdk_manager
         codes_list = [c.strip() for c in etf_codes.split(",") if c.strip()]
         sdk = get_sdk_manager()
-        result = sdk.get_fund_iopv(codes_list)
+        result = await asyncio.to_thread(sdk.get_fund_iopv, codes_list)
         # 处理 NaN 值：先转 object 类型，再替换 NaN 为 None
         data = {}
         for k, v in result.items():
@@ -2234,9 +2237,17 @@ async def submit_strategy_code(
     __import__("sys").stdout = captured_output
     start_time = time.time()
 
+    def _run_strategy_sync():
+        """在线程池中同步执行策略，捕获输出"""
+        try:
+            return engine.execute_strategy(strategy_dict, context)
+        finally:
+            __import__("sys").stdout = old_stdout
+
     try:
+        import asyncio
         strategy_dict = {"code": code, "function_name": function_name or "run", "name": name}
-        signals = engine.execute_strategy(strategy_dict, context)
+        signals = await asyncio.to_thread(_run_strategy_sync)
         duration_ms = int((time.time() - start_time) * 1000)
         test_run_output = captured_output.getvalue()
         test_run_result = {
@@ -2777,7 +2788,8 @@ async def strategy_execute(
     }
 
     engine = get_strategy_engine()
-    signals = engine.execute_strategy(strategy, context)
+    import asyncio
+    signals = await asyncio.to_thread(engine.execute_strategy, strategy, context)
 
     agent_id = agent.get("id", "")
     await log_action(
@@ -3735,7 +3747,7 @@ async def update_adj_factor_full(
     sdk = get_sdk_manager()
 
     # 获取全部 A 股代码
-    codes = sdk.get_code_list('EXTRA_STOCK_A')
+    codes = await asyncio.to_thread(sdk.get_code_list, 'EXTRA_STOCK_A')
 
     if not codes:
         return {"success": False, "message": "获取股票列表失败"}
@@ -3748,7 +3760,7 @@ async def update_adj_factor_full(
     for i in range(0, len(codes), batch_size):
         batch = codes[i:i+batch_size]
         try:
-            df = sdk.get_adj_factor(batch)
+            df = await asyncio.to_thread(sdk.get_adj_factor, batch)
             if not df.empty:
                 saved = save_adj_factor_batch(df)
                 total_saved += saved
@@ -3775,13 +3787,14 @@ async def update_adj_factor_single(
     _: None = Depends(require_role(AgentRole.OPERATOR)),
 ):
     """手动更新单只股票的复权因子"""
+    import asyncio
     from services.common.sdk_manager import get_sdk_manager
     from services.data.adj_factor_service import save_adj_factor_batch, get_adj_factor_for_stock
 
     sdk = get_sdk_manager()
 
     try:
-        df = sdk.get_adj_factor([stock_code])
+        df = await asyncio.to_thread(sdk.get_adj_factor, [stock_code])
         if df.empty:
             return {"success": False, "message": "SDK 返回空数据"}
 

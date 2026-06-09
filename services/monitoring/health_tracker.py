@@ -19,6 +19,7 @@ class HealthTracker:
         self._data_stale = False
         self._last_notify_time: float = 0.0
         self._notify_cooldown: float = 300  # 5 分钟
+        self._last_notify_type: str = ""  # 上次通知的类型，同一类型不重复
         self._account_ids: List[str] = []
 
     def set_account_ids(self, account_ids: List[str]):
@@ -32,6 +33,7 @@ class HealthTracker:
         self._sdk_error_time = None
         self._sdk_error_msg = ""
         self._consecutive_errors = 0
+        self._last_notify_type = ""  # 重置通知状态，允许下次异常时再次通知
 
     def record_sdk_error(self, error: Exception):
         """记录 SDK 连接失败"""
@@ -88,15 +90,15 @@ class HealthTracker:
         }
 
     def _notify_sdk_event(self, issue_type: str, detail: str):
-        """发送 SDK 异常飞书通知（带防抖，5 分钟内不重复）
+        """发送 SDK 异常飞书通知（仅状态变化时发送一次，持续异常不重复）
 
         使用 run_coroutine_threadsafe 提交到主事件循环，避免临时循环导致 aiosqlite 连接失效。
         """
         import time
         import asyncio
 
-        now = time.time()
-        if now - self._last_notify_time < self._notify_cooldown:
+        # 同一 issue 已通知过，不再重复
+        if issue_type == self._last_notify_type:
             return
 
         try:
@@ -135,6 +137,7 @@ class HealthTracker:
                     get_logger("monitor").log_event("notify_failed", f"通知发送失败: {e}")
 
             self._last_notify_time = now
+            self._last_notify_type = issue_type
             get_logger("monitor").log_event("sdk_notify_sent", f"已发送飞书通知: {issue_type}")
         except Exception as e:
             get_logger("monitor").log_event("notify_error", f"通知发送异常: {e}")
