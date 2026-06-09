@@ -967,17 +967,17 @@ class SchedulerService:
             logger.error(f"注册任务失败: {e}", exc_info=True)
 
     def _register_monitor_auto_start_job(self):
-        """注册交易监控自动启动任务 — 9:15 + 13:00（周一至周五，仅交易日）"""
+        """注册交易监控自动启动任务 — 9:25 + 13:00（周一至周五，仅交易日）"""
         try:
-            # 早盘启动：9:15
+            # 早盘启动：9:25（避开 9:00 复权因子更新）
             self._scheduler.add_job(
                 self._monitor_auto_start_job,
-                CronTrigger.from_crontab("15 9 * * mon-fri", timezone=CHINA_TZ),
+                CronTrigger.from_crontab("25 9 * * mon-fri", timezone=CHINA_TZ),
                 id="monitor_auto_start",
                 name="系统任务: 自动启动交易监控",
                 replace_existing=True,
             )
-            logger.info("  注册监控任务: monitor_auto_start (cron=15 9 * * mon-fri)")
+            logger.info("  注册监控任务: monitor_auto_start (cron=25 9 * * mon-fri)")
 
             # 午盘启动：13:00（覆盖后端在午间重启的场景）
             self._scheduler.add_job(

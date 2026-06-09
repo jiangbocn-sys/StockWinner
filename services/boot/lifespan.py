@@ -512,7 +512,7 @@ async def _run_migrations(db_manager, log, migration_version: int):
             {"task_type": "builtin", "module": "monthly_factors", "account_id": "SYSTEM", "cron_expression": "0 1 5 * *", "enabled": 1},
             {"task_type": "builtin", "module": "weekly_kline", "account_id": "SYSTEM", "cron_expression": "0 2 * * 6", "enabled": 1},
             {"task_type": "builtin", "module": "industry_download", "account_id": "SYSTEM", "cron_expression": "0 3 * * mon-fri", "enabled": 0},
-            {"task_type": "builtin", "module": "adj_factor", "account_id": "SYSTEM", "cron_expression": "15 9 * * mon-fri", "enabled": 0},
+            {"task_type": "builtin", "module": "adj_factor", "account_id": "SYSTEM", "cron_expression": "0 9 * * mon-fri", "enabled": 0},
             {"task_type": "builtin", "module": "daily_factor_calc", "account_id": "SYSTEM", "cron_expression": "", "enabled": 0},
         ]
         for t in builtin_defaults:
