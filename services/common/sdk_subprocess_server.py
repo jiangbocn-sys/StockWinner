@@ -226,27 +226,39 @@ def execute_sdk_method(method: str, kwargs: dict):
 
         elif method == "query_kline":
             md = get_market_data()
-            return md.query_kline(
-                code_list=kwargs.get("code_list"),
-                begin_date=kwargs.get("begin_date"),
-                end_date=kwargs.get("end_date"),
-                period=kwargs.get("period"),
-            )
+            try:
+                result = md.query_kline(
+                    code_list=kwargs.get("code_list"),
+                    begin_date=kwargs.get("begin_date"),
+                    end_date=kwargs.get("end_date"),
+                    period=kwargs.get("period"),
+                )
+                return result if result else {}
+            except (TypeError, ValueError) as e:
+                # SDK DataFrame 构造时 None 值导致 TypeError
+                # 或 TGW 返回数据格式问题
+                logger.log_event("sdk_kline_error", f"query_kline 异常: {e}, 返回空结果")
+                return {}
 
         elif method == "query_snapshot":
             md = get_market_data()
             try:
-                return md.query_snapshot(
+                result = md.query_snapshot(
                     code_list=kwargs.get("code_list"),
                     begin_date=kwargs.get("begin_date"),
                     end_date=kwargs.get("end_date"),
                 )
+                return result if result else {}
             except ValueError as e:
                 if "Invalid frequency" in str(e):
                     # pandas 2.x 不再支持 'S' 频率，snapshot 无法使用，快速返回空让 fallback 处理
                     logger.log_event("sdk_snapshot_skip", f"snapshot 频率不兼容，跳过")
                     return {}
                 raise
+            except TypeError as e:
+                # SDK DataFrame 构造时 None 值导致 TypeError
+                logger.log_event("sdk_snapshot_error", f"query_snapshot 异常: {e}, 返回空结果")
+                return {}
 
         elif method == "get_equity_structure":
             return get_info().get_equity_structure(
