@@ -2455,31 +2455,68 @@ async def delete_strategy(
     agent: dict = Depends(verify_agent_key),
     _: None = Depends(require_permission("strategy:delete")),
 ):
-    """删除策略"""
+    """删除策略（带关联检查）"""
     validate_account_scope(request, account_id)
     db = get_db_manager()
 
     strategy = await db.fetchone(
-        "SELECT * FROM strategies WHERE id = ? AND account_id = ?",
+        "SELECT id, name FROM strategies WHERE id = ? AND account_id = ?",
         (strategy_id, account_id)
     )
     if not strategy:
         raise HTTPException(status_code=404, detail="策略不存在")
 
+    # 检查持仓
+    position = await db.fetchone(
+        "SELECT stock_code, stock_name, quantity FROM stock_positions WHERE account_id = ? AND strategy_id = ? AND quantity > 0 LIMIT 1",
+        (account_id, strategy_id)
+    )
+    if position:
+        raise HTTPException(
+            status_code=400,
+            detail=f"策略「{strategy['name']}」有持仓「{position['stock_name']} ({position['stock_code']})」{position['quantity']}股，请先清仓再删除策略"
+        )
+
+    # 收集关联信息
+    warnings = []
+
+    # Watchlist 关联
+    wl_count = await db.fetchone(
+        "SELECT COUNT(*) as count FROM watchlist WHERE strategy_id = ? AND account_id = ?",
+        (strategy_id, account_id)
+    )
+    if wl_count and wl_count['count'] > 0:
+        warnings.append(f"Watchlist 中有 {wl_count['count']} 只股票关联此策略")
+
+    # 其他策略引用
+    sell_ref = await db.fetchall(
+        "SELECT id, name FROM strategies WHERE sell_strategy_id = ? AND account_id = ?",
+        (strategy_id, account_id)
+    )
+    if sell_ref:
+        ref_names = [f"「{r['name']}」" for r in sell_ref]
+        warnings.append(f"以下策略引用此策略作为卖出策略：{', '.join(ref_names)}")
+
     # 清理关联数据
     await db.execute("DELETE FROM temp_candidates WHERE strategy_id = ?", (strategy_id,))
     await db.execute("DELETE FROM candidate_groups WHERE screening_strategy_id = ?", (strategy_id,))
     await db.execute("DELETE FROM trading_signals WHERE strategy_id = ? AND account_id = ?", (strategy_id, account_id))
+    await db.execute("UPDATE watchlist SET strategy_id = NULL WHERE strategy_id = ? AND account_id = ?", (strategy_id, account_id))
+    await db.execute("UPDATE strategies SET sell_strategy_id = NULL WHERE sell_strategy_id = ? AND account_id = ?", (strategy_id, account_id))
     await db.delete("strategies", "id = ?", (strategy_id,))
 
     await log_action(
         agent_id=agent["agent_id"], action="strategy.delete", risk_level="high",
         account_id=account_id, resource_type="strategy", resource_id=str(strategy_id),
-        request_payload={"name": strategy.get("name")},
+        request_payload={"name": strategy.get("name"), "warnings": warnings},
         ip_address=request.client.host if request.client else None,
     )
 
-    return {"success": True, "message": f"策略「{strategy['name']}」已删除"}
+    return {
+        "success": True,
+        "message": f"策略「{strategy['name']}」已删除",
+        "warnings": warnings if warnings else None
+    }
 
 
 # ============== 系统管理端点 (operator+) ==============

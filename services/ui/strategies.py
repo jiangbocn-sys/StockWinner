@@ -270,21 +270,26 @@ async def delete_strategy(
     删除前校验：
     - 检查是否有运行中的策略任务
     - 检查是否有策略持仓
+    - 检查 Watchlist 关联
+    - 检查其他策略引用此策略作为卖出策略
     """
     db = get_db_manager()
 
     # 从数据库验证账户
-    
+
     await validate_account_active(account_id)
 
     # 检查策略是否存在
     strategy = await db.fetchone(
-        "SELECT id, name FROM strategies WHERE id = ? AND account_id = ?",
+        "SELECT id, name, strategy_type FROM strategies WHERE id = ? AND account_id = ?",
         (strategy_id, account_id)
     )
 
     if not strategy:
         raise HTTPException(status_code=404, detail="策略不存在")
+
+    # 收集关联信息（用于提示用户）
+    warnings = []
 
     # 1. 检查是否有运行中的策略任务
     running_task = await db.fetchone(
@@ -308,6 +313,31 @@ async def delete_strategy(
             detail=f"策略「{strategy['name']}」有持仓「{position['stock_name']} ({position['stock_code']})」{position['quantity']}股，请先清仓再删除策略"
         )
 
+    # 3. 检查 Watchlist 关联数量（提示用户）
+    wl_count = await db.fetchone(
+        "SELECT COUNT(*) as count FROM watchlist WHERE strategy_id = ? AND account_id = ?",
+        (strategy_id, account_id)
+    )
+    if wl_count and wl_count['count'] > 0:
+        warnings.append(f"Watchlist 中有 {wl_count['count']} 只股票关联此策略，删除后将解除关联")
+
+    # 4. 检查其他策略引用此策略作为卖出策略
+    sell_ref = await db.fetchall(
+        "SELECT id, name FROM strategies WHERE sell_strategy_id = ? AND account_id = ?",
+        (strategy_id, account_id)
+    )
+    if sell_ref:
+        ref_names = [f"「{r['name']}」(ID={r['id']})" for r in sell_ref]
+        warnings.append(f"以下策略引用此策略作为卖出策略：{', '.join(ref_names)}，删除后这些策略的卖出策略将失效")
+
+    # 5. 检查 pending 交易信号
+    pending_signals = await db.fetchone(
+        "SELECT COUNT(*) as count FROM trading_signals WHERE strategy_id = ? AND account_id = ? AND status = 'pending'",
+        (strategy_id, account_id)
+    )
+    if pending_signals and pending_signals['count'] > 0:
+        warnings.append(f"有 {pending_signals['count']} 个待执行的交易信号关联此策略")
+
     # 删除前存档
     try:
         from services.strategy.version_archive import archive_before_delete
@@ -319,13 +349,18 @@ async def delete_strategy(
     await db.execute("DELETE FROM temp_candidates WHERE strategy_id = ?", (strategy_id,))
     await db.execute("DELETE FROM candidate_groups WHERE screening_strategy_id = ?", (strategy_id,))
     await db.execute("DELETE FROM trading_signals WHERE strategy_id = ? AND account_id = ?", (strategy_id, account_id))
+    # 清理 watchlist 中的策略引用（设为 NULL，避免外键约束）
+    await db.execute("UPDATE watchlist SET strategy_id = NULL WHERE strategy_id = ? AND account_id = ?", (strategy_id, account_id))
+    # 清理其他策略的 sell_strategy_id 引用
+    await db.execute("UPDATE strategies SET sell_strategy_id = NULL WHERE sell_strategy_id = ? AND account_id = ?", (strategy_id, account_id))
 
     # 删除策略
     await db.delete("strategies", "id = ?", (strategy_id,))
 
     return {
         "success": True,
-        "message": "策略删除成功"
+        "message": "策略删除成功",
+        "warnings": warnings if warnings else None
     }
 
 
