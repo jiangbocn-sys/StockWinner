@@ -555,16 +555,17 @@ class SignalEvaluator:
         from services.common.price_adjuster import adjust_klines as _adjust_klines
 
         # 构建与回测兼容的 context：stocks 列表 + query_kline_db + current_date
+        # 从 created_at 提取日期部分（去掉 ISO 时间）
+        buy_date_raw = stock.get("buy_date") or stock.get("created_at", "")
+        if buy_date_raw and "T" in buy_date_raw:
+            buy_date_raw = buy_date_raw.split("T")[0]
         context = {
             # 新版兼容字段（与回测一致）
             "stocks": [{
                 "stock_code": stock_code,
                 "stock_name": stock.get("stock_name", stock_code),
                 "buy_price": stock.get("avg_cost", 0),
-                buy_date_raw = stock.get("buy_date") or stock.get("created_at", "")
-            if buy_date_raw and "T" in buy_date_raw:
-                buy_date_raw = buy_date_raw.split("T")[0]  # 去掉 ISO 时间部分
-            "buy_date": buy_date_raw,
+                "buy_date": buy_date_raw,
                 "quantity": stock.get("quantity", 0),
                 "score": stock.get("score", 60),
                 "reduced_pct": stock.get("reduced_pct", 0) or 0,
