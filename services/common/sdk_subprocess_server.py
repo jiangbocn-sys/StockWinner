@@ -180,6 +180,7 @@ SDK_METHODS = {
     "connect",        # 等效于确保登录
     "disconnect",     # 清理实例
     "is_connected",   # 返回 True（如果已登录）
+    "refresh_calendar",  # 刷新交易日历（清除缓存重新获取）
 }
 
 
@@ -219,6 +220,12 @@ def execute_sdk_method(method: str, kwargs: dict):
             return None
 
         elif method == "is_connected":
+            return True
+
+        elif method == "refresh_calendar":
+            # 清除日历缓存，下次 get_calendar 会重新获取最新数据
+            global _calendar
+            _calendar = None
             return True
 
         elif method == "get_calendar":

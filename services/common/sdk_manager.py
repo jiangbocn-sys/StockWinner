@@ -151,6 +151,10 @@ class SDKManager:
         """获取交易日历"""
         return self._get_proxy().get_calendar()
 
+    def refresh_calendar(self):
+        """刷新交易日历（清除 SDK 缓存，重新获取最新数据）"""
+        return self._get_proxy().refresh_calendar()
+
     def get_market_data(self):
         """获取 MarketData 代理（实例缓存在子进程）"""
         return self._get_proxy().get_market_data()

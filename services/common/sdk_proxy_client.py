@@ -190,6 +190,16 @@ class SDKProxyClient:
         """获取交易日历"""
         return self._call_ipc("get_calendar", {}, timeout=10.0)
 
+    def refresh_calendar(self):
+        """刷新交易日历（清除 SDK 缓存，重新获取最新数据）
+
+        用于日历过期时强制更新（如 SDK 启动时日历不含当天）。
+        """
+        try:
+            return self._call_ipc("refresh_calendar", {}, timeout=10.0)
+        except Exception:
+            return False
+
     def get_market_data(self):
         """获取 MarketData 实例（缓存由子进程管理）"""
         return _IPCMarketData(self)

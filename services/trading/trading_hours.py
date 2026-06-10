@@ -146,11 +146,19 @@ def get_phase_description(phase: TradingPhase) -> str:
 # 交易日历缓存（每日凌晨自动刷新一次）
 _trading_calendar_cache = None
 _trading_calendar_date = None
+_calendar_refresh_date = None  # 记录刷新日期，同一天不重复刷新
 
 
 def is_today_trading_day(dt: datetime = None) -> bool:
-    """判断今天是否为交易日（SDK 日历 + 24h 缓存）"""
-    global _trading_calendar_cache, _trading_calendar_date
+    """判断今天是否为交易日（SDK 日历 + 24h 缓存 + 自动刷新）
+
+    流程：
+    1. 获取 SDK 日历
+    2. 如果日历不含当天且今天还没刷新过，尝试刷新 SDK 日历缓存
+    3. 再次获取日历判断
+    4. 同一天只刷新一次
+    """
+    global _trading_calendar_cache, _trading_calendar_date, _calendar_refresh_date
 
     if dt is None:
         dt = get_china_time()
@@ -165,7 +173,20 @@ def is_today_trading_day(dt: datetime = None) -> bool:
 
         sdk_mgr = get_sdk_manager()
         if sdk_mgr.is_connected():
-            _trading_calendar_cache = sdk_mgr.get_calendar()
+            # 第一次获取日历
+            calendar = sdk_mgr.get_calendar()
+
+            # 检查日历是否包含今天
+            if today not in calendar:
+                # 日历不含今天，检查今天是否已经尝试刷新过
+                if _calendar_refresh_date != today_date:
+                    # 尝试刷新 SDK 日历缓存
+                    sdk_mgr.refresh_calendar()
+                    _calendar_refresh_date = today_date
+                    # 重新获取日历
+                    calendar = sdk_mgr.get_calendar()
+
+            _trading_calendar_cache = calendar
             _trading_calendar_date = today_date
             return today in _trading_calendar_cache
         # SDK 未连接 → 降级
