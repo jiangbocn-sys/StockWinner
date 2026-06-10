@@ -3,12 +3,13 @@
 
 根据通道类型（TRADING / MARKET_DATA / DATA_DOWNLOAD）选择数据源，
 支持自动降级（主通道失败时按顺序重试备用通道）。
-新增：数据源使用统计（成功/失败次数、耗时）
+新增：数据源使用统计（内存累积 + 定时批量写入）
 """
 
 import asyncio
 import enum
 import logging
+import random
 import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Any, Optional
@@ -41,7 +42,8 @@ class ChannelConfig:
 class ChannelRouter:
     """通道路由器 — 管理数据源选择和自动降级
 
-    失败通道冷却机制：通道失败后 30 分钟内不再重试，避免每次请求都浪费资源。
+    失败通道冷却机制：通道失败后 10 分钟内不再重试，避免每次请求都浪费资源。
+    使用统计：内存累积，每 10-15 分钟随机时间批量写入数据库。
     """
 
     FAILED_PROVIDER_COOLDOWN = 600  # 失败通道冷却 10 分钟
@@ -53,7 +55,112 @@ class ChannelRouter:
         self._initialized = False
         self._call_counts: Dict[str, int] = {}  # provider_id -> total calls (内存缓存)
         self._success_counts: Dict[str, int] = {}  # provider_id -> total successes
-        self._provider_cooldowns: Dict[str, float] = {}  # provider_id -> cooldown_until (time.time() + 1800)
+        self._provider_cooldowns: Dict[str, float] = {}  # provider_id -> cooldown_until
+
+        # 使用统计内存累积
+        # key: (provider_id, date), value: {call_count, success_count, failure_count, total_latency_ms, last_error}
+        self._usage_buffer: Dict[tuple, Dict] = {}
+        self._flush_task: Optional[asyncio.Task] = None
+        self._flush_running = False
+
+    def start_flush_loop(self):
+        """启动定时刷盘任务（在 lifespan 中调用）"""
+        if self._flush_running:
+            return
+        self._flush_running = True
+        try:
+            loop = asyncio.get_running_loop()
+            self._flush_task = loop.create_task(self._flush_loop())
+            logger.log_event("usage_flush_started", "使用统计刷盘任务已启动")
+        except RuntimeError:
+            pass  # 无事件循环
+
+    async def _flush_loop(self):
+        """定时刷盘循环：每 10-15 分钟随机时间写入数据库"""
+        while self._flush_running:
+            # 随机等待 10-15 分钟
+            wait_seconds = random.randint(600, 900)  # 10-15 分钟
+            await asyncio.sleep(wait_seconds)
+
+            # 刷盘
+            try:
+                await self._flush_usage_stats()
+            except Exception as e:
+                logger.warning("usage_flush", f"刷盘失败: {e}")
+
+    async def _flush_usage_stats(self):
+        """批量写入使用统计到数据库"""
+        if not self._usage_buffer:
+            return
+
+        db = get_db_manager()
+        today = get_china_time().strftime("%Y-%m-%d")
+
+        # 复制并清空缓冲区（避免刷盘期间新数据覆盖）
+        buffer_copy = dict(self._usage_buffer)
+        self._usage_buffer.clear()
+
+        flushed_count = 0
+        for (provider_id, date), stats in buffer_copy.items():
+            try:
+                # 检查数据库中是否已有记录
+                existing = await db.fetchone(
+                    """SELECT id, call_count, success_count, failure_count, avg_latency_ms
+                       FROM data_source_usage_stats
+                       WHERE provider_id = ? AND date = ?""",
+                    (provider_id, date)
+                )
+
+                if existing:
+                    # 更新增量
+                    new_calls = existing["call_count"] + stats["call_count"]
+                    new_success = existing["success_count"] + stats["success_count"]
+                    new_failure = existing["failure_count"] + stats["failure_count"]
+                    # 加权平均延迟
+                    old_avg = existing["avg_latency_ms"] or 0
+                    old_count = existing["call_count"] or 0
+                    if new_calls > 0:
+                        new_avg = (old_avg * old_count + stats["total_latency_ms"]) / new_calls
+                    else:
+                        new_avg = 0
+
+                    await db.execute(
+                        """UPDATE data_source_usage_stats
+                           SET call_count = ?, success_count = ?, failure_count = ?, avg_latency_ms = ?, last_error = ?
+                           WHERE id = ?""",
+                        (new_calls, new_success, new_failure, new_avg, stats.get("last_error"), existing["id"])
+                    )
+                else:
+                    # 新增记录
+                    avg_latency = stats["total_latency_ms"] / stats["call_count"] if stats["call_count"] > 0 else 0
+                    await db.execute(
+                        """INSERT INTO data_source_usage_stats
+                           (provider_id, date, call_count, success_count, failure_count, avg_latency_ms, last_error)
+                           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                        (provider_id, date, stats["call_count"], stats["success_count"], stats["failure_count"], avg_latency, stats.get("last_error"))
+                    )
+                flushed_count += 1
+            except Exception as e:
+                logger.warning("usage_flush_item", f"写入 {provider_id} 失败: {e}")
+
+        if flushed_count > 0:
+            logger.log_event("usage_flush_done", f"已刷盘 {flushed_count} 条使用统计")
+
+    def stop_flush_loop(self):
+        """停止刷盘任务（在 lifespan shutdown 中调用）"""
+        self._flush_running = False
+        if self._flush_task:
+            self._flush_task.cancel()
+            try:
+                asyncio.get_running_loop().run_until_complete(self._flush_task)
+            except asyncio.CancelledError:
+                pass
+        # 最后一次刷盘
+        try:
+            loop = asyncio.get_running_loop()
+            loop.run_until_complete(self._flush_usage_stats())
+        except Exception:
+            pass
 
     # ============================================================
     # 注册和配置
@@ -243,63 +350,32 @@ class ChannelRouter:
 
     def _record_usage(self, provider_id: str, channel_type: str, method: str,
                       success: bool, elapsed_ms: float, error: str = None):
-        """异步记录数据源使用统计到数据库"""
+        """记录数据源使用统计到内存缓冲区（每 10-15 分钟批量写入数据库）"""
         try:
-            db = get_db_manager()
             today = get_china_time().strftime("%Y-%m-%d")
-            # 更新每日统计（增量）
-            import asyncio
-            loop = asyncio.get_running_loop()
-            asyncio.create_task(self._async_record(db, provider_id, channel_type, method, success, elapsed_ms, error, today))
+            key = (provider_id, today)
+
+            # 累积到内存缓冲区
+            if key not in self._usage_buffer:
+                self._usage_buffer[key] = {
+                    "call_count": 0,
+                    "success_count": 0,
+                    "failure_count": 0,
+                    "total_latency_ms": 0.0,
+                    "last_error": None,
+                }
+
+            buf = self._usage_buffer[key]
+            buf["call_count"] += 1
+            if success:
+                buf["success_count"] += 1
+            else:
+                buf["failure_count"] += 1
+                buf["last_error"] = error
+            buf["total_latency_ms"] += elapsed_ms
+
         except Exception:
             pass  # 统计失败不影响主流程
-
-    async def _async_record(self, db, provider_id: str, channel_type: str, method: str,
-                             success: bool, elapsed_ms: float, error: str, date: str):
-        """异步写入统计（带重试）"""
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                # 检查今日是否已有记录
-                existing = await db.fetchone(
-                    """SELECT id, call_count, success_count, failure_count, avg_latency_ms
-                       FROM data_source_usage_stats
-                       WHERE provider_id = ? AND date = ?""",
-                    (provider_id, date)
-                )
-
-                if existing:
-                    # 更新增量
-                    new_calls = existing["call_count"] + 1
-                    new_success = existing["success_count"] + (1 if success else 0)
-                    new_failure = existing["failure_count"] + (1 if not success else 0)
-                    # 计算平均延迟
-                    old_avg = existing["avg_latency_ms"] or 0
-                    new_avg = (old_avg * existing["call_count"] + elapsed_ms) / new_calls
-
-                    await db.execute(
-                        """UPDATE data_source_usage_stats
-                           SET call_count = ?, success_count = ?, failure_count = ?, avg_latency_ms = ?
-                           WHERE id = ?""",
-                        (new_calls, new_success, new_failure, new_avg, existing["id"])
-                    )
-                else:
-                    # 新增记录
-                    await db.execute(
-                        """INSERT INTO data_source_usage_stats
-                           (provider_id, date, channel_type, method, call_count, success_count, failure_count, avg_latency_ms, last_error)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                        (provider_id, date, channel_type, method, 1, 1 if success else 0, 1 if not success else 0, elapsed_ms, error)
-                    )
-                return  # 成功，退出
-            except Exception as e:
-                if "database is locked" in str(e) and attempt < max_retries - 1:
-                    await asyncio.sleep(0.5 * (attempt + 1))  # 递增等待
-                    continue
-                # 其他错误或最后一次重试失败
-                if attempt == max_retries - 1:
-                    logger.warning("usage_record", f"记录统计失败: {e}")
-                return
 
     async def get_usage_stats(self, provider_id: str = None, days: int = 7) -> List[Dict]:
         """查询数据源使用统计"""

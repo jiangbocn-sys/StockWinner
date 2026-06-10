@@ -201,6 +201,15 @@ def create_lifespan():
         except Exception as e:
             log.error("shutdown", f"断开 SDK 连接失败: {e}")
 
+        # 停止数据源使用统计刷盘任务，并执行最后一次刷盘
+        try:
+            from services.data.channel.router import get_channel_router
+            router = get_channel_router()
+            router.stop_flush_loop()
+            log.log_event("usage_flush_stopped", "数据源使用统计刷盘任务已停止")
+        except Exception as e:
+            log.error("shutdown", f"停止使用统计刷盘失败: {e}")
+
         try:
             from services.trading.gateway import clear_gateway_cache
             clear_gateway_cache()
@@ -512,7 +521,7 @@ async def _run_migrations(db_manager, log, migration_version: int):
             {"task_type": "builtin", "module": "monthly_factors", "account_id": "SYSTEM", "cron_expression": "0 1 5 * *", "enabled": 1},
             {"task_type": "builtin", "module": "weekly_kline", "account_id": "SYSTEM", "cron_expression": "0 2 * * 6", "enabled": 1},
             {"task_type": "builtin", "module": "industry_download", "account_id": "SYSTEM", "cron_expression": "0 3 * * mon-fri", "enabled": 0},
-            {"task_type": "builtin", "module": "adj_factor", "account_id": "SYSTEM", "cron_expression": "0 9 * * mon-fri", "enabled": 0},
+            {"task_type": "builtin", "module": "adj_factor", "account_id": "SYSTEM", "cron_expression": "0 3 * * mon-fri", "enabled": 1},
             {"task_type": "builtin", "module": "daily_factor_calc", "account_id": "SYSTEM", "cron_expression": "", "enabled": 0},
         ]
         for t in builtin_defaults:
@@ -924,6 +933,10 @@ async def _init_channel_router(db_manager, log):
                 ))
 
         log.log_event("data_source_init", "多数据源 ChannelRouter 已初始化（amazingdata + eastmoney + tushare + sina + tencent + akshare）")
+
+        # 启动使用统计定时刷盘任务（每 10-15 分钟随机时间）
+        router.start_flush_loop()
+        log.log_event("data_source_init", "数据源使用统计刷盘任务已启动")
     except Exception as e:
         log.error("data_source_init", f"ChannelRouter 初始化失败: {e}")
 
