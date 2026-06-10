@@ -256,41 +256,50 @@ class ChannelRouter:
 
     async def _async_record(self, db, provider_id: str, channel_type: str, method: str,
                              success: bool, elapsed_ms: float, error: str, date: str):
-        """异步写入统计"""
-        try:
-            # 检查今日是否已有记录
-            existing = await db.fetchone(
-                """SELECT id, call_count, success_count, failure_count, avg_latency_ms
-                   FROM data_source_usage_stats
-                   WHERE provider_id = ? AND date = ?""",
-                (provider_id, date)
-            )
-
-            if existing:
-                # 更新增量
-                new_calls = existing["call_count"] + 1
-                new_success = existing["success_count"] + (1 if success else 0)
-                new_failure = existing["failure_count"] + (1 if not success else 0)
-                # 计算平均延迟
-                old_avg = existing["avg_latency_ms"] or 0
-                new_avg = (old_avg * existing["call_count"] + elapsed_ms) / new_calls
-
-                await db.execute(
-                    """UPDATE data_source_usage_stats
-                       SET call_count = ?, success_count = ?, failure_count = ?, avg_latency_ms = ?
-                       WHERE id = ?""",
-                    (new_calls, new_success, new_failure, new_avg, existing["id"])
+        """异步写入统计（带重试）"""
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                # 检查今日是否已有记录
+                existing = await db.fetchone(
+                    """SELECT id, call_count, success_count, failure_count, avg_latency_ms
+                       FROM data_source_usage_stats
+                       WHERE provider_id = ? AND date = ?""",
+                    (provider_id, date)
                 )
-            else:
-                # 新增记录
-                await db.execute(
-                    """INSERT INTO data_source_usage_stats
-                       (provider_id, date, channel_type, method, call_count, success_count, failure_count, avg_latency_ms, last_error)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (provider_id, date, channel_type, method, 1, 1 if success else 0, 1 if not success else 0, elapsed_ms, error)
-                )
-        except Exception as e:
-            logger.warning("usage_record", f"记录统计失败: {e}")
+
+                if existing:
+                    # 更新增量
+                    new_calls = existing["call_count"] + 1
+                    new_success = existing["success_count"] + (1 if success else 0)
+                    new_failure = existing["failure_count"] + (1 if not success else 0)
+                    # 计算平均延迟
+                    old_avg = existing["avg_latency_ms"] or 0
+                    new_avg = (old_avg * existing["call_count"] + elapsed_ms) / new_calls
+
+                    await db.execute(
+                        """UPDATE data_source_usage_stats
+                           SET call_count = ?, success_count = ?, failure_count = ?, avg_latency_ms = ?
+                           WHERE id = ?""",
+                        (new_calls, new_success, new_failure, new_avg, existing["id"])
+                    )
+                else:
+                    # 新增记录
+                    await db.execute(
+                        """INSERT INTO data_source_usage_stats
+                           (provider_id, date, channel_type, method, call_count, success_count, failure_count, avg_latency_ms, last_error)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (provider_id, date, channel_type, method, 1, 1 if success else 0, 1 if not success else 0, elapsed_ms, error)
+                    )
+                return  # 成功，退出
+            except Exception as e:
+                if "database is locked" in str(e) and attempt < max_retries - 1:
+                    await asyncio.sleep(0.5 * (attempt + 1))  # 递增等待
+                    continue
+                # 其他错误或最后一次重试失败
+                if attempt == max_retries - 1:
+                    logger.warning("usage_record", f"记录统计失败: {e}")
+                return
 
     async def get_usage_stats(self, provider_id: str = None, days: int = 7) -> List[Dict]:
         """查询数据源使用统计"""

@@ -561,7 +561,10 @@ class SignalEvaluator:
                 "stock_code": stock_code,
                 "stock_name": stock.get("stock_name", stock_code),
                 "buy_price": stock.get("avg_cost", 0),
-                "buy_date": stock.get("buy_date", stock.get("created_at", "")),
+                buy_date_raw = stock.get("buy_date") or stock.get("created_at", "")
+            if buy_date_raw and "T" in buy_date_raw:
+                buy_date_raw = buy_date_raw.split("T")[0]  # 去掉 ISO 时间部分
+            "buy_date": buy_date_raw,
                 "quantity": stock.get("quantity", 0),
                 "score": stock.get("score", 60),
                 "reduced_pct": stock.get("reduced_pct", 0) or 0,
