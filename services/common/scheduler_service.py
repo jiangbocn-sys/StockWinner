@@ -516,6 +516,73 @@ class SchedulerService:
 
         return result
 
+    def _run_adj_factor_full_update(self) -> Dict:
+        """执行复权因子全量更新
+
+        获取所有A股股票的复权因子数据，更新到本地数据库。
+        与K线下载同批次执行，避免单独任务造成SDK阻塞。
+        """
+        logger.info("开始复权因子全量更新...")
+
+        try:
+            from services.data.adj_factor_service import update_adj_factor_from_sdk
+            from services.factors.kline_manager import get_kline_manager
+
+            # 获取所有A股股票代码（与K线数据覆盖范围一致）
+            km = get_kline_manager()
+            all_codes = km.get_all_stocks()
+
+            if not all_codes:
+                logger.warning("无股票代码，跳过复权因子更新")
+                return {'success': True, 'message': '无股票代码', 'stocks': 0}
+
+            logger.info(f"准备更新 {len(all_codes)} 只股票的复权因子")
+
+            # 分批更新（每批 50 只，避免 SDK 单次调用过大）
+            batch_size = 50
+            total_updated = 0
+            total_saved = 0
+            failed_batches = []
+
+            for i in range(0, len(all_codes), batch_size):
+                batch = all_codes[i:i + batch_size]
+                batch_num = i // batch_size + 1
+
+                try:
+                    result = update_adj_factor_from_sdk(batch)
+                    if result['success']:
+                        total_updated += result['stocks']
+                        total_saved += result['saved']
+                        logger.info(f"复权因子批次 {batch_num}: {result['message']}")
+                    else:
+                        failed_batches.append(batch_num)
+                        logger.warning(f"复权因子批次 {batch_num} 失败: {result['message']}")
+                except Exception as e:
+                    failed_batches.append(batch_num)
+                    logger.error(f"复权因子批次 {batch_num} 异常: {e}")
+
+                # 批次间短暂间隔（避免 SDK 队列拥堵）
+                import time
+                time.sleep(0.5)
+
+            if failed_batches:
+                logger.warning(f"复权因子更新部分失败，失败批次: {failed_batches}")
+
+            result = {
+                'success': len(failed_batches) < len(all_codes) // batch_size,
+                'stocks_updated': total_updated,
+                'records_saved': total_saved,
+                'failed_batches': failed_batches,
+                'message': f'更新 {total_updated} 只股票，保存 {total_saved} 条除权记录'
+            }
+
+            logger.info(f"复权因子全量更新完成: {result['message']}")
+            return result
+
+        except Exception as e:
+            logger.error(f"复权因子全量更新失败: {e}", exc_info=True)
+            return {'success': False, 'message': str(e)}
+
     def _run_daily_factor_calc(self, start_date: Optional[str], end_date: str, force_full: bool = False) -> Dict:
         """执行日频因子计算"""
         logger.info(f"开始日频因子计算: {start_date or '全部'} 至 {end_date}, 强制全量={force_full}")
@@ -872,7 +939,19 @@ class SchedulerService:
         }
 
     def run_manual_kline_check(self, full: bool = False) -> Dict:
-        """手动触发K线数据检查"""
+        """手动触发K线数据检查
+
+        交易时段拒绝下载（09:15-15:00），避免影响实时行情稳定性
+        """
+        from services.trading.trading_hours import is_trading_time, is_today_trading_day
+
+        # 检查是否为交易日 + 交易时段
+        if is_today_trading_day() and is_trading_time():
+            return {
+                'success': False,
+                'message': '交易时间段禁止下载K线数据（09:15-15:00），请在收盘后或非交易时段操作'
+            }
+
         logger.info(f"手动触发K线数据{'全量下载' if full else '检查'}")
         if full:
             thread = threading.Thread(target=self._run_full_kline_download)
@@ -882,14 +961,36 @@ class SchedulerService:
         return {'success': True, 'message': 'K线数据' + ('全量下载任务' if full else '检查任务') + '已启动'}
 
     def run_manual_weekly_kline_download(self) -> Dict:
-        """手动触发周K线下载"""
+        """手动触发周K线下载
+
+        交易时段拒绝下载（09:15-15:00）
+        """
+        from services.trading.trading_hours import is_trading_time, is_today_trading_day
+
+        if is_today_trading_day() and is_trading_time():
+            return {
+                'success': False,
+                'message': '交易时间段禁止下载K线数据（09:15-15:00），请在收盘后或非交易时段操作'
+            }
+
         logger.info("手动触发周K线下载")
         thread = threading.Thread(target=self._run_weekly_kline_download)
         thread.start()
         return {'success': True, 'message': '周K线下载任务已启动'}
 
     def run_manual_weekly_kline_check(self) -> Dict:
-        """手动触发周K线检查（先检查覆盖度，再按需下载）"""
+        """手动触发周K线检查（先检查覆盖度，再按需下载）
+
+        交易时段拒绝下载（09:15-15:00）
+        """
+        from services.trading.trading_hours import is_trading_time, is_today_trading_day
+
+        if is_today_trading_day() and is_trading_time():
+            return {
+                'success': False,
+                'message': '交易时间段禁止下载K线数据（09:15-15:00），请在收盘后或非交易时段操作'
+            }
+
         logger.info("手动触发周K线检查")
         thread = threading.Thread(target=self._weekly_kline_check_job)
         thread.start()
@@ -1844,6 +1945,35 @@ class SchedulerService:
                         missing_codes = [c for c in stock_codes if c not in _pre_fetched_realtime_quotes]
                         logger.info(f"预取实时行情: {cached_count}/{len(stock_codes)} 只来自 PriceCache"
                                     + (f"，{len(missing_codes)} 只缺失" if missing_codes else ""))
+
+                        # ② 对缺失股票主动获取实时行情（确保 100% 覆盖）
+                        if missing_codes:
+                            logger.info(f"主动获取 {len(missing_codes)} 只缺失股票的实时行情...")
+                            try:
+                                from services.trading.gateway import get_gateway
+                                gateway = await get_gateway()
+                                # 分批获取（避免单次请求过大）
+                                batch_size = 50
+                                for i in range(0, len(missing_codes), batch_size):
+                                    batch = missing_codes[i:i + batch_size]
+                                    batch_data = await gateway.get_batch_market_data(batch)
+                                    for code, md in batch_data.items():
+                                        if md and md.current_price and md.current_price > 0:
+                                            _pre_fetched_realtime_quotes[code] = {
+                                                'open': getattr(md, 'open_price', md.current_price) or md.current_price,
+                                                'high': getattr(md, 'high', md.current_price) or md.current_price,
+                                                'low': getattr(md, 'low', md.current_price) or md.current_price,
+                                                'close': md.current_price,
+                                                'volume': getattr(md, 'volume', 0) or 0,
+                                                'amount': getattr(md, 'amount', 0) or 0,
+                                            }
+                                    await asyncio.sleep(0.1)  # 避免阻塞 SDK 队列
+
+                                fetched_count = len([c for c in missing_codes if c in _pre_fetched_realtime_quotes])
+                                logger.info(f"主动获取完成: {fetched_count}/{len(missing_codes)} 只成功")
+                            except Exception as fetch_err:
+                                logger.warning(f"主动获取实时行情失败: {fetch_err}")
+
                     elif not is_trading_hours():
                         logger.info("非交易时段，跳过实时行情预取")
                 except Exception as e:
@@ -1855,16 +1985,17 @@ class SchedulerService:
                 # ── 实时行情可用性检查（盘中必须）──
                 if is_trading_hours() and stock_codes:
                     realtime_coverage = len(_pre_fetched_realtime_quotes) / len(stock_codes) if len(stock_codes) > 0 else 0
-                    if realtime_coverage < 0.5:
-                        # 覆盖率低于 50%，中止策略执行
-                        logger.error(f"策略执行中止: 实时行情覆盖率仅 {realtime_coverage:.1%}，无法确保数据正确性")
+                    if realtime_coverage < 0.98:
+                        # 覆盖率低于 98%，中止策略执行
+                        logger.error(f"策略执行中止: 实时行情覆盖率仅 {realtime_coverage:.1%}，要求 >= 98%")
                         await db.execute(
                             "UPDATE strategy_tasks SET last_status = 'aborted', last_output = ? WHERE id = ?",
                             (json.dumps({
-                                "message": "实时行情数据不足，中止执行",
+                                "message": "实时行情数据不足（要求 >= 98%）",
                                 "coverage": f"{realtime_coverage:.1%}",
+                                "required": "98%",
                                 "available": len(_pre_fetched_realtime_quotes),
-                                "required": len(stock_codes),
+                                "total": len(stock_codes),
                             }, ensure_ascii=False), task_id)
                         )
                         # 发送通知
@@ -1876,15 +2007,16 @@ class SchedulerService:
                                 account_id=task["account_id"],
                                 payload={
                                     "strategy_name": strategy.get("name", "策略"),
-                                    "reason": f"实时行情覆盖率仅 {realtime_coverage:.1%}",
+                                    "reason": f"实时行情覆盖率仅 {realtime_coverage:.1%}（要求 >= 98%）",
                                     "coverage": realtime_coverage,
+                                    "threshold": 0.98,
                                 },
                             )
                         except Exception:
                             pass
                         return
                     else:
-                        logger.info(f"实时行情覆盖率: {realtime_coverage:.1%} ({len(_pre_fetched_realtime_quotes)}/{len(stock_codes)})")
+                        logger.info(f"实时行情覆盖率: {realtime_coverage:.1%} ({len(_pre_fetched_realtime_quotes)}/{len(stock_codes)})，满足 >= 98% 要求")
 
                 # ── Context 构建 ──
                 from services.strategy.engine import build_strategy_context

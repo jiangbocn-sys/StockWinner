@@ -52,7 +52,10 @@ async def check_agent_watchlist_permission(request: Request):
 async def download_kline_data(
     account_id: str = Path(..., description="账户 ID"),
 ):
-    """触发 K 线数据增量检查（与策略任务列表中的"K线增量检查"使用同一段代码）"""
+    """触发 K 线数据增量检查（与策略任务列表中的"K线增量检查"使用同一段代码）
+
+    交易时段拒绝下载（09:15-15:00），避免影响实时行情稳定性
+    """
     db = get_db_manager()
 
     # 验证账户
@@ -61,12 +64,9 @@ async def download_kline_data(
     # 直接调用 scheduler 的 K 线检查任务（完整流水线：检查 → 下载 → 行业指数 → 因子）
     from services.common.scheduler_service import get_scheduler
     scheduler = get_scheduler()
-    scheduler.run_manual_kline_check(full=False)
+    result = scheduler.run_manual_kline_check(full=False)
 
-    return {
-        "success": True,
-        "message": "K 线数据检查任务已启动，请在策略任务列表中查看进度"
-    }
+    return result
 
 
 @router.get("/api/v1/ui/{account_id}/data/stats")
