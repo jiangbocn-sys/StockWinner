@@ -358,9 +358,21 @@ class SignalExecutor:
         """创建 pending 状态的交易信号"""
         db = get_db_manager()
         now = get_china_time()
+        strategy_id = stock.get('strategy_id')
+        # 验证 strategy_id 是否存在（避免 FOREIGN KEY 错误）
+        if strategy_id is not None:
+            try:
+                valid = await db.fetchone(
+                    "SELECT 1 FROM strategies WHERE id = ?",
+                    (strategy_id,)
+                )
+                if not valid:
+                    strategy_id = None  # 无效，清除
+            except Exception:
+                strategy_id = None
         signal_data = {
             "account_id": account_id,
-            "strategy_id": stock.get('strategy_id'),
+            "strategy_id": strategy_id,
             "stock_code": stock.get('stock_code'),
             "stock_name": stock.get('stock_name'),
             "signal_type": signal_type,
