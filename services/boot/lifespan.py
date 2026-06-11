@@ -43,6 +43,12 @@ def create_lifespan():
         start_audit_consumer()
         log.log_event("audit_consumer_started", "审计日志后台队列已启动")
 
+        # 启动数据库写入队列（串行化写入，避免锁竞争）
+        from services.common.db_write_queue import get_db_write_queue
+        write_queue = get_db_write_queue()
+        write_queue.start()
+        log.log_event("db_write_queue_started", "数据库写入队列已启动")
+
         # 启动 SDK 子进程
         try:
             from services.common.sdk_proxy_client import get_subprocess_manager
@@ -209,6 +215,18 @@ def create_lifespan():
             log.log_event("usage_flush_stopped", "数据源使用统计刷盘任务已停止")
         except Exception as e:
             log.error("shutdown", f"停止使用统计刷盘失败: {e}")
+
+        # 停止数据库写入队列
+        try:
+            from services.common.db_write_queue import get_db_write_queue
+            write_queue = get_db_write_queue()
+            stats = write_queue.get_stats()
+            log.log_event("db_write_queue_stopping",
+                f"数据库写入队列停止中，统计: {stats}")
+            write_queue.stop()
+            log.log_event("db_write_queue_stopped", "数据库写入队列已停止")
+        except Exception as e:
+            log.error("shutdown", f"停止数据库写入队列失败: {e}")
 
         try:
             from services.trading.gateway import clear_gateway_cache

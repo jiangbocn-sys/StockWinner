@@ -89,11 +89,14 @@ class ChannelRouter:
                 logger.warning("usage_flush", f"刷盘失败: {e}")
 
     async def _flush_usage_stats(self):
-        """批量写入使用统计到数据库"""
+        """批量写入使用统计到数据库（使用写入队列，避免锁竞争）"""
         if not self._usage_buffer:
             return
 
+        from services.common.db_write_queue import get_db_write_queue
+
         db = get_db_manager()
+        write_queue = get_db_write_queue()
         today = get_china_time().strftime("%Y-%m-%d")
 
         # 复制并清空缓冲区（避免刷盘期间新数据覆盖）
@@ -103,7 +106,7 @@ class ChannelRouter:
         flushed_count = 0
         for (provider_id, date), stats in buffer_copy.items():
             try:
-                # 检查数据库中是否已有记录
+                # 先读取现有记录（读操作不经过队列）
                 existing = await db.fetchone(
                     """SELECT id, call_count, success_count, failure_count, avg_latency_ms
                        FROM data_source_usage_stats
@@ -124,7 +127,8 @@ class ChannelRouter:
                     else:
                         new_avg = 0
 
-                    await db.execute(
+                    # 使用写入队列异步写入
+                    write_queue.execute_async(
                         """UPDATE data_source_usage_stats
                            SET call_count = ?, success_count = ?, failure_count = ?, avg_latency_ms = ?, last_error = ?
                            WHERE id = ?""",
@@ -133,7 +137,7 @@ class ChannelRouter:
                 else:
                     # 新增记录
                     avg_latency = stats["total_latency_ms"] / stats["call_count"] if stats["call_count"] > 0 else 0
-                    await db.execute(
+                    write_queue.execute_async(
                         """INSERT INTO data_source_usage_stats
                            (provider_id, date, call_count, success_count, failure_count, avg_latency_ms, last_error)
                            VALUES (?, ?, ?, ?, ?, ?, ?)""",
@@ -144,7 +148,7 @@ class ChannelRouter:
                 logger.warning("usage_flush_item", f"写入 {provider_id} 失败: {e}")
 
         if flushed_count > 0:
-            logger.log_event("usage_flush_done", f"已刷盘 {flushed_count} 条使用统计")
+            logger.log_event("usage_flush_done", f"已刷盘 {flushed_count} 条使用统计（异步队列）")
 
     def stop_flush_loop(self):
         """停止刷盘任务（在 lifespan shutdown 中调用）"""
