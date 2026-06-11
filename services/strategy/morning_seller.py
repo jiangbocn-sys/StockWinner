@@ -12,6 +12,9 @@
 3. 亏损 ≥ 2.5% → 卖出
 4. 以上都不成立，到 10:00 强制卖出
 
+重要规则（T+1）：
+- 当天买入的股票不允许当天卖出，必须跳过
+
 策略参数（保存在 strategies.config 字段 JSON 中）：
   profit_trigger_pct: 0.02       盈利触发阈值
   drop_from_high_pct: 0.002      从最高价回落阈值
@@ -127,6 +130,15 @@ def run(context):
         if not stock_code:
             continue
         stock_name = s.get("stock_name", stock_code)
+
+        # T+1 规则：跳过当天买入的股票（A股不允许当日卖出）
+        created_at = s.get("created_at", "")
+        if created_at:
+            # 解析买入日期（格式可能是 "2026-06-11T14:31:09" 或 "2026-06-11"）
+            buy_date = created_at.split("T")[0] if "T" in created_at else created_at[:10]
+            if buy_date == today:
+                print(f"  {stock_code} 当天买入（{buy_date}），T+1 规则跳过")
+                continue
 
         # 成本价
         avg_cost = s.get("buy_price", 0)

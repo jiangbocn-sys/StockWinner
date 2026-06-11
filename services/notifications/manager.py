@@ -242,7 +242,7 @@ class NotificationManager:
         # 记录成功日志
         self._logger.log_event("notification_sent",
             f"通知发送: {event.event_type.value} → {success_count}/{len(channels)} 渠道",
-            event_type=event.event_type.value, success_count=success_count)
+            raw_event_type=event.event_type.value, success_count=success_count)
 
         return result
 

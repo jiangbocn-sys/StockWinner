@@ -1893,12 +1893,16 @@ class SchedulerService:
                 code_scope = strategy.get("code_scope", "screening")
 
                 if code_scope == "trading":
-                    # 交易型策略：获取已买入的股票（watchlist status='bought'）
+                    # 交易型策略：从 stock_positions 获取持仓（包含买入日期用于 T+1 过滤）
                     stocks = await db.fetchall(
-                        "SELECT * FROM watchlist WHERE account_id = ? AND status = 'bought'",
+                        """SELECT sp.*, w.strategy_id, w.reason, w.stop_loss_price, w.take_profit_price,
+                                  w.highest_price as watchlist_highest
+                           FROM stock_positions sp
+                           LEFT JOIN watchlist w ON sp.account_id = w.account_id AND sp.stock_code = w.stock_code AND w.status = 'bought'
+                           WHERE sp.account_id = ? AND sp.quantity > 0""",
                         (task["account_id"],)
                     )
-                    logger.info(f"交易型策略 '{strategy['name']}'，获取到 {len(stocks)} 只已买入股票")
+                    logger.info(f"交易型策略 '{strategy['name']}'，获取到 {len(stocks)} 只持仓股票")
                 elif task.get("full_market"):
                     # 全市场模式：从 kline.db 获取所有股票代码 + 名称
                     from services.common.database import get_sync_connection

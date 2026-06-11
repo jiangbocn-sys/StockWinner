@@ -224,8 +224,10 @@ def execute_sdk_method(method: str, kwargs: dict):
 
         elif method == "refresh_calendar":
             # 清除日历缓存，下次 get_calendar 会重新获取最新数据
-            global _calendar
+            # 同时清空 BaseData 实例，确保从 TGW 获取最新数据而非 SDK 内部缓存
+            global _calendar, _base_data_instance
             _calendar = None
+            _base_data_instance = None
             return True
 
         elif method == "get_calendar":

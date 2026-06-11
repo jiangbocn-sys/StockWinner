@@ -599,7 +599,7 @@ class StrategyEngine:
                 if should_update:
                     # 检查是否在目标分组已有记录
                     existing_in_target = await db.fetchone(
-                        "SELECT id, trigger_price FROM watchlist WHERE account_id = ? AND stock_code = ? AND group_id = ? AND status IN ('pending', 'watching')",
+                        "SELECT id, trigger_price, status FROM watchlist WHERE account_id = ? AND stock_code = ? AND group_id = ? AND status IN ('pending', 'watching')",
                         (account_id, code, group_id)
                     )
                     new_status = "pending" if signal_action == "trade" else "watching"
@@ -607,7 +607,14 @@ class StrategyEngine:
                     if existing_in_target:
                         # 目标分组已有记录：更新该分组的记录
                         old_target_price = existing_in_target.get("trigger_price")
-                        if new_price and (not old_target_price or new_price < old_target_price):
+                        existing_status = existing_in_target.get("status", "watching")
+
+                        # watching 状态：直接升级为 pending（首次触发），不需要价格比较
+                        # pending 状态：价格更低才更新
+                        should_upgrade = existing_status != "pending"
+                        price_is_lower = new_price and (not old_target_price or new_price < old_target_price)
+
+                        if should_upgrade or price_is_lower:
                             await db.execute(
                                 "UPDATE watchlist SET trigger_price = ?, stop_loss_price = ?, take_profit_price = ?, "
                                 f"reason = ?, strategy_id = ?, status = '{new_status}', created_at = ?, updated_at = ? WHERE id = ?",
