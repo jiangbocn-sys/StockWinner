@@ -357,6 +357,7 @@ def _describe_cron(cron: str) -> str:
         return ""
     parts = cron.split()
     if len(parts) != 5:
+        # 非标准格式（如 3 字段的错误 cron），直接返回原文
         return cron
     minute, hour, day, month, dow = parts
 
@@ -366,14 +367,19 @@ def _describe_cron(cron: str) -> str:
         "0 1 5 * *": "每月 5 日 01:00",
         "0 2 * * 6": "每周六 02:00",
         "0 3 * * 1-5": "每周一至周五 03:00",
+        "0 3 * * mon-fri": "每周一至周五 03:00",
         "0 14 * * *": "每天 14:00",
         "0 14 * * 1-5": "每周一至周五 14:00",
+        "0 14 * * mon-fri": "每周一至周五 14:00",
         "0 10 * * 1-5": "每周一至周五 10:00",
+        "0 10 * * mon-fri": "每周一至周五 10:00",
         "0 * * * *": "每小时",
         "30 14 * * 1-5": "每周一至周五 14:30",
+        "30 14 * * mon-fri": "每周一至周五 14:30",
         "0 0 * * *": "每天 00:00",
         "0 9 * * *": "每天 09:00",
         "0 15 * * *": "每天 15:00",
+        "35 14 * * mon-fri": "每周一至周五 14:35",
     }
     if cron in common:
         return common[cron]
@@ -381,31 +387,68 @@ def _describe_cron(cron: str) -> str:
     # 通用解析
     desc_parts = []
 
-    # 时间
+    # 解析时间字段（支持多值如 "14,15"）
+    def parse_time_field(field: str) -> str:
+        """解析时间字段，支持逗号分隔的多值"""
+        if "," in field:
+            values = [int(v.strip()) for v in field.split(",")]
+            return ",".join([f"{v:02d}" for v in values])
+        elif field == "*":
+            return "每小时"
+        else:
+            try:
+                return f"{int(field):02d}"
+            except ValueError:
+                return field
+
+    # 构建时间描述
+    hour_str = parse_time_field(hour)
     if minute == "0":
-        time_str = f"{int(hour):02d}:00"
+        if hour == "*":
+            time_str = "每小时整点"
+        elif "," in hour:
+            time_str = f"{hour_str}:00"
+        else:
+            time_str = f"{hour_str}:00"
     elif minute == "30":
-        time_str = f"{int(hour):02d}:30"
+        if "," in hour:
+            time_str = f"{hour_str}:30"
+        else:
+            time_str = f"{hour_str}:30"
+    elif minute == "*":
+        time_str = f"{hour_str} 每分钟"
     else:
-        time_str = f"{int(hour):02d}:{int(minute):02d}"
+        try:
+            min_str = f"{int(minute):02d}"
+            if "," in hour:
+                time_str = f"{hour_str}:{min_str}"
+            else:
+                time_str = f"{hour_str}:{min_str}"
+        except ValueError:
+            time_str = f"{hour}:{minute}"
 
     # 频率
     if day == "*" and month == "*" and dow == "*":
         desc_parts.append(f"每天 {time_str}")
     elif day == "*" and month == "*" and dow != "*":
+        dow_days = {"1": "周一", "2": "周二", "3": "周三", "4": "周四", "5": "周五", "6": "周六", "0": "周日", "7": "周日",
+                    "mon": "周一", "tue": "周二", "wed": "周三", "thu": "周四", "fri": "周五", "sat": "周六", "sun": "周日"}
         if "-" in dow:
             start, end = dow.split("-")
-            days = {"1": "周一", "2": "周二", "3": "周三", "4": "周四", "5": "周五", "6": "周六", "0": "周日", "7": "周日"}
-            desc_parts.append(f"每周{days.get(start, start)}至{days.get(end, end)} {time_str}")
+            start_name = dow_days.get(start, start)
+            end_name = dow_days.get(end, end)
+            desc_parts.append(f"每周{start_name}至{end_name} {time_str}")
         elif "," in dow:
-            days = {"1": "一", "2": "二", "3": "三", "4": "四", "5": "五", "6": "六", "0": "日", "7": "日"}
-            dow_str = "、".join([f"周{days.get(d, d)}" for d in dow.split(",")])
+            dow_str = "、".join([dow_days.get(d.strip(), d.strip()) for d in dow.split(",")])
             desc_parts.append(f"{dow_str} {time_str}")
         else:
-            days = {"1": "一", "2": "二", "3": "三", "4": "四", "5": "五", "6": "六", "0": "日", "7": "日"}
-            desc_parts.append(f"每周{days.get(dow, dow)} {time_str}")
+            day_name = dow_days.get(dow, dow)
+            desc_parts.append(f"每周{day_name} {time_str}")
     elif day != "*" and month == "*" and dow == "*":
-        desc_parts.append(f"每月 {int(day)} 日 {time_str}")
+        try:
+            desc_parts.append(f"每月 {int(day)} 日 {time_str}")
+        except ValueError:
+            desc_parts.append(f"每月 {day} 日 {time_str}")
     else:
         desc_parts.append(f"{time_str} (cron: {cron})")
 
