@@ -543,54 +543,9 @@ async def get_kline_data(
             start_date=actual_start_date,
             end_date=actual_end_date,
             limit=limit,
-            priority=1  # 用户请求，high priority
+            priority=1,  # 用户请求，high priority
+            adjust=adjust  # 复权由 gateway 层统一处理
         )
-
-        # 应用前复权（日线/周线/月线/分钟线都支持）
-        if adjust == "forward" and kline_data and period not in ["none"]:
-            try:
-                adj_factors = await gateway.get_adj_factor([stock_code])
-                if adj_factors:
-                    # 构建日期 → 累计因子映射
-                    cumulative_map = {}
-                    latest_cumulative = 1.0
-                    for f in adj_factors:
-                        td_raw = str(f.get('trade_date', ''))
-                        if '-' in td_raw:
-                            td = td_raw.replace('-', '')[:8]
-                        else:
-                            td = td_raw[:8]
-                        cum_factor = float(f.get('cumulative_factor', 1.0))
-                        cumulative_map[td] = cum_factor
-                        latest_cumulative = cum_factor
-
-                    # 应用前复权公式
-                    for k in kline_data:
-                        td_raw = k.get('trade_date', '')
-                        if not td_raw:
-                            continue
-                        # 处理日期格式（可能是 YYYY-MM-DD 或 YYYYMMDD 或 YYYYMMDD HH:MM:SS）
-                        if ' ' in td_raw:
-                            td_raw = td_raw.split(' ')[0]  # 取日期部分
-                        if '-' in td_raw:
-                            td = td_raw.replace('-', '')[:8]
-                        else:
-                            td = td_raw[:8]
-
-                        # 找到该日期的累计因子
-                        if td in cumulative_map:
-                            factor = cumulative_map[td]
-                        else:
-                            earlier_dates = [d for d in cumulative_map.keys() if d <= td]
-                            factor = cumulative_map[max(earlier_dates)] if earlier_dates else latest_cumulative
-
-                        adj_ratio = factor / latest_cumulative
-                        if 'open' in k: k['open'] = round(k['open'] * adj_ratio, 2)
-                        if 'high' in k: k['high'] = round(k['high'] * adj_ratio, 2)
-                        if 'low' in k: k['low'] = round(k['low'] * adj_ratio, 2)
-                        if 'close' in k: k['close'] = round(k['close'] * adj_ratio, 2)
-            except Exception:
-                pass  # 复权失败，返回未复权数据
 
         return {
             "success": True,

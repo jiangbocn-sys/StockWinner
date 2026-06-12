@@ -1140,7 +1140,7 @@ const showTradeKline = async (row) => {
   const endFmt = end.replace(/-/g, '')
 
   try {
-    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/market/kline?stock_code=${row.stock_code}&period=day&start_date=${startFmt}&end_date=${endFmt}`)
+    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/market/kline?stock_code=${row.stock_code}&period=day&start_date=${startFmt}&end_date=${endFmt}&adjust=forward`)
     const data = await res.json()
     await nextTick()
     renderKlineChart(data.data?.kline || [], row)

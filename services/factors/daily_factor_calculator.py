@@ -534,6 +534,48 @@ class DailyFactorCalculator:
 
     # ==================== 综合计算 ====================
 
+    def preload_equity_data(self, stock_code: str) -> pd.DataFrame:
+        """
+        预加载单只股票的股本数据
+
+        返回包含 ANN_DATE, TOT_SHARE, FLOAT_SHARE 的 DataFrame
+        """
+        try:
+            from services.common.sdk_manager import get_sdk_manager
+            sdk_manager = get_sdk_manager()
+            equity_df = sdk_manager.get_equity_structure([stock_code], priority=3)
+            if not equity_df.empty:
+                equity_df['ANN_DATE'] = pd.to_datetime(equity_df['ANN_DATE'], format='%Y%m%d', errors='coerce')
+                equity_df = equity_df.sort_values('ANN_DATE', ascending=True)
+            return equity_df
+        except Exception as e:
+            print(f"预加载股本数据失败 {stock_code}: {e}")
+            return pd.DataFrame()
+
+    def get_equity_for_date(
+        self,
+        equity_df: pd.DataFrame,
+        trade_date: str
+    ) -> Tuple[Optional[float], Optional[float]]:
+        """
+        根据交易日获取有效的股本数据
+
+        返回 (total_shares, circ_shares)
+        """
+        if equity_df.empty:
+            return None, None
+
+        trade_dt = pd.to_datetime(trade_date)
+        valid_equity = equity_df[equity_df['ANN_DATE'] <= trade_dt]
+
+        if valid_equity.empty:
+            return None, None
+
+        latest = valid_equity.iloc[-1]
+        total_shares = latest.get('TOT_SHARE')
+        circ_shares = latest.get('FLOAT_SHARE')
+        return total_shares, circ_shares
+
     def calculate_all_daily_factors(
         self,
         stock_code: str,
@@ -553,12 +595,16 @@ class DailyFactorCalculator:
         if df.empty:
             return df
 
-        # ========== 计算市值类因子 ==========
-        # 获取股本数据并计算市值
+        # ========== 计算市值类因子（优化：预加载股本数据）==========
+        # 一次性获取股本数据，避免循环内重复 SDK 调用
+        equity_df = self.preload_equity_data(stock_code)
+
         market_cap_data = []
         for _, row in df.iterrows():
             trade_date = row['trade_date']
-            cap_result = self.calculate_market_cap(stock_code, trade_date)
+            # 从预加载的数据中获取有效股本
+            total_shares, circ_shares = self.get_equity_for_date(equity_df, trade_date)
+            cap_result = self.calculate_market_cap(stock_code, trade_date, total_shares, circ_shares)
             if cap_result:
                 market_cap_data.append({
                     'trade_date': trade_date,

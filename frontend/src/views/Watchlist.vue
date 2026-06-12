@@ -1331,7 +1331,7 @@ const loadKlineData = async (code, name, sw_level1 = '', sw_level2 = '', sw_leve
   const end = endDt.toISOString().slice(0, 10).replace(/-/g, '')
 
   try {
-    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/market/kline?stock_code=${code}&period=day&start_date=${start}&end_date=${end}`)
+    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/market/kline?stock_code=${code}&period=day&start_date=${start}&end_date=${end}&adjust=${klineAdjust.value}`)
     const data = await res.json()
     klineData.value = data.data?.kline || []
     // 加载技术指标数据（如果有选中的指标）

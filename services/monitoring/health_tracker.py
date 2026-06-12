@@ -136,7 +136,7 @@ class HealthTracker:
                 except Exception as e:
                     get_logger("monitor").log_event("notify_failed", f"通知发送失败: {e}")
 
-            self._last_notify_time = now
+            self._last_notify_time = time.time()
             self._last_notify_type = issue_type
             get_logger("monitor").log_event("sdk_notify_sent", f"已发送飞书通知: {issue_type}")
         except Exception as e:

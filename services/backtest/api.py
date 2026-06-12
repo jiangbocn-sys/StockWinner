@@ -144,12 +144,20 @@ async def create_backtest_run(
         strategy_config.setdefault("take_profit_pct", strategy.get("take_profit_pct"))
 
     # 合并 body 中的止盈止损
+    # 先从账户配置获取仓位默认值
+    account_position_defaults = {
+        "max_total_position_pct": account.get("max_total_position_pct", 0.80),
+        "max_single_position_pct": account.get("max_single_position_pct", 0.15),
+        "cash_reserve_pct": account.get("cash_reserve_pct", 0.10),
+    }
     for key in ("stop_loss_pct", "take_profit_pct", "trailing_stop_pct",
                 "stop_execution_price",
                 "commission_rate", "min_commission", "stamp_tax", "transfer_fee",
                 "max_total_position_pct", "max_single_position_pct", "cash_reserve_pct"):
         if key in body:
             strategy_config[key] = body[key]
+        elif key in account_position_defaults:
+            strategy_config[key] = account_position_defaults[key]
 
     # 重复检测：相同配置 → 阻止（含止盈止损+成交价模式）
     sl = body.get("stop_loss_pct", 0)
@@ -181,14 +189,15 @@ async def create_backtest_run(
     )
 
     # 保存回测参数（用于详情展示和重试）
+    # 使用 strategy_config 中的值（已包含账户默认值）
     for key in ("stop_loss_pct", "take_profit_pct", "trailing_stop_pct",
                 "stop_execution_price", "slippage_pct",
                 "commission_rate", "min_commission", "stamp_tax", "transfer_fee",
                 "max_total_position_pct", "max_single_position_pct", "cash_reserve_pct"):
-        if key in body:
+        if key in strategy_config:
             await db.execute(
                 f"UPDATE backtest_runs SET {key} = ? WHERE id = ?",
-                (body[key], run_id)
+                (strategy_config[key], run_id)
             )
     if description:
         await db.execute("UPDATE backtest_runs SET description = ? WHERE id = ?", (description, run_id))

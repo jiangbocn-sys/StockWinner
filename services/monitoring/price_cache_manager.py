@@ -1,7 +1,10 @@
 """
 价格缓存管理器 — 价格缓存更新、DB 刷盘、持仓 PNL 刷新。
+
+改造：使用数据库写入队列异步批量写入，避免锁竞争。
 """
 from typing import Dict, Optional, Any
+import asyncio
 
 from services.common.database import get_db_manager
 from services.common.price_cache import get_price_cache
@@ -14,6 +17,7 @@ class PriceCacheManager:
 
     def __init__(self):
         self._cache = get_price_cache()
+        self._flush_lock = asyncio.Lock()  # 防止并发刷盘
 
     def update_price_cache(self, market_data_cache: Optional[Dict[str, Any]] = None):
         """将实时行情写入内存价格缓存（完整 OHLCV，不写 DB）"""
@@ -44,31 +48,42 @@ class PriceCacheManager:
             get_logger("monitor").log_event("price_cache_empty", f"price_cache 无有效数据: total={len(market_data_cache)}, none={none_count}")
 
     async def flush_to_db(self, account_id: str):
-        """每 15 分钟将内存缓存的价格兜底写入数据库"""
-        prices = self._cache.get_all_prices()
-        if not prices:
+        """每 15 分钟将内存缓存的价格兜底写入数据库
+
+        使用写入队列异步批量写入，避免锁竞争。
+        """
+        # 防止并发刷盘
+        if self._flush_lock.locked():
+            get_logger("monitor").log_event("price_flush_skip", "刷盘正在进行，跳过")
             return
 
-        db = get_db_manager()
-        wl_updates = []
-        pos_updates = []
-        for code, price in prices.items():
-            wl_updates.append((price, get_china_time(), account_id, code))
-            pos_updates.append((price, price, price, get_china_time(), account_id, code))
+        async with self._flush_lock:
+            prices = self._cache.get_all_prices()
+            if not prices:
+                return
 
-        if wl_updates:
-            try:
-                await db.executemany(
+            from services.common.db_write_queue import get_db_write_queue
+            write_queue = get_db_write_queue()
+
+            wl_updates = []
+            pos_updates = []
+            for code, price in prices.items():
+                wl_updates.append((price, get_china_time(), account_id, code))
+                pos_updates.append((price, price, price, get_china_time(), account_id, code))
+
+            if wl_updates:
+                write_queue.execute_many_async(
                     "UPDATE watchlist SET current_price = ?, updated_at = ? WHERE account_id = ? AND stock_code = ?",
                     wl_updates,
+                    callback=lambda count, err: get_logger("monitor").log_event(
+                        "price_flush_callback",
+                        f"watchlist 刷盘完成: {count} 条" if not err else f"watchlist 刷盘失败: {err}"
+                    )
                 )
-                get_logger("monitor").log_event("price_flush", f"已刷盘 {len(wl_updates)} 条 watchlist 现价", count=len(wl_updates))
-            except Exception as e:
-                get_logger("monitor").error("monitor", f"刷盘 watchlist 现价失败: {e}")
+                get_logger("monitor").log_event("price_flush_queued", f"已提交 {len(wl_updates)} 条 watchlist 现价写入队列")
 
-        if pos_updates:
-            try:
-                await db.executemany(
+            if pos_updates:
+                write_queue.execute_many_async(
                     """UPDATE stock_positions
                        SET current_price = ?,
                            market_value = ? * quantity,
@@ -76,12 +91,14 @@ class PriceCacheManager:
                            updated_at = ?
                        WHERE account_id = ? AND stock_code = ?""",
                     pos_updates,
+                    callback=lambda count, err: get_logger("monitor").log_event(
+                        "position_flush_callback",
+                        f"position 刷盘完成: {count} 条" if not err else f"position 刷盘失败: {err}"
+                    )
                 )
-                get_logger("monitor").log_event("price_flush", f"已刷盘 {len(pos_updates)} 条 position 盈亏", count=len(pos_updates))
-            except Exception as e:
-                get_logger("monitor").error("monitor", f"刷盘 position 盈亏失败: {e}")
+                get_logger("monitor").log_event("price_flush_queued", f"已提交 {len(pos_updates)} 条 position 盈亏写入队列")
 
-        self._cache.mark_flushed()
+            self._cache.mark_flushed()
 
     def should_flush(self) -> bool:
         """检查是否需要刷盘"""

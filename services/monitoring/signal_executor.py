@@ -1,9 +1,11 @@
 """
 信号执行器 — 买入/卖出执行、pending 信号扫描、信号/watchlist CRUD。
 """
+import asyncio
 from typing import Dict, List, Optional, Any
 
 from services.common.database import get_db_manager
+from services.common.db_write_queue import get_db_write_queue
 from services.common.timezone import get_china_time, format_china_time
 from services.common.structured_logger import get_logger
 
@@ -171,12 +173,17 @@ class SignalExecutor:
                     f"资金不足回退: {stock_code} pending → watching",
                     stock_code=stock_code, reason=result['message'])
             elif "风控拦截" in result['message'] or "仓位超限" in result['message']:
-                # 风控拦截，标记为 failed，不再触发
-                await db.update(
+                # 风控拦截，标记为 failed，不再触发（异步写入）
+                write_queue = get_db_write_queue()
+                write_queue.update_async(
                     "watchlist",
                     {"status": "failed", "updated_at": get_china_time()},
                     "account_id = ? AND stock_code = ?",
-                    (account_id, stock_code)
+                    (account_id, stock_code),
+                    callback=lambda _, err: get_logger("monitor").log_event(
+                        "watchlist_update_callback",
+                        f"watchlist 状态更新完成: {stock_code} → failed" if not err else f"更新失败: {err}"
+                    )
                 )
                 get_logger("monitor").log_event("buy_failed_risk",
                     f"风控拦截终止: {stock_code} pending → failed",
@@ -330,8 +337,9 @@ class SignalExecutor:
                     {"stock_code": stock_code, "stock_name": signal.get('stock_name', stock_code)},
                     current_price, quantity, trigger_source="manual",
                 )
-                # 标记信号为 cancelled（即使被风控拒绝也不再重复）
-                await db.update(
+                # 标记信号为 cancelled（即使被风控拒绝也不再重复，异步写入）
+                write_queue = get_db_write_queue()
+                write_queue.update_async(
                     "trading_signals",
                     {"status": "cancelled", "executed_at": format_china_time(),
                      "result": '{"message": "执行失败，见订单记录"}'},
@@ -344,7 +352,8 @@ class SignalExecutor:
                     current_price, signal_type, quantity, trigger_source="manual",
                 )
             else:
-                await db.update(
+                write_queue = get_db_write_queue()
+                write_queue.update_async(
                     "trading_signals",
                     {"status": "cancelled", "executed_at": format_china_time()},
                     "id = ?", (signal['id'],)
@@ -382,18 +391,20 @@ class SignalExecutor:
             "created_at": now.isoformat(),
             "executed_at": None,
         }
-        signal_id = await db.insert("trading_signals", signal_data)
+        # 同步写入，需要返回 signal_id
+        write_queue = get_db_write_queue()
+        signal_id = await asyncio.to_thread(write_queue.insert, "trading_signals", signal_data)
         get_logger("monitor").log_event("signal_created",
             f"创建交易信号(pending)：{stock.get('stock_code')} - {signal_type}",
             stock_code=stock.get('stock_code'), signal_type=signal_type, signal_id=signal_id)
         return signal_id
 
     async def _update_signal_status(self, account_id: str, stock_code: str, status: str, quantity: int):
-        """更新信号状态：pending → executed / cancelled"""
-        db = get_db_manager()
+        """更新信号状态：pending → executed / cancelled（异步写入）"""
         now = get_china_time().isoformat()
+        write_queue = get_db_write_queue()
         if status == "executed":
-            await db.execute(
+            write_queue.execute_async(
                 "UPDATE trading_signals SET status = ?, target_quantity = ?, executed_at = ? "
                 "WHERE rowid = (SELECT rowid FROM trading_signals "
                 "WHERE account_id = ? AND stock_code = ? AND status = 'pending' "
@@ -401,7 +412,7 @@ class SignalExecutor:
                 (status, quantity, now, account_id, stock_code),
             )
         else:
-            await db.execute(
+            write_queue.execute_async(
                 "UPDATE trading_signals SET status = ?, executed_at = ? "
                 "WHERE rowid = (SELECT rowid FROM trading_signals "
                 "WHERE account_id = ? AND stock_code = ? AND status = 'pending' "
@@ -432,7 +443,9 @@ class SignalExecutor:
             (account_id, stock_code)
         )
         old_status = old["status"] if old else "unknown"
-        await db.update(
+        # 异步写入，不阻塞
+        write_queue = get_db_write_queue()
+        write_queue.update_async(
             "watchlist",
             {"status": status, "updated_at": get_china_time()},
             "account_id = ? AND stock_code = ?",

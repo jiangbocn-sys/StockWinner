@@ -12,6 +12,7 @@ from typing import Dict, List, Optional, Any
 import json
 
 from services.common.database import get_db_manager
+from services.common.db_write_queue import get_db_write_queue
 from services.common.timezone import get_china_time, format_china_time
 from services.common.structured_logger import get_logger
 
@@ -164,11 +165,12 @@ async def sync_to_watchlist(
     old_sl = existing.get("stop_loss_price", 0) or 0
     old_tp = existing.get("take_profit_price", 0) or 0
 
-    # 只有值发生变化才更新
+    # 只有值发生变化才更新（异步写入）
     if abs(old_sl - stop_loss_price) < 0.01 and abs(old_tp - take_profit_price) < 0.01:
         return True  # 无变化，跳过
 
-    await db.execute(
+    write_queue = get_db_write_queue()
+    write_queue.execute_async(
         "UPDATE watchlist SET stop_loss_price = ?, take_profit_price = ?, updated_at = ? "
         "WHERE id = ?",
         (stop_loss_price, take_profit_price, get_china_time(), existing["id"])
@@ -238,24 +240,29 @@ async def sync_on_buy_success(
                 except (json.JSONDecodeError, ValueError, TypeError):
                     pass
 
-        # 创建 trading_strategies
-        await db.insert("trading_strategies", {
-            "account_id": account_id,
-            "stock_code": stock_code,
-            "strategy_type": "fixed",
-            "stop_loss_pct": default_sl_pct,
-            "take_profit_pct": default_tp_pct,
-            "entry_price": buy_price,
-            "updated_at": format_china_time()
-        })
+        # 创建 trading_strategies（异步写入）
+        write_queue = get_db_write_queue()
+        write_queue.insert_async(
+            "trading_strategies",
+            {
+                "account_id": account_id,
+                "stock_code": stock_code,
+                "strategy_type": "fixed",
+                "stop_loss_pct": default_sl_pct,
+                "take_profit_pct": default_tp_pct,
+                "entry_price": buy_price,
+                "updated_at": format_china_time()
+            }
+        )
 
         get_logger("monitor").log_event("sl_tp_auto_create",
             f"自动创建风控配置: {stock_code} SL={default_sl_pct*100:.0f}% TP={default_tp_pct*100:.0f}%",
             account_id=account_id, stock_code=stock_code,
             sl_pct=default_sl_pct, tp_pct=default_tp_pct, entry_price=buy_price)
 
-    # 2. 更新 stock_positions 的 highest_price（初始化为买入价）
-    await db.execute(
+    # 2. 更新 stock_positions 的 highest_price（初始化为买入价，异步写入）
+    write_queue = get_db_write_queue()
+    write_queue.execute_async(
         "UPDATE stock_positions SET highest_price = ? "
         "WHERE account_id = ? AND stock_code = ? AND (highest_price = 0 OR highest_price IS NULL OR highest_price < ?)",
         (buy_price, account_id, stock_code, buy_price)

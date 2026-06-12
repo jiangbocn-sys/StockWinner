@@ -174,6 +174,7 @@ SDK_METHODS = {
     "get_industry_constituent",
     "get_index_constituent",
     "get_adj_factor",      # 复权因子（前复权/后复权）
+    "get_dividend",        # 分红数据（含除权日期、送股率）
     "get_etf_pcf",         # ETF 申赎数据
     "get_fund_share",      # ETF 基金份额
     "get_fund_iopv",       # ETF IOPV 净值
@@ -371,6 +372,18 @@ def execute_sdk_method(method: str, kwargs: dict):
                 code_list=kwargs.get("stock_codes", []),
                 local_path=local_path,
                 is_local=False  # 从服务端获取最新数据
+            )
+
+        elif method == "get_dividend":
+            # 获取分红数据（InfoData.get_dividend）
+            # 包含除权日期、送股率、现金分红，耗时约 0.3 秒
+            local_path = "/home/bobo/StockWinner/data/dividend/"
+            import os
+            os.makedirs(local_path, exist_ok=True)
+            return get_info().get_dividend(
+                code_list=kwargs.get("stock_codes", []),
+                local_path=local_path,
+                is_local=False
             )
 
         elif method == "get_etf_pcf":
