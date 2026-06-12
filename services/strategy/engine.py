@@ -532,6 +532,7 @@ class StrategyEngine:
             {"added": N, "updated": M, "skipped": K, "total": N}
         """
         db = get_db_manager()
+        import asyncio  # 在函数开头统一导入，避免局部变量覆盖问题
         today = __import__("services.common.timezone", fromlist=["get_china_time"]).get_china_time().strftime("%Y-%m-%d")
         now = __import__("services.common.timezone", fromlist=["get_china_time"]).get_china_time().isoformat()
 
@@ -617,7 +618,6 @@ class StrategyEngine:
                         if should_upgrade or price_is_lower:
                             # 使用写入队列同步写入（避免锁竞争）
                             from services.common.db_write_queue import get_db_write_queue
-                            import asyncio
                             write_queue = get_db_write_queue()
                             await asyncio.to_thread(
                                 write_queue.execute,
@@ -636,7 +636,6 @@ class StrategyEngine:
                     else:
                         # 目标分组没有记录：新增一条（即使其他分组已有）
                         from services.common.db_write_queue import get_db_write_queue
-                        import asyncio
                         write_queue = get_db_write_queue()
                         watchlist_data = {
                             "account_id": account_id,

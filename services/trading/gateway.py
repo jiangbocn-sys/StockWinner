@@ -143,7 +143,9 @@ class TradingGateway(TradingGatewayInterface):
                 else:
                     # 找该日期之前最近的累计因子
                     earlier_dates = [d for d in cumulative_map.keys() if d <= td]
-                    factor = cumulative_map[max(earlier_dates)] if earlier_dates else latest_cumulative
+                    # 如果没有更早的除权日，使用 1.0（无除权）
+                    # 如果有，使用最近的除权日累计因子
+                    factor = cumulative_map[max(earlier_dates)] if earlier_dates else 1.0
 
                 adj_ratio = factor / latest_cumulative
                 if 'open' in k:
