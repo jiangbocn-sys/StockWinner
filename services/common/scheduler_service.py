@@ -1546,15 +1546,15 @@ class SchedulerService:
             )
             logger.info(f"  注册收盘失效当日单任务 (cron=5 15 * * mon-fri)")
 
-            # 每日盘前更新复权因子（9:15）
-            self._scheduler.add_job(
-                self._update_adj_factor_job,
-                CronTrigger.from_crontab("15 9 * * mon-fri", timezone=CHINA_TZ),
-                id="update_adj_factor",
-                name="每日盘前更新复权因子",
-                replace_existing=True,
-            )
-            logger.info(f"  注册复权因子更新任务 (cron=15 9 * * mon-fri)")
+            # 每日盘前更新复权因子（已废弃，改用 dividend_adj_warmup 任务）
+            # self._scheduler.add_job(
+            #     self._update_adj_factor_job,
+            #     CronTrigger.from_crontab("15 9 * * mon-fri", timezone=CHINA_TZ),
+            #     id="update_adj_factor",
+            #     name="每日盘前更新复权因子",
+            #     replace_existing=True,
+            # )
+            # logger.info(f"  注册复权因子更新任务 (cron=15 9 * * mon-fri)")
 
         except Exception as e:
             logger.error(f"注册监控任务失败: {e}", exc_info=True)

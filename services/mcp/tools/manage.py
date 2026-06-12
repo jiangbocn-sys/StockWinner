@@ -169,16 +169,16 @@ async def mcp_strategy_execute(strategy_id: int, account_id: str) -> dict:
 @mcp.tool()
 async def mcp_update_adj_factor_full() -> dict:
     """
-    手动全量更新复权因子数据
+    手动更新复权因子数据
 
-    从 SDK 获取所有 A 股股票的复权因子信息，保存到数据库。
-    用于 K 线前复权计算。
+    从 SDK 获取分红数据计算复权因子，保存到数据库。
+    仅更新活跃股票（持仓 + watchlist）。
 
     Returns:
         更新结果，包含更新股票数、保存记录数
 
     Note:
-        需要 operator+ 权限，执行时间约 2-3 分钟
+        需要 operator+ 权限，执行时间约 0.3 秒
     """
     return await api.post("/manage/adj-factor/update-full")
 
@@ -187,6 +187,8 @@ async def mcp_update_adj_factor_full() -> dict:
 async def mcp_update_adj_factor_single(stock_code: str) -> dict:
     """
     手动更新单只股票的复权因子
+
+    从 SDK 获取分红数据计算复权因子。
 
     Args:
         stock_code: 股票代码（如 600000.SH）

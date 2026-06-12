@@ -3776,42 +3776,26 @@ async def update_adj_factor_full(
     agent: dict = Depends(verify_agent_key),
     _: None = Depends(require_role(AgentRole.OPERATOR)),
 ):
-    """手动全量更新复权因子（所有 A 股）"""
-    import asyncio
-    from services.common.sdk_manager import get_sdk_manager
-    from services.data.adj_factor_service import save_adj_factor_batch, get_adj_factor_count
+    """手动全量更新复权因子（改用 dividend 数据，仅更新活跃股票）"""
+    from services.data.dividend_adj_service import update_adj_factor_from_dividend, get_active_stock_codes
+    from services.data.adj_factor_service import get_adj_factor_count
 
-    sdk = get_sdk_manager()
-
-    # 获取全部 A 股代码
-    codes = await asyncio.to_thread(sdk.get_code_list, 'EXTRA_STOCK_A')
+    # 获取活跃股票列表（持仓 + watchlist）
+    codes = get_active_stock_codes()
 
     if not codes:
-        return {"success": False, "message": "获取股票列表失败"}
+        return {"success": False, "message": "无活跃股票（持仓+watchlist）"}
 
-    # 分批更新（每批 200 只）
-    batch_size = 200
-    total_saved = 0
-    total_stocks = 0
-
-    for i in range(0, len(codes), batch_size):
-        batch = codes[i:i+batch_size]
-        try:
-            df = await asyncio.to_thread(sdk.get_adj_factor, batch)
-            if not df.empty:
-                saved = save_adj_factor_batch(df)
-                total_saved += saved
-                total_stocks += len(batch)
-        except Exception:
-            pass
+    # 使用 dividend 数据更新（快速，约0.3秒）
+    result = update_adj_factor_from_dividend(codes)
 
     count = get_adj_factor_count()
 
     return {
         "success": True,
-        "message": f"全量更新完成",
-        "stocks_updated": total_stocks,
-        "records_saved": total_saved,
+        "message": result['message'],
+        "stocks_updated": result['stocks'],
+        "records_saved": result['saved'],
         "database_stats": count
     }
 
@@ -3823,26 +3807,19 @@ async def update_adj_factor_single(
     agent: dict = Depends(verify_agent_key),
     _: None = Depends(require_role(AgentRole.OPERATOR)),
 ):
-    """手动更新单只股票的复权因子"""
-    import asyncio
-    from services.common.sdk_manager import get_sdk_manager
-    from services.data.adj_factor_service import save_adj_factor_batch, get_adj_factor_for_stock
-
-    sdk = get_sdk_manager()
+    """手动更新单只股票的复权因子（改用 dividend 数据）"""
+    from services.data.dividend_adj_service import update_adj_factor_from_dividend
+    from services.data.adj_factor_service import get_adj_factor_for_stock
 
     try:
-        df = await asyncio.to_thread(sdk.get_adj_factor, [stock_code])
-        if df.empty:
-            return {"success": False, "message": "SDK 返回空数据"}
-
-        saved = save_adj_factor_batch(df)
+        result = update_adj_factor_from_dividend([stock_code])
         factors = get_adj_factor_for_stock(stock_code)
 
         return {
             "success": True,
-            "message": f"更新完成，保存 {saved} 条除权记录",
+            "message": result['message'],
             "stock_code": stock_code,
-            "records_saved": saved,
+            "records_saved": result['saved'],
             "factor_count": len(factors)
         }
     except Exception as e:
