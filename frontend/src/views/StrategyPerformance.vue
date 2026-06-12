@@ -129,7 +129,7 @@
             </el-space>
           </div>
         </template>
-        <el-table :data="sortedSelections" stripe @row-dblclick="showKline" @sort-change="onSelectionSortChange">
+        <el-table :data="paginatedSelections" stripe @row-dblclick="showKline" @sort-change="onSelectionSortChange">
           <el-table-column prop="stock_code" label="代码" width="110" sortable="custom" />
           <el-table-column prop="stock_name" label="名称" width="120" sortable="custom" />
           <el-table-column prop="selected_at" label="选出日期" width="180" sortable="custom">
@@ -158,6 +158,17 @@
             </template>
           </el-table-column>
         </el-table>
+
+        <div class="pagination-bar" v-if="selections.length > selPageSize">
+          <el-pagination
+            v-model:current-page="selCurrentPage"
+            v-model:page-size="selPageSize"
+            :total="selections.length"
+            :page-sizes="[10, 20, 50, 100]"
+            layout="sizes, prev, pager, next, total"
+            small
+          />
+        </div>
       </el-card>
 
       <!-- 权益曲线 -->
@@ -274,6 +285,14 @@ const sortedSelections = computed(() => {
     return desc ? -cmp : cmp
   })
   return arr
+})
+
+// 选股明细分页
+const selCurrentPage = ref(1)
+const selPageSize = ref(20)
+const paginatedSelections = computed(() => {
+  const start = (selCurrentPage.value - 1) * selPageSize.value
+  return sortedSelections.value.slice(start, start + selPageSize.value)
 })
 
 const stats = ref({
@@ -667,5 +686,11 @@ h2 { margin-bottom: 20px; color: #303133; }
   min-width: 80px;
   text-align: center;
   font-family: monospace;
+}
+
+.pagination-bar {
+  display: flex;
+  justify-content: center;
+  padding: 12px 0;
 }
 </style>
