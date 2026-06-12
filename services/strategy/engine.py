@@ -615,7 +615,12 @@ class StrategyEngine:
                         price_is_lower = new_price and (not old_target_price or new_price < old_target_price)
 
                         if should_upgrade or price_is_lower:
-                            await db.execute(
+                            # 使用写入队列同步写入（避免锁竞争）
+                            from services.common.db_write_queue import get_db_write_queue
+                            import asyncio
+                            write_queue = get_db_write_queue()
+                            await asyncio.to_thread(
+                                write_queue.execute,
                                 "UPDATE watchlist SET trigger_price = ?, stop_loss_price = ?, take_profit_price = ?, "
                                 f"reason = ?, strategy_id = ?, status = '{new_status}', created_at = ?, updated_at = ? WHERE id = ?",
                                 (new_price, new_sl, new_tp, signal.get("reason", "价格更优"), strategy_id, now, now, existing_in_target["id"])
@@ -630,7 +635,10 @@ class StrategyEngine:
                             skipped += 1
                     else:
                         # 目标分组没有记录：新增一条（即使其他分组已有）
-                        await db.insert("watchlist", {
+                        from services.common.db_write_queue import get_db_write_queue
+                        import asyncio
+                        write_queue = get_db_write_queue()
+                        watchlist_data = {
                             "account_id": account_id,
                             "strategy_id": strategy_id,
                             "group_id": group_id,
@@ -644,9 +652,11 @@ class StrategyEngine:
                             "target_quantity": signal.get("target_quantity", 0),
                             "status": new_status,
                             "signal_type": signal.get("signal_type", "buy"),
+                            "selected_at": now,  # 选出时间
                             "created_at": now,
                             "updated_at": now,
-                        })
+                        }
+                        await asyncio.to_thread(write_queue.insert, "watchlist", watchlist_data)
                         added += 1
                         get_logger("strategy").log_event("strategy_signal_add",
                             f"策略新增 {new_status} 信号: {code}",
@@ -667,7 +677,9 @@ class StrategyEngine:
                     skipped += 1
                     continue
 
-                await db.insert("watchlist", {
+                from services.common.db_write_queue import get_db_write_queue
+                write_queue = get_db_write_queue()
+                watchlist_data = {
                     "account_id": account_id,
                     "strategy_id": strategy_id,
                     "group_id": group_id,
@@ -681,9 +693,11 @@ class StrategyEngine:
                     "target_quantity": signal.get("target_quantity", 0),
                     "status": "pending" if signal_action == "trade" else "watching",
                     "signal_type": signal.get("signal_type", "buy"),
+                    "selected_at": now,  # 选出时间
                     "created_at": now,
                     "updated_at": now,
-                })
+                }
+                await asyncio.to_thread(write_queue.insert, "watchlist", watchlist_data)
                 added += 1
                 status_label = "pending" if signal_action == "trade" else "watching"
                 get_logger("strategy").log_event("strategy_signal_add",

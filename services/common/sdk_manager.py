@@ -177,9 +177,10 @@ class SDKManager:
         if logger is None:
             logger = get_logger("sdk_manager")
 
-        # 添加 priority 到 kwargs
+        # 添加 priority 和 timeout 到 kwargs
         kwargs_with_priority = kwargs.copy()
         kwargs_with_priority["priority"] = priority
+        kwargs_with_priority["timeout"] = timeout
 
         start = time.monotonic()
         try:
@@ -463,18 +464,44 @@ class SDKManager:
         except Exception:
             return pd.DataFrame()
 
-    def get_adj_factor(self, stock_codes: list, priority: int = 2) -> pd.DataFrame:
+    def get_adj_factor(self, stock_codes: list, priority: int = 2, timeout: float = 60.0) -> pd.DataFrame:
         """获取复权因子（默认 medium priority）
 
         用于 K 线前复权计算：
         - 前复权价格 = 原价 × 当日复权因子 / 最新复权因子
+
+        Args:
+            stock_codes: 股票代码列表
+            priority: 优先级
+            timeout: IPC 超时时间（默认 60秒）
 
         Returns:
             DataFrame with columns: stock_code, trade_date, adj_factor
         """
         try:
             result = self._call_ipc("get_adj_factor", {"stock_codes": stock_codes},
-                                    "query", priority, 30.0, stock_count=len(stock_codes) if stock_codes else 0)
+                                    "query", priority, timeout, stock_count=len(stock_codes) if stock_codes else 0)
+            return result if isinstance(result, pd.DataFrame) else pd.DataFrame()
+        except Exception:
+            return pd.DataFrame()
+
+    def get_dividend(self, stock_codes: list, priority: int = 3, timeout: float = 30.0) -> pd.DataFrame:
+        """获取分红数据（后台任务，默认 low priority）
+
+        包含除权日期（DATE_EX）、送股率（DVD_PER_SHARE_STK）、现金分红等。
+        耗时约 0.3 秒，比 get_adj_factor 快 100 倍。
+
+        Args:
+            stock_codes: 股票代码列表
+            priority: 优先级（默认 3 = low）
+            timeout: IPC 超时时间
+
+        Returns:
+            DataFrame with dividend records
+        """
+        try:
+            result = self._call_ipc("get_dividend", {"stock_codes": stock_codes},
+                                    "download", priority, timeout, stock_count=len(stock_codes) if stock_codes else 0)
             return result if isinstance(result, pd.DataFrame) else pd.DataFrame()
         except Exception:
             return pd.DataFrame()

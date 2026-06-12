@@ -165,17 +165,29 @@ async def get_strategy_selections(
         raise HTTPException(status_code=404, detail="策略不存在")
 
     selections = await db.fetchall("""
-        SELECT w.stock_code, w.stock_name, w.selected_at, w.trigger_price, w.bought,
+        SELECT w.stock_code, w.stock_name,
+               COALESCE(w.selected_at, w.created_at) as selected_at,
+               w.trigger_price, w.bought,
                t.price as buy_price_actual, t.trade_time as buy_time,
                s.price as sell_price, s.trade_time as sell_time, s.profit_loss
         FROM watchlist w
-        LEFT JOIN trade_records t ON t.id = w.buy_trade_id
+        LEFT JOIN trade_records t ON t.id = (
+            SELECT t1.id FROM trade_records t1
+            WHERE t1.stock_code = w.stock_code
+              AND t1.trade_type = 'buy'
+              AND t1.strategy_id = w.strategy_id
+              AND t1.account_id = w.account_id
+              AND t1.trade_time >= COALESCE(w.selected_at, w.created_at)
+            ORDER BY t1.trade_time ASC
+            LIMIT 1
+        )
         LEFT JOIN trade_records s ON s.id = (
             SELECT t2.id FROM trade_records t2
             WHERE t2.stock_code = w.stock_code
               AND t2.trade_type = 'sell'
               AND t2.strategy_id = w.strategy_id
-              AND t2.trade_time > COALESCE(t.trade_time, w.selected_at)
+              AND t2.account_id = w.account_id
+              AND t2.trade_time > COALESCE(t.trade_time, w.selected_at, w.created_at)
             ORDER BY t2.trade_time ASC
             LIMIT 1
         )

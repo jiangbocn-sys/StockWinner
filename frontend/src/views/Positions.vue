@@ -173,7 +173,7 @@
         </div>
 
         <!-- 已清仓明细表格 -->
-        <el-table v-show="activeTab === 'closed'" :data="paginatedClosed" stripe style="width: 100%">
+        <el-table v-show="activeTab === 'closed'" :data="paginatedClosed" stripe style="width: 100%" @row-dblclick="showKline">
           <el-table-column type="index" label="序号" width="60" align="center" :index="closedIndexMethod" />
           <el-table-column prop="stock_code" label="股票代码" width="100" />
           <el-table-column prop="stock_name" label="股票名称" width="120" />
@@ -1227,7 +1227,7 @@ const loadKlineData = async (code, name, sw_level1 = '', sw_level2 = '', sw_leve
   const end = endDt.toISOString().slice(0, 10).replace(/-/g, '')
 
   try {
-    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/market/kline?stock_code=${code}&period=day&start_date=${start}&end_date=${end}`)
+    const res = await fetch(`/api/v1/ui/${currentAccountId.value}/market/kline?stock_code=${code}&period=day&start_date=${start}&end_date=${end}&adjust=${klineAdjust.value}`)
     const data = await res.json()
     klineData.value = data.data?.kline || []
     // 加载指标数据

@@ -245,47 +245,53 @@ class SDKProxyClient:
         except Exception:
             return pd.DataFrame()
 
-    def get_code_info(self, security_type: str = 'EXTRA_STOCK_A', priority: int = 3) -> pd.DataFrame:
+    def get_code_info(self, security_type: str = 'EXTRA_STOCK_A', priority: int = 3, **kwargs) -> pd.DataFrame:
         """股票基本信息（后台任务，默认 low priority）"""
+        timeout = kwargs.get('timeout', 30.0)
         try:
-            result = self._call_ipc("get_code_info", {"security_type": security_type}, priority=priority, timeout=30.0)
+            result = self._call_ipc("get_code_info", {"security_type": security_type}, priority=priority, timeout=timeout)
             return _to_dataframe(result) if result is not None else pd.DataFrame()
         except Exception:
             return pd.DataFrame()
 
-    def get_code_list(self, security_type: str = 'EXTRA_STOCK_A', priority: int = 3) -> list:
+    def get_code_list(self, security_type: str = 'EXTRA_STOCK_A', priority: int = 3, **kwargs) -> list:
         """股票列表（后台任务，默认 low priority）"""
+        timeout = kwargs.get('timeout', 30.0)
         try:
-            return self._call_ipc("get_code_list", {"security_type": security_type}, priority=priority, timeout=30.0) or []
+            return self._call_ipc("get_code_list", {"security_type": security_type}, priority=priority, timeout=timeout) or []
         except Exception:
             return []
 
     def query_kline(self, code_list: list, begin_date: int, end_date: int,
-                    period: int, task_type: str = "query", priority: int = 1) -> dict:
+                    period: int, task_type: str = "query", priority: int = 1, **kwargs) -> dict:
         """K线查询
 
         Args:
             priority: 默认 high (1)，后台下载用 low (3)
+            **kwargs: 额外参数（如 timeout，由 _call_ipc 内部处理）
         """
+        # timeout 由 _call_ipc 处理，不传递到 IPC 消息
+        timeout = kwargs.get('timeout', 120.0)
         try:
             result = self._call_ipc("query_kline", {
                 "code_list": code_list,
                 "begin_date": begin_date,
                 "end_date": end_date,
                 "period": period,
-            }, priority=priority, timeout=120.0)
+            }, priority=priority, timeout=timeout)
             return result if isinstance(result, dict) else {}
         except Exception:
             return {}
 
-    def query_snapshot(self, code_list: list, begin_date: int, end_date: int, priority: int = 1) -> dict:
+    def query_snapshot(self, code_list: list, begin_date: int, end_date: int, priority: int = 1, **kwargs) -> dict:
         """快照查询（默认 high priority）"""
+        timeout = kwargs.get('timeout', 30.0)
         try:
             result = self._call_ipc("query_snapshot", {
                 "code_list": code_list,
                 "begin_date": begin_date,
                 "end_date": end_date,
-            }, priority=priority, timeout=30.0)
+            }, priority=priority, timeout=timeout)
             return result if isinstance(result, dict) else {}
         except Exception:
             return {}
@@ -385,17 +391,42 @@ class SDKProxyClient:
         except Exception:
             return pd.DataFrame()
 
-    def get_adj_factor(self, stock_codes: list, priority: int = 2) -> pd.DataFrame:
+    def get_adj_factor(self, stock_codes: list, priority: int = 2, timeout: float = 60.0) -> pd.DataFrame:
         """获取复权因子（默认 medium priority）
 
         用于 K 线前复权计算：
         - 前复权价格 = 原价 × 当日复权因子 / 最新复权因子
 
+        Args:
+            stock_codes: 股票代码列表
+            priority: 优先级 (0=highest, 1=high, 2=medium, 3=low)
+            timeout: IPC 超时时间（默认 60秒，因为复权因子查询耗时较长）
+
         Returns:
             DataFrame with columns: stock_code, trade_date, adj_factor
         """
         try:
-            result = self._call_ipc("get_adj_factor", {"stock_codes": stock_codes}, priority=priority, timeout=30.0)
+            result = self._call_ipc("get_adj_factor", {"stock_codes": stock_codes}, priority=priority, timeout=timeout)
+            return _to_dataframe(result) if result is not None else pd.DataFrame()
+        except Exception:
+            return pd.DataFrame()
+
+    def get_dividend(self, stock_codes: list, priority: int = 3, timeout: float = 30.0) -> pd.DataFrame:
+        """获取分红数据（后台任务，默认 low priority）
+
+        包含除权日期（DATE_EX）、送股率（DVD_PER_SHARE_STK）、现金分红等。
+        耗时约 0.3 秒，比 get_adj_factor 快 100 倍。
+
+        Args:
+            stock_codes: 股票代码列表
+            priority: 优先级（默认 3 = low）
+            timeout: IPC 超时时间
+
+        Returns:
+            DataFrame with dividend records
+        """
+        try:
+            result = self._call_ipc("get_dividend", {"stock_codes": stock_codes}, priority=priority, timeout=timeout)
             return _to_dataframe(result) if result is not None else pd.DataFrame()
         except Exception:
             return pd.DataFrame()

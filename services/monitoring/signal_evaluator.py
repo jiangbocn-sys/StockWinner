@@ -322,8 +322,10 @@ class SignalEvaluator:
                     "avg_cost": avg_cost,
                     "highest_price": highest_price,
                 }
+                # 使用实际持仓数量卖出
+                sell_quantity = pos.get("quantity", 0)
                 await self._executor.execute_sell_signal(
-                    account_id, stock_info, current_price, signal_type, 0, trigger_source="position_stop_loss"
+                    account_id, stock_info, current_price, signal_type, sell_quantity, trigger_source="position_stop_loss"
                 )
 
     async def _check_stock_signals_with_price(

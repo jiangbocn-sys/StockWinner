@@ -90,13 +90,75 @@ class TradingGateway(TradingGatewayInterface):
     async def get_kline_data(
         self, stock_code: str, period: str = "day",
         start_date: Optional[str] = None, end_date: Optional[str] = None,
-        limit: int = 100, priority: int = 1
+        limit: int = 100, priority: int = 1, adjust: str = "none"
     ) -> List[Dict[str, Any]]:
-        """获取 K 线数据（用户查询，默认 high priority）"""
-        return await self._kline_data.get_kline_data(
+        """获取 K 线数据（用户查询，默认 high priority）
+
+        Args:
+            adjust: 复权方式
+                - "none": 不复权（原始价格）
+                - "forward": 前复权（历史价格调整，以当前价格为基准）
+        """
+        klines = await self._kline_data.get_kline_data(
             stock_code, period, start_date, end_date, limit,
             task_type="query", priority=priority, connected=self.connected
         )
+
+        # 应用前复权
+        if adjust == "forward" and klines:
+            klines = await self._apply_forward_adjustment(klines, stock_code)
+
+        return klines
+
+    async def _apply_forward_adjustment(self, klines: List[Dict], stock_code: str) -> List[Dict]:
+        """应用前复权（历史价格 × 当日累计因子 / 最新累计因子）"""
+        try:
+            adj_factors = await self.get_adj_factor([stock_code])
+            if not adj_factors:
+                return klines
+
+            # 构建日期 → 累计因子映射
+            cumulative_map = {}
+            latest_cumulative = 1.0
+            for f in adj_factors:
+                td_raw = str(f.get('trade_date', ''))
+                if '-' in td_raw:
+                    td = td_raw.replace('-', '')[:8]
+                else:
+                    td = td_raw[:8]
+                cum_factor = float(f.get('cumulative_factor', 1.0))
+                cumulative_map[td] = cum_factor
+                latest_cumulative = cum_factor  # 最后一个就是最新的
+
+            # 应用前复权公式
+            for k in klines:
+                td_raw = k.get('trade_date', '')
+                if '-' in td_raw:
+                    td = td_raw.replace('-', '')[:8]
+                else:
+                    td = td_raw[:8]
+
+                if td in cumulative_map:
+                    factor = cumulative_map[td]
+                else:
+                    # 找该日期之前最近的累计因子
+                    earlier_dates = [d for d in cumulative_map.keys() if d <= td]
+                    factor = cumulative_map[max(earlier_dates)] if earlier_dates else latest_cumulative
+
+                adj_ratio = factor / latest_cumulative
+                if 'open' in k:
+                    k['open'] = round(float(k['open']) * adj_ratio, 2)
+                if 'high' in k:
+                    k['high'] = round(float(k['high']) * adj_ratio, 2)
+                if 'low' in k:
+                    k['low'] = round(float(k['low']) * adj_ratio, 2)
+                if 'close' in k:
+                    k['close'] = round(float(k['close']) * adj_ratio, 2)
+
+            return klines
+        except Exception:
+            # 复权失败，返回原始数据
+            return klines
 
     async def get_batch_kline_data(
         self, stock_codes: List[str], period: str = "day",
@@ -464,11 +526,14 @@ class TradingGateway(TradingGatewayInterface):
         return df.to_dict('records') if df is not None and not df.empty else []
 
     async def get_adj_factor(self, stock_codes: List[str], priority: int = 2) -> List[Dict]:
-        """获取复权因子（从数据库读取）
+        """获取复权因子（纯数据库查询，不触发 SDK 调用）
 
-        前复权公式：前复权价格 = 原价 × 当日累计因子 / 最新累计因子
+        前复权公式：前复权价格 = 原价 × 当日累计因子 / 最新复权因子
 
-        注意：复权因子更新由定时任务负责，此函数只从本地数据库读取。
+        改造说明：
+        - 移除按需 SDK 调用逻辑（get_adj_factor 超时问题）
+        - 改为盘前预热任务更新（使用 get_dividend，0.3秒）
+        - 交易时段零 SDK 开销
 
         返回格式：[{trade_date, adj_factor, cumulative_factor}, ...]
         """
@@ -479,8 +544,12 @@ class TradingGateway(TradingGatewayInterface):
 
         stock_code = stock_codes[0]
 
-        # 直接从数据库读取（更新由定时任务处理）
+        # 纯数据库读取（不触发 SDK 调用）
         factors = get_adj_factor_for_stock(stock_code)
+
+        # 缺失时记录日志，但不阻塞查询（使用默认值 1.0）
+        if not factors:
+            logger.warning(f"复权因子缺失: {stock_code}，等待盘前预热任务更新")
 
         # 转换为原有格式（trade_date YYYYMMDD）
         result = []
@@ -654,27 +723,8 @@ class TradingGateway(TradingGatewayInterface):
         from services.common.security_type import get_security_type
 
         stock_list = []
-        # ETF/指数不从本地数据库读取，直接走 SDK
-        if security_type in ('EXTRA_STOCK_A',):
-            try:
-                conn = get_sync_connection("kline")
-                cursor = conn.cursor()
-                cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='kline_data'")
-                if cursor.fetchone():
-                    cursor.execute("SELECT DISTINCT stock_code FROM kline_data")
-                    stock_codes = [row[0] for row in cursor.fetchall()]
-                    if stock_codes:
-                        for code in stock_codes:
-                            # 过滤：只返回股票类型的代码
-                            if get_security_type(code) == 'stock':
-                                parts = code.split('.')
-                                if len(parts) == 2:
-                                    stock_list.append({"code": parts[0], "name": "", "market": parts[1]})
-                        logger.info(f"从本地数据库获取到 {len(stock_list)} 只股票")
-                        return stock_list
-            except Exception as e:
-                logger.warning(f"从本地数据库获取股票列表失败：{e}")
 
+        # 优先 SDK（获取最新完整列表，包含新上市股票/ETF）
         try:
             sdk_mgr = get_sdk_manager()
             code_info = sdk_mgr.get_code_info(security_type=security_type)
@@ -692,7 +742,33 @@ class TradingGateway(TradingGatewayInterface):
                 logger.info(f"从 SDK 获取到 {len(stock_list)} 只证券（类型: {security_type})")
                 return stock_list
         except Exception as e:
-            logger.warning(f"SDK获取证券列表失败：{e}")
+            logger.warning(f"SDK获取证券列表失败：{e}，尝试本地数据库兜底")
+
+        # SDK 失败时，从本地数据库兜底
+        if security_type in ('EXTRA_STOCK_A', 'EXTRA_ETF'):
+            try:
+                conn = get_sync_connection("kline")
+                cursor = conn.cursor()
+                cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='kline_data'")
+                if cursor.fetchone():
+                    cursor.execute("SELECT DISTINCT stock_code FROM kline_data")
+                    stock_codes = [row[0] for row in cursor.fetchall()]
+                    if stock_codes:
+                        for code in stock_codes:
+                            code_type = get_security_type(code)
+                            if security_type == 'EXTRA_STOCK_A' and code_type == 'stock':
+                                parts = code.split('.')
+                                if len(parts) == 2:
+                                    stock_list.append({"code": parts[0], "name": "", "market": parts[1]})
+                            elif security_type == 'EXTRA_ETF' and code_type == 'etf':
+                                parts = code.split('.')
+                                if len(parts) == 2:
+                                    stock_list.append({"code": parts[0], "name": "", "market": parts[1]})
+                        if stock_list:
+                            logger.info(f"从本地数据库兜底获取到 {len(stock_list)} 只证券（类型: {security_type})")
+                            return stock_list
+            except Exception as e:
+                logger.warning(f"本地数据库兜底失败：{e}")
 
         raise Exception("无法获取证券列表，请先下载基础数据或检查SDK连接")
 
