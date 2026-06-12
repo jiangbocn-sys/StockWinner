@@ -367,6 +367,7 @@ class DatabaseWriteQueue:
             where_args=None,
             sql=sql,
             sql_args=args,
+            sql_params=None,
             callback=None,
             result_event=threading.Event(),
         )
