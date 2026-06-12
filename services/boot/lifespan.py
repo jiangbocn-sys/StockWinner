@@ -866,6 +866,11 @@ async def _run_migrations(db_manager, log, migration_version: int):
         "ALTER TABLE accounts ADD COLUMN broker_qmt_session TEXT DEFAULT ''",
     ])
 
+    # v21: 策略任务支持多股票池
+    await run_migration(21, "策略任务多股票池支持", [
+        "ALTER TABLE strategy_tasks ADD COLUMN group_ids TEXT DEFAULT ''",
+    ])
+
     # v7 数据源配置 seed
     try:
         from services.data.channel.config_manager import seed_provider_configs

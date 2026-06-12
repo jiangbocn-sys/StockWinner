@@ -392,8 +392,25 @@ class SignalEvaluator:
             if not position or position.get("quantity", 0) == 0:
                 return
 
+            # 计算可卖数量（T+1规则：持仓总量 - 当日买入量）
+            from services.common.timezone import get_china_time
+            today_str = get_china_time().strftime("%Y-%m-%d")
+            today_buy_rows = await db.fetchall(
+                "SELECT quantity FROM trade_records WHERE account_id = ? AND stock_code = ? AND trade_type = 'buy' AND created_at LIKE ?",
+                (account_id, stock_code, today_str + "%")
+            )
+            today_buy_qty = sum(r.get("quantity", 0) for r in today_buy_rows) if today_buy_rows else 0
+            available_qty = position.get("quantity", 0) - today_buy_qty
+
+            # 可卖数量为0时跳过卖出检测
+            if available_qty <= 0:
+                get_logger("monitor").log_event("skip_no_available_qty",
+                    f"可卖数量为0跳过卖出检测: {stock_code}, 持仓={position.get('quantity')}, 当日买入={today_buy_qty}",
+                    stock_code=stock_code, position_qty=position.get("quantity"), today_buy=today_buy_qty)
+                return
+
             # 将持仓信息合并到 stock 对象（用于止损止盈计算）
-            stock = {**stock, "avg_cost": position.get("avg_cost"), "highest_price": position.get("highest_price")}
+            stock = {**stock, "avg_cost": position.get("avg_cost"), "highest_price": position.get("highest_price"), "quantity": available_qty}
 
             # 检测并更新 highest_price（盘中创新高时）
             old_highest = position.get("highest_price", 0) or 0
@@ -422,14 +439,16 @@ class SignalEvaluator:
                 signal_type = "sell_stop_loss" if reason == "stop_loss" else (
                     "sell_take_profit" if reason == "take_profit" else f"sell_{reason}"
                 )
+                # 使用可卖数量（已扣除当日买入）
+                sell_quantity = stock.get("quantity", 0)  # stock["quantity"] = available_qty
                 get_logger("monitor").log_event("sell_signal",
-                    f"触发卖出：{stock_code}, 原因: {reason}",
+                    f"触发卖出：{stock_code}, 原因: {reason}, 可卖数量: {sell_quantity}",
                     stock_code=stock_code, reason=reason,
                     stop_loss_price=decision.get('stop_loss_price'),
                     take_profit_price=decision.get('take_profit_price'),
-                    current_price=current_price)
-                await self._executor.create_pending_signal(account_id, stock, signal_type, current_price, 0)
-                await self._executor.execute_sell_signal(account_id, stock, current_price, signal_type, 0)
+                    current_price=current_price, quantity=sell_quantity)
+                await self._executor.create_pending_signal(account_id, stock, signal_type, current_price, sell_quantity)
+                await self._executor.execute_sell_signal(account_id, stock, current_price, signal_type, sell_quantity)
 
     async def _evaluate_sell_decision(
         self, account_id: str, stock_code: str, stock: Dict, current_price: float,

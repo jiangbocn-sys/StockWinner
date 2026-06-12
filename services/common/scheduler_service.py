@@ -1915,11 +1915,30 @@ class SchedulerService:
                     stocks = [{"stock_code": r["stock_code"], "stock_name": r["stock_name"] or r["stock_code"]} for r in stocks_rows]
                     logger.info(f"全市场策略 '{strategy['name']}'，获取到 {len(stocks)} 只股票")
                 else:
-                    # 选股型策略：获取候选组股票
-                    stocks = await db.fetchall(
-                        "SELECT * FROM watchlist WHERE account_id = ? AND group_id = ? AND status IN ('pending', 'watching')",
-                        (task["account_id"], task["group_id"])
-                    )
+                    # 选股型策略：获取候选组股票（支持多股票池）
+                    # 解析 group_ids（优先用新字段，兼容旧字段）
+                    group_ids = json.loads(task.get("group_ids") or "[]")
+                    if not group_ids and task.get("group_id"):
+                        group_ids = [task["group_id"]]  # 单值转为数组
+
+                    if group_ids:
+                        placeholders = ",".join(["?"] * len(group_ids))
+                        stocks = await db.fetchall(
+                            f"SELECT * FROM watchlist WHERE account_id = ? AND group_id IN ({placeholders}) AND status IN ('pending', 'watching')",
+                            [task["account_id"]] + group_ids
+                        )
+                        # 按股票代码去重（多个池可能有重复）
+                        seen = set()
+                        unique_stocks = []
+                        for s in stocks:
+                            if s["stock_code"] not in seen:
+                                seen.add(s["stock_code"])
+                                unique_stocks.append(s)
+                        stocks = unique_stocks
+                        logger.info(f"选股型策略 '{strategy['name']}'，从 {len(group_ids)} 个候选组获取到 {len(stocks)} 只股票（去重后）")
+                    else:
+                        stocks = []
+                        logger.info(f"选股型策略 '{strategy['name']}'，未指定候选组，跳过执行")
 
                 # ── 预取当日实时行情
                 _pre_fetched_realtime_quotes: Dict[str, Dict] = {}

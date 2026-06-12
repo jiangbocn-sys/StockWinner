@@ -4,6 +4,7 @@
 提供调度状态查询和手动触发功能
 """
 
+import json
 from fastapi import APIRouter, Query, Path, Body, HTTPException, BackgroundTasks
 from typing import Dict, List, Optional, Any
 from services.common.timezone import format_china_time
@@ -577,7 +578,8 @@ async def create_strategy_task(
     task_type: str = Body("strategy", description="任务类型: builtin / strategy"),
     module: Optional[str] = Body(None, description="内置任务模块名（builtin 类型必填）"),
     strategy_id: Optional[int] = Body(None, description="策略 ID（strategy 类型必填）"),
-    group_id: Optional[int] = Body(None, description="候选组 ID（筛选股票池）"),
+    group_id: Optional[int] = Body(None, description="候选组 ID（单个，兼容旧版本）"),
+    group_ids: Optional[List[int]] = Body(None, description="候选组 ID 列表（多个股票池）"),
     cron_expression: str = Body(..., description="Cron 表达式或自然语言描述"),
     enabled: int = Body(1, description="是否启用"),
     require_trading_day: int = Body(0, description="是否仅交易日执行"),
@@ -661,18 +663,32 @@ async def create_strategy_task(
         if not group:
             raise HTTPException(status_code=404, detail="候选组不存在")
 
+    # 验证多个候选组
+    if group_ids:
+        for gid in group_ids:
+            group = await db.fetchone("SELECT id FROM candidate_groups WHERE id = ? AND account_id = ?", (gid, account_id))
+            if not group:
+                raise HTTPException(status_code=404, detail=f"候选组不存在: {gid}")
+
     if target_group_id:
         tg = await db.fetchone("SELECT id FROM candidate_groups WHERE id = ? AND account_id = ?", (target_group_id, account_id))
         if not tg:
             raise HTTPException(status_code=404, detail="目标分组不存在")
-        if target_group_id == group_id:
+        # 检查目标分组是否与源分组重复
+        source_ids = group_ids if group_ids else ([group_id] if group_id else [])
+        if target_group_id in source_ids:
             raise HTTPException(status_code=400, detail="目标分组不能与源分组相同")
+
+    # 合并 group_id 和 group_ids（优先用 group_ids）
+    final_group_ids = group_ids if group_ids else ([group_id] if group_id else None)
+    group_ids_json = json.dumps(final_group_ids) if final_group_ids else ""
 
     task_id = await db.insert("strategy_tasks", {
         "task_type": task_type,
         "module": module,
         "strategy_id": strategy_id if task_type == "strategy" else None,
-        "group_id": group_id,
+        "group_id": group_id,  # 保留兼容旧数据
+        "group_ids": group_ids_json,  # 新字段
         "account_id": account_id,
         "cron_expression": cron_expression,
         "enabled": enabled,
@@ -696,7 +712,8 @@ async def update_strategy_task(
     require_trading_day: Optional[int] = Body(None, description="是否仅交易日执行"),
     full_market: Optional[int] = Body(None, description="全市场模式"),
     strategy_id: Optional[int] = Body(None, description="关联策略 ID"),
-    group_id: Optional[int] = Body(None, description="候选分组 ID"),
+    group_id: Optional[int] = Body(None, description="候选分组 ID（单个，兼容旧版本）"),
+    group_ids: Optional[List[int]] = Body(None, description="候选分组 ID 列表（多个股票池）"),
     signal_action: Optional[str] = Body(None, description="信号处理方式: trade / watch"),
     target_group_id: Optional[int] = Body(None, description="信号输出目标分组 ID"),
 ):
@@ -723,6 +740,8 @@ async def update_strategy_task(
         update_data["strategy_id"] = strategy_id
     if group_id is not None:
         update_data["group_id"] = group_id
+    if group_ids is not None:
+        update_data["group_ids"] = json.dumps(group_ids) if group_ids else ""
     if signal_action is not None:
         update_data["signal_action"] = signal_action
     if target_group_id is not None:

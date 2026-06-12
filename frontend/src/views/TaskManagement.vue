@@ -90,7 +90,7 @@
                         </el-select>
                       </el-form-item>
                       <el-form-item label="候选分组" required>
-                        <el-select v-model="newTaskForm.groupId" placeholder="选择分组" style="width: 100%">
+                        <el-select v-model="newTaskForm.groupIds" placeholder="选择分组（可多选）" style="width: 100%" multiple collapse-tags collapse-tags-tooltip>
                           <el-option v-for="g in candidateGroups" :key="g.id" :label="g.name" :value="g.id" />
                         </el-select>
                       </el-form-item>
@@ -133,7 +133,7 @@
                       </el-form-item>
                       <el-form-item v-if="newTaskForm.signalAction === 'watch'" label="目标分组">
                         <el-select v-model="newTaskForm.targetGroupId" placeholder="选择信号输出分组（不选则写入源分组）" style="width: 100%" clearable>
-                          <el-option v-for="g in targetGroupOptions" :key="g.id" :label="g.name" :value="g.id" :disabled="g.id === newTaskForm.groupId" />
+                          <el-option v-for="g in targetGroupOptions" :key="g.id" :label="g.name" :value="g.id" :disabled="newTaskForm.groupIds?.includes(g.id)" />
                         </el-select>
                         <div class="hint" style="color: #E6A23C">二次筛选结果写入此分组，不可与源分组相同</div>
                       </el-form-item>
@@ -154,9 +154,15 @@
                       {{ row.task_name || row.strategy_name || '-' }}
                     </template>
                   </el-table-column>
-                  <el-table-column label="分组" width="120">
+                  <el-table-column label="分组" min-width="150">
                     <template #default="{ row }">
-                      {{ row.group_name || '-' }}
+                      <template v-if="row.group_ids">
+                        <span v-for="(gid, idx) in JSON.parse(row.group_ids)" :key="gid">
+                          {{ candidateGroups.find(g => g.id === gid)?.name || gid }}{{ idx < JSON.parse(row.group_ids).length - 1 ? ', ' : '' }}
+                        </span>
+                      </template>
+                      <template v-else-if="row.group_name">{{ row.group_name }}</template>
+                      <template v-else>-</template>
                     </template>
                   </el-table-column>
                   <el-table-column label="执行时间" width="200">
@@ -255,7 +261,7 @@ const cronDescription = ref('')
 const newTaskForm = reactive({
   taskType: 'strategy',  // 策略任务标签页只允许创建 strategy 类型
   strategyId: null,
-  groupId: null,
+  groupIds: [],  // 改为数组支持多选
   cron: '',
   cronText: '',
   enabled: 1,
@@ -267,11 +273,15 @@ const newTaskForm = reactive({
 
 const filteredStrategyTasks = computed(() => {
   if (!taskFilterGroup.value) return strategyTasks.value
-  return strategyTasks.value.filter(t => t.group_id === taskFilterGroup.value)
+  return strategyTasks.value.filter(t => {
+    // 支持多股票池过滤
+    const taskGroupIds = t.group_ids ? JSON.parse(t.group_ids) : (t.group_id ? [t.group_id] : [])
+    return taskGroupIds.includes(taskFilterGroup.value)
+  })
 })
 
 const targetGroupOptions = computed(() => {
-  return candidateGroups.value.filter(g => g.id !== newTaskForm.groupId)
+  return candidateGroups.value.filter(g => !newTaskForm.groupIds?.includes(g.id))
 })
 
 // 加载调度状态
@@ -406,7 +416,7 @@ async function createTask() {
     ElMessage.warning('请选择策略')
     return
   }
-  if (!newTaskForm.fullMarket && !newTaskForm.groupId) {
+  if (!newTaskForm.fullMarket && (!newTaskForm.groupIds || newTaskForm.groupIds.length === 0)) {
     ElMessage.warning('请选择候选分组')
     return
   }
@@ -461,7 +471,7 @@ async function createTask() {
       full_market: newTaskForm.fullMarket,
       signal_action: newTaskForm.signalAction,
       strategy_id: newTaskForm.strategyId,
-      group_id: newTaskForm.fullMarket ? null : newTaskForm.groupId,
+      group_ids: newTaskForm.fullMarket ? null : newTaskForm.groupIds,
     }
     if (newTaskForm.signalAction === 'watch' && newTaskForm.targetGroupId) {
       body.target_group_id = newTaskForm.targetGroupId
@@ -499,7 +509,7 @@ async function createTask() {
 function cancelEditTask() {
   editingTaskId.value = null
   newTaskForm.strategyId = null
-  newTaskForm.groupId = null
+  newTaskForm.groupIds = []
   newTaskForm.cron = ''
   newTaskForm.cronText = ''
   newTaskForm.enabled = 1
@@ -579,7 +589,18 @@ async function deleteTask(task) {
 function editTask(task) {
   editingTaskId.value = task.id
   newTaskForm.strategyId = task.strategy_id || null
-  newTaskForm.groupId = task.group_id || null
+  // 兼容新旧字段：优先用 group_ids，为空则用 group_id
+  if (task.group_ids) {
+    try {
+      newTaskForm.groupIds = JSON.parse(task.group_ids)
+    } catch {
+      newTaskForm.groupIds = []
+    }
+  } else if (task.group_id) {
+    newTaskForm.groupIds = [task.group_id]
+  } else {
+    newTaskForm.groupIds = []
+  }
   newTaskForm.cron = task.cron_expression || ''
   newTaskForm.cronText = ''
   newTaskForm.enabled = task.enabled

@@ -89,8 +89,22 @@ class SignalExecutor:
                     if risk_limit >= 100:
                         target_quantity = (risk_limit // 100) * 100
 
-        # 检查信号分配配置中的单股最小金额
+        # 检查信号分配配置中的单股最小金额（在所有数量计算完成后）
+        # 获取 strategy_id（优先从 stock 对象，否则从 watchlist 查询）
         strategy_id = stock.get('strategy_id')
+        if not strategy_id:
+            wl_row = await db.fetchone(
+                "SELECT strategy_id FROM watchlist WHERE account_id = ? AND stock_code = ? AND status = 'pending'",
+                (account_id, stock_code)
+            )
+            if wl_row:
+                strategy_id = wl_row.get('strategy_id')
+
+        logger = get_logger("monitor")
+        logger.log_event("buy_amount_check",
+            f"买入数量检查: {stock_code}, strategy_id={strategy_id}, target_quantity={target_quantity}, price={current_price}",
+            stock_code=stock_code, strategy_id=strategy_id, target_quantity=target_quantity, price=current_price)
+
         if strategy_id and target_quantity > 0 and current_price > 0:
             strategy = await db.fetchone(
                 "SELECT config FROM strategies WHERE id = ?",
