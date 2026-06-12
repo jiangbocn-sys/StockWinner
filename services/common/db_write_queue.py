@@ -24,6 +24,7 @@ class WriteType(Enum):
     UPDATE = "update"
     DELETE = "delete"
     EXECUTE = "execute"  # 原始 SQL 执行
+    EXECUTE_MANY = "execute_many"  # 批量 SQL 执行
 
 
 class WriteMode(Enum):
@@ -44,6 +45,7 @@ class WriteRequest:
     where_args: Optional[tuple]
     sql: Optional[str]
     sql_args: Optional[tuple]
+    sql_params: Optional[list]  # 批量写入参数列表
     callback: Optional[Callable]  # 异步写入完成回调
     result_event: Optional[threading.Event]  # 同步写入用
     result: Any = None
@@ -184,6 +186,11 @@ class DatabaseWriteQueue:
                             conn.commit()
                             request.result = True
 
+                        elif request.write_type == WriteType.EXECUTE_MANY:
+                            conn.executemany(request.sql, request.sql_params or [])
+                            conn.commit()
+                            request.result = len(request.sql_params) if request.sql_params else 0
+
                         request.error = None
                         success = True
                         break
@@ -282,6 +289,7 @@ class DatabaseWriteQueue:
             where_args=None,
             sql=None,
             sql_args=None,
+            sql_params=None,
             callback=None,
             result_event=threading.Event(),
         )
@@ -307,6 +315,7 @@ class DatabaseWriteQueue:
             where_args=where_args,
             sql=None,
             sql_args=None,
+            sql_params=None,
             callback=None,
             result_event=threading.Event(),
         )
@@ -332,6 +341,7 @@ class DatabaseWriteQueue:
             where_args=where_args,
             sql=None,
             sql_args=None,
+            sql_params=None,
             callback=None,
             result_event=threading.Event(),
         )
@@ -388,6 +398,7 @@ class DatabaseWriteQueue:
             where_args=None,
             sql=None,
             sql_args=None,
+            sql_params=None,
             callback=callback,
             result_event=None,
         )
@@ -408,6 +419,27 @@ class DatabaseWriteQueue:
             where_args=where_args,
             sql=None,
             sql_args=None,
+            sql_params=None,
+            callback=callback,
+            result_event=None,
+        )
+        self._queue.put(request)
+        self._update_queue_size()
+        return request.request_id
+
+    def delete_async(self, table: str, where: str, where_args: tuple = None, callback: Callable = None) -> int:
+        """删除记录（异步）"""
+        request = WriteRequest(
+            request_id=self._get_request_id(),
+            write_type=WriteType.DELETE,
+            write_mode=WriteMode.ASYNC,
+            table=table,
+            data=None,
+            where=where,
+            where_args=where_args,
+            sql=None,
+            sql_args=None,
+            sql_params=None,
             callback=callback,
             result_event=None,
         )
@@ -427,6 +459,36 @@ class DatabaseWriteQueue:
             where_args=None,
             sql=sql,
             sql_args=args,
+            sql_params=None,
+            callback=callback,
+            result_event=None,
+        )
+        self._queue.put(request)
+        self._update_queue_size()
+        return request.request_id
+
+    def execute_many_async(self, sql: str, params: list, callback: Callable = None) -> int:
+        """批量执行 SQL（异步），适用于批量更新场景
+
+        Args:
+            sql: SQL 语句（包含占位符）
+            params: 参数列表，每个元素是一个 tuple
+            callback: 可选回调函数 callback(count, error)
+
+        Returns:
+            request_id
+        """
+        request = WriteRequest(
+            request_id=self._get_request_id(),
+            write_type=WriteType.EXECUTE_MANY,
+            write_mode=WriteMode.ASYNC,
+            table=None,
+            data=None,
+            where=None,
+            where_args=None,
+            sql=sql,
+            sql_args=None,
+            sql_params=params,
             callback=callback,
             result_event=None,
         )
