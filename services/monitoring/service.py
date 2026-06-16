@@ -36,6 +36,9 @@ class TradingMonitor:
         self._account_ids: list[str] = []
         self._state_lock = threading.Lock()
         self._last_heartbeat: float = 0.0  # 上次心跳时间戳
+        self._watch_batch_index: int = 0  # watchlist 渐进刷新批次索引
+        self._watch_batch_size: int = 100  # 每批次股票数
+        self._watch_all_codes: list[str] = []  # 所有 watch_only 股票（缓存）
 
         # 子模块
         self._executor = SignalExecutor()
@@ -221,7 +224,7 @@ class TradingMonitor:
                         return
                     batch = strategy_codes[i:i + batch_size]
                     gw.subscribe("monitor_strategy", set(batch), refresh_interval=60, priority=2)
-                    batch_data = await asyncio.wait_for(gw.refresh_now("monitor_strategy"), timeout=20.0)
+                    batch_data = await asyncio.wait_for(gw.refresh_now("monitor_strategy"), timeout=45.0)
                     market_data_cache.update(batch_data)
                     gw.unsubscribe("monitor_strategy")
                     # 策略条件评估（每批后执行）
@@ -230,28 +233,40 @@ class TradingMonitor:
                             await self._evaluator.evaluate_trading_strategies(acct_id)
                     await asyncio.sleep(0.05)  # 让用户请求插队
 
-            # ④ low: Watchlist 纯观察（分批刷新）
+            # ④ low: Watchlist 纯观察（渐进刷新：每轮只刷新一批）
             watch_only_codes = stocks_by_priority.get('watch_only', [])
             if watch_only_codes:
-                batch_size = 100
-                for i in range(0, len(watch_only_codes), batch_size):
-                    if not self._running:
-                        return
-                    batch = watch_only_codes[i:i + batch_size]
+                # 缓存全部 watch_only 股票，用于渐进刷新
+                self._watch_all_codes = watch_only_codes
+
+                # 计算当前批次：每轮监控只刷新一批（100 股）
+                total_batches = (len(self._watch_all_codes) + self._watch_batch_size - 1) // self._watch_batch_size
+                current_batch_idx = self._watch_batch_index % total_batches
+                start_idx = current_batch_idx * self._watch_batch_size
+                batch = self._watch_all_codes[start_idx:start_idx + self._watch_batch_size]
+
+                log.info("monitor",
+                    f"Watchlist 渐进刷新: 批次 {current_batch_idx + 1}/{total_batches}, "
+                    f"股票 {len(batch)} 只 ({start_idx + 1}-{start_idx + len(batch)})")
+
+                if batch:
                     gw.subscribe("monitor_watch", set(batch), refresh_interval=120, priority=3)
-                    batch_data = await asyncio.wait_for(gw.refresh_now("monitor_watch"), timeout=20.0)
+                    batch_data = await asyncio.wait_for(gw.refresh_now("monitor_watch"), timeout=45.0)
                     market_data_cache.update(batch_data)
                     gw.unsubscribe("monitor_watch")
+
                     # watchlist 止损止盈评估
                     for acct_id in account_ids:
                         if self._running:
-                            acct_codes = set(batch)  # 简化：每批全局评估
+                            acct_codes = set(batch)
                             acct_market = {code: batch_data.get(code) for code in acct_codes if code in batch_data}
                             await self._evaluator.monitor_watchlist(acct_id, market_data_cache=acct_market)
-                    await asyncio.sleep(0.1)  # 让用户请求插队
+
+                # 更新批次索引，下一轮刷新下一批
+                self._watch_batch_index += 1
 
             self._health.record_sdk_success()
-            valid_count = sum(1 for md in market_data_cache.values() if md and getattr(md, 'current_price', 0) > 0)
+            valid_count = sum(1 for md in market_data_cache.values() if md and (getattr(md, 'current_price', None) or 0) > 0)
             self._health.record_data_valid(valid_count, len(market_data_cache))
 
             # 全局更新 PriceCache

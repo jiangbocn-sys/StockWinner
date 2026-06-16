@@ -33,6 +33,44 @@ class SignalExecutor:
         stock_code = stock.get('stock_code')
         stock_name = stock.get('stock_name', '')
         db = get_db_manager()
+        strategy_id = stock.get('strategy_id')
+
+        # 前置检查：查询策略配置和剩余现金
+        strategy_config = None
+        strategy_cash = 0
+        signal_alloc = {}
+        min_amount_per_stock = 0
+        max_position_pct = 0
+
+        if strategy_id:
+            strategy = await db.fetchone(
+                "SELECT config, strategy_cash FROM strategies WHERE id = ? AND account_id = ?",
+                (strategy_id, account_id),
+            )
+            if strategy and strategy.get("config"):
+                try:
+                    import json
+                    strategy_config = json.loads(strategy["config"]) if isinstance(strategy["config"], str) else strategy["config"]
+                    strategy_cash = strategy.get("strategy_cash", 0) or 0
+                    signal_alloc = strategy_config.get("signal_allocation", {})
+                    min_amount_per_stock = signal_alloc.get("min_amount_per_stock", 0)
+                    max_position_pct = signal_alloc.get("max_position_pct", 0)
+                except (json.JSONDecodeError, ValueError, TypeError):
+                    pass
+
+        logger = get_logger("monitor")
+        logger.log_event("buy_pre_check",
+            f"买入前置检查: {stock_code}, strategy_id={strategy_id}, strategy_cash={strategy_cash}, min_amount={min_amount_per_stock}, max_position_pct={max_position_pct}",
+            stock_code=stock_code, strategy_id=strategy_id, strategy_cash=strategy_cash,
+            min_amount=min_amount_per_stock, max_position_pct=max_position_pct)
+
+        # 前置筛选：策略剩余现金必须 >= min_amount_per_stock
+        if min_amount_per_stock > 0 and strategy_cash < min_amount_per_stock:
+            logger.log_event("buy_skip_cash_insufficient",
+                f"跳过买入 {stock_code}：策略剩余现金 {strategy_cash:.0f} 不足最小买入金额 {min_amount_per_stock}",
+                stock_code=stock_code, strategy_cash=strategy_cash, min_amount=min_amount_per_stock,
+                strategy_id=strategy_id)
+            return  # 不执行买入
 
         # 优先级 1：个股策略 max_trade_quantity
         ts = await db.fetchone(
@@ -41,92 +79,87 @@ class SignalExecutor:
         )
         if ts and ts.get("max_trade_quantity", 0) > 0:
             target_quantity = ts["max_trade_quantity"]
-        else:
-            # 优先级 2-3：从选股策略配置读取 quantity 或 position_pct
-            strategy_id = stock.get('strategy_id')
-            if strategy_id:
-                strategy = await db.fetchone(
-                    "SELECT config FROM strategies WHERE id = ? AND account_id = ?",
-                    (strategy_id, account_id),
-                )
-                if strategy and strategy.get("config"):
-                    try:
-                        import json
-                        config = json.loads(strategy["config"]) if isinstance(strategy["config"], str) else strategy["config"]
-                        if config.get("quantity"):
-                            target_quantity = int(config["quantity"])
-                        elif config.get("position_pct"):
-                            position_pct = float(config["position_pct"]) / 100.0
-                            account = await db.fetchone(
-                                "SELECT available_cash FROM accounts WHERE account_id = ?",
-                                (account_id,)
-                            )
-                            if account:
-                                available_cash = account.get('available_cash', 0)
-                                buy_amount = available_cash * position_pct
-                                if current_price > 0:
-                                    qty = int((buy_amount / current_price) // 100) * 100
-                                    target_quantity = max(qty, 0)
-                    except (json.JSONDecodeError, ValueError, TypeError):
-                        pass
 
-            # 优先级 4：按账户单股最大仓位计算
-            if not target_quantity:
-                account = await db.fetchone(
-                    "SELECT available_cash, max_single_position_pct FROM accounts WHERE account_id = ?",
+        # 优先级 2：策略配置 quantity 固定数量
+        elif strategy_config and strategy_config.get("quantity"):
+            target_quantity = int(strategy_config.get("quantity"))
+
+        # 优先级 3：策略配置 position_pct 按可用资金比例
+        elif strategy_config and strategy_config.get("position_pct"):
+            position_pct = float(strategy_config.get("position_pct", 0.1))
+            account = await db.fetchone(
+                "SELECT available_cash FROM accounts WHERE account_id = ?",
+                (account_id,)
+            )
+            if account and current_price > 0:
+                available_cash = account.get('available_cash', 0)
+                buy_amount = available_cash * position_pct
+                qty = int((buy_amount / current_price) // 100) * 100
+                target_quantity = max(qty, 0)
+
+        # 优先级 4：signal_allocation.max_position_pct 按策略总市值比例
+        elif max_position_pct > 0 and strategy_id and current_price > 0:
+            # 查询策略持仓市值（策略关联的持仓）
+            strategy_positions = await db.fetchall(
+                "SELECT SUM(market_value) as total_mv FROM stock_positions sp "
+                "JOIN watchlist w ON sp.stock_code = w.stock_code AND sp.account_id = w.account_id "
+                "WHERE sp.account_id = ? AND w.strategy_id = ? AND sp.quantity > 0",
+                (account_id, strategy_id)
+            )
+            position_mv = strategy_positions[0]["total_mv"] if strategy_positions and strategy_positions[0]["total_mv"] else 0
+            strategy_total_value = position_mv + strategy_cash  # 策略总市值 = 持仓 + 现金
+
+            # 允许买入上限 = 策略总市值 * max_position_pct%
+            max_buy_amount = strategy_total_value * (max_position_pct / 100.0)
+            # 实际买入金额 = min(剩余现金, 允许上限)
+            actual_buy_amount = min(strategy_cash, max_buy_amount)
+
+            logger.log_event("buy_calc_position_pct",
+                f"按 max_position_pct 计算买入: {stock_code}, 策略总市值={strategy_total_value:.0f}, "
+                f"持仓={position_mv:.0f}, 现金={strategy_cash:.0f}, 上限={max_buy_amount:.0f}, 实际={actual_buy_amount:.0f}",
+                stock_code=stock_code, strategy_total_value=strategy_total_value, position_mv=position_mv,
+                strategy_cash=strategy_cash, max_buy_amount=max_buy_amount, actual_buy_amount=actual_buy_amount)
+
+            # 后置检查：实际买入金额必须 >= min_amount_per_stock
+            if min_amount_per_stock > 0 and actual_buy_amount < min_amount_per_stock:
+                logger.log_event("buy_skip_below_min",
+                    f"跳过买入 {stock_code}：实际买入金额 {actual_buy_amount:.0f} 小于最低要求 {min_amount_per_stock}",
+                    stock_code=stock_code, actual_buy_amount=actual_buy_amount, min_amount=min_amount_per_stock,
+                    strategy_id=strategy_id)
+                return  # 不执行买入
+
+            if actual_buy_amount > 0:
+                qty = int((actual_buy_amount / current_price) // 100) * 100
+                target_quantity = max(qty, 0)
+
+        # 优先级 5：账户单股最大仓位
+        elif not target_quantity:
+            account = await db.fetchone(
+                "SELECT available_cash, max_single_position_pct FROM accounts WHERE account_id = ?",
+                (account_id,)
+            )
+            if account and current_price > 0:
+                available_cash = account.get('available_cash', 0)
+                max_single_pct = account.get('max_single_position_pct', 0.15)
+                positions = await db.fetchall(
+                    "SELECT SUM(market_value) as total_mv FROM stock_positions WHERE account_id = ?",
                     (account_id,)
                 )
-                if account and current_price > 0:
-                    available_cash = account.get('available_cash', 0)
-                    max_single_pct = account.get('max_single_position_pct', 0.15)
-                    positions = await db.fetchall(
-                        "SELECT SUM(market_value) as total_mv FROM stock_positions WHERE account_id = ?",
-                        (account_id,)
-                    )
-                    current_mv = positions[0]["total_mv"] if positions and positions[0]["total_mv"] else 0
-                    total_assets = current_mv + available_cash
-                    risk_limit = int(total_assets * max_single_pct / current_price)
-                    if risk_limit >= 100:
-                        target_quantity = (risk_limit // 100) * 100
+                current_mv = positions[0]["total_mv"] if positions and positions[0]["total_mv"] else 0
+                total_assets = current_mv + available_cash
+                risk_limit = int(total_assets * max_single_pct / current_price)
+                if risk_limit >= 100:
+                    target_quantity = (risk_limit // 100) * 100
 
-        # 检查信号分配配置中的单股最小金额（在所有数量计算完成后）
-        # 获取 strategy_id（优先从 stock 对象，否则从 watchlist 查询）
-        strategy_id = stock.get('strategy_id')
-        if not strategy_id:
-            wl_row = await db.fetchone(
-                "SELECT strategy_id FROM watchlist WHERE account_id = ? AND stock_code = ? AND status = 'pending'",
-                (account_id, stock_code)
-            )
-            if wl_row:
-                strategy_id = wl_row.get('strategy_id')
-
-        logger = get_logger("monitor")
-        logger.log_event("buy_amount_check",
-            f"买入数量检查: {stock_code}, strategy_id={strategy_id}, target_quantity={target_quantity}, price={current_price}",
-            stock_code=stock_code, strategy_id=strategy_id, target_quantity=target_quantity, price=current_price)
-
-        if strategy_id and target_quantity > 0 and current_price > 0:
-            strategy = await db.fetchone(
-                "SELECT config FROM strategies WHERE id = ?",
-                (strategy_id,)
-            )
-            if strategy and strategy.get("config"):
-                try:
-                    import json
-                    config = json.loads(strategy["config"]) if isinstance(strategy["config"], str) else strategy["config"]
-                    signal_alloc = config.get("signal_allocation", {})
-                    min_amount = signal_alloc.get("min_amount_per_stock", 0)
-                    if min_amount > 0:
-                        actual_amount = target_quantity * current_price
-                        if actual_amount < min_amount:
-                            logger = get_logger("monitor")
-                            logger.log_event("buy_skip_min_amount",
-                                f"跳过买入 {stock_code}：金额 {actual_amount:.0f} 小于配置最小金额 {min_amount}",
-                                stock_code=stock_code, actual_amount=actual_amount, min_amount=min_amount,
-                                strategy_id=strategy_id)
-                            return  # 不执行买入
-                except (json.JSONDecodeError, ValueError, TypeError):
-                    pass
+        # 后置检查：实际买入金额必须 >= min_amount_per_stock
+        if min_amount_per_stock > 0 and target_quantity > 0:
+            actual_amount = target_quantity * current_price
+            if actual_amount < min_amount_per_stock:
+                logger.log_event("buy_skip_amount_insufficient",
+                    f"跳过买入 {stock_code}：计算买入金额 {actual_amount:.0f} 小于最小买入金额 {min_amount_per_stock}",
+                    stock_code=stock_code, actual_amount=actual_amount, min_amount=min_amount_per_stock,
+                    target_quantity=target_quantity, strategy_id=strategy_id)
+                return  # 不执行买入
 
         # 执行买入
         from services.trading.execution_service import get_trade_execution_service

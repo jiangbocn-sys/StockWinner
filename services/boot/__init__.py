@@ -35,7 +35,13 @@ def create_app() -> FastAPI:
 
     @app.get("/api/v1/health")
     async def health_check():
-        return {"status": "healthy", "version": VERSION}
+        from services.boot.lifespan import get_warmup_status
+        warmup = get_warmup_status()
+        result = {"status": "healthy", "version": VERSION}
+        if warmup.get("in_progress"):
+            result["warmup"] = warmup
+            result["status"] = "warmup"  # 预热中状态
+        return result
 
     return app
 

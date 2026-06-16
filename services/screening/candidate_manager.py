@@ -216,13 +216,24 @@ class CandidateManager:
         return result
 
     async def _calc_quantity(self, strategy_config, account_id, current_price) -> Optional[int]:
-        """根据策略配置计算目标买入数量"""
+        """根据策略配置计算目标买入数量
+
+        注意：min_amount_per_stock 是门槛条件，不是计算依据。
+        此处只计算数量，门槛检查在调用方执行。
+
+        优先级：
+        1. quantity 固定数量
+        2. position_pct 按可用资金比例
+        3. signal_allocation.max_position_pct 按策略仓位比例
+        """
         if not strategy_config:
             return None
 
+        # 优先级 1：固定数量
         if strategy_config.get('quantity'):
             return int(strategy_config.get('quantity'))
 
+        # 优先级 2：按可用资金比例
         if strategy_config.get('position_pct'):
             position_pct = float(strategy_config.get('position_pct', 0.1))
             db = get_db_manager()
@@ -230,10 +241,17 @@ class CandidateManager:
                 "SELECT available_cash FROM accounts WHERE account_id = ?",
                 (account_id,)
             )
-            if account:
+            if account and current_price > 0:
                 available_cash = account.get('available_cash', 0)
                 buy_amount = available_cash * position_pct
-                if current_price > 0:
-                    return int((buy_amount / current_price) // 100) * 100
+                return int((buy_amount / current_price) // 100) * 100
+
+        # 优先级 3：signal_allocation.max_position_pct（需要配合策略现金使用）
+        # 注意：此处没有 strategy_cash 信息，无法计算，返回 None
+        # 实际数量在 execute_buy_signal 中根据 strategy_cash 计算
+        signal_alloc = strategy_config.get('signal_allocation', {})
+        if signal_alloc.get('max_position_pct') and signal_alloc.get('min_amount_per_stock'):
+            # 有配置但无法在此处计算，标记为需要后续计算
+            return None
 
         return None

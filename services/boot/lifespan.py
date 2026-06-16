@@ -6,6 +6,41 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 import json
 
+# 预热状态（供 health API 查询）
+_warmup_status = {
+    "in_progress": False,
+    "progress": 0,
+    "total": 0,
+    "message": "",
+}
+
+def get_warmup_status():
+    """获取预热状态"""
+    return _warmup_status.copy()
+
+def _init_warmup_status():
+    """初始化预热状态"""
+    global _warmup_status
+    _warmup_status = {
+        "in_progress": True,
+        "progress": 0,
+        "total": 0,
+        "message": "系统预热中...",
+    }
+
+def _update_warmup_status(progress: int, total: int, message: str):
+    """更新预热状态"""
+    global _warmup_status
+    _warmup_status["progress"] = progress
+    _warmup_status["total"] = total
+    _warmup_status["message"] = message
+
+def _complete_warmup_status(message: str):
+    """完成预热"""
+    global _warmup_status
+    _warmup_status["in_progress"] = False
+    _warmup_status["message"] = message
+
 
 def create_lifespan():
     """返回 asynccontextmanager，包含 startup/shutdown 逻辑"""
@@ -93,12 +128,12 @@ def create_lifespan():
         except Exception as e:
             log.error("price_cache_ttl", f"初始化 PriceCache TTL 失败: {e}")
 
-        # 启动时预热 PriceCache（持仓 + 活跃 watchlist）
-        asyncio.create_task(_preload_price_cache(log, db_manager))
-
         # 设置 FastAPI 事件循环引用
         loop = asyncio.get_running_loop()
         _set_fastapi_loop(loop)
+
+        # 初始化预热状态（供 health API 查询）
+        _init_warmup_status()
 
         # 启动时检查周K线覆盖情况
         try:
@@ -110,19 +145,6 @@ def create_lifespan():
                 log.log_event("weekly_kline_check", f"周K线数据已覆盖: {msg}")
         except Exception as e:
             log.error("weekly_kline", f"启动时周K线检查失败: {e}")
-
-        # 启动时自动启动交易监控
-        try:
-            from services.monitoring.service import get_trading_monitor
-            from services.trading.trading_hours import can_trade, is_today_trading_day
-            if is_today_trading_day() and can_trade():
-                monitor = get_trading_monitor()
-                result = await monitor.start_monitoring(interval=60)
-                log.log_event("monitor_autostart", f"交易监控已启动: {result.get('message', '')}")
-            else:
-                log.log_event("monitor_autostart", "不在交易时段或非交易日，跳过自动启动监控")
-        except Exception as e:
-            log.error("monitor_autostart", f"启动时自动监控检测失败: {e}")
 
         # ========== 数据库迁移 ==========
         await _run_migrations(db_manager, log, MIGRATION_VERSION)
@@ -141,6 +163,10 @@ def create_lifespan():
                 log.log_event("sl_tp_startup_sync", f"启动时同步 {total_synced} 只持仓止盈止损")
         except Exception as e:
             log.error("sl_tp_startup_sync", f"启动同步止盈止损失败: {e}")
+
+        # ========== 后台预热任务（yield 前启动，不阻塞）==========
+        # 预热作为后台任务执行，API 立即可用
+        asyncio.create_task(_background_preload_price_cache(log, db_manager))
 
         yield
 
@@ -1007,6 +1033,7 @@ async def _preload_price_cache(log, db_manager):
 
         stock_codes = list(stock_codes)
         log.log_event("price_cache_preload", f"开始预热 {len(stock_codes)} 只股票的行情", total=len(stock_codes))
+        _update_warmup_status(0, len(stock_codes), f"开始预热 {len(stock_codes)} 只股票")
 
         # 3. 从 kline.db 加载上一个交易日收盘价（用于计算涨跌幅）
         from services.common.database import get_sync_connection
@@ -1055,16 +1082,52 @@ async def _preload_price_cache(log, db_manager):
         for code in stock_codes:
             cache.update_ohlcv(code, 0, 0, 0, 0, 0, 0, 0.0, 0.0, "startup_preload")
 
-        # 5. 通过 gateway 批量拉取当日行情
+        # 5. 通过 gateway 分批拉取当日行情（避免 SDK 队列阻塞）
         from services.trading.gateway import get_gateway
         gw = await get_gateway()
-        gw.subscribe("_startup_preload", set(stock_codes), refresh_interval=0, priority=1)
-        results = await gw.refresh_now("_startup_preload")
-        gw.unsubscribe("_startup_preload")
+        batch_size = 500  # 每批500只，减少 SDK 队列压力
+        total_valid = 0
+
+        for i in range(0, len(stock_codes), batch_size):
+            batch = stock_codes[i:i + batch_size]
+            gw.subscribe("_startup_preload", set(batch), refresh_interval=0, priority=1)
+            results = await gw.refresh_now("_startup_preload")
+            gw.unsubscribe("_startup_preload")
+            valid = sum(1 for v in results.values() if v is not None and getattr(v, 'current_price', 0) > 0)
+            total_valid += valid
+            batch_num = i // batch_size + 1
+            total_batches = (len(stock_codes) + batch_size - 1) // batch_size
+            log.log_event("price_cache_preload_batch", f"预热批次 {batch_num}/{total_batches}: {len(batch)} 只, 有效 {valid} 只", batch=batch_num, total=len(batch), valid=valid)
+            _update_warmup_status(i + len(batch), len(stock_codes), f"预热批次 {batch_num}/{total_batches}")
+            await asyncio.sleep(0.1)  # 让其他请求有机会插队
 
         # 6. 统计
-        valid = sum(1 for v in results.values() if v is not None and getattr(v, 'current_price', 0) > 0)
-        log.log_event("price_cache_preload_done", f"预热完成: 总计 {len(stock_codes)} 只, 有效行情 {valid} 只", total=len(stock_codes), valid=valid)
+        log.log_event("price_cache_preload_done", f"预热完成: 总计 {len(stock_codes)} 只, 有效行情 {total_valid} 只", total=len(stock_codes), valid=total_valid)
 
     except Exception as e:
         log.error("price_cache_preload", f"预热失败: {e}")
+
+
+async def _background_preload_price_cache(log, db_manager):
+    """后台预热任务（yield 前启动，预热完成后自动启动监控）"""
+    try:
+        _init_warmup_status()
+        await _preload_price_cache(log, db_manager)
+        _complete_warmup_status("预热完成")
+
+        # 预热完成后自动启动交易监控
+        try:
+            from services.monitoring.service import get_trading_monitor
+            from services.trading.trading_hours import can_trade, is_today_trading_day
+            if is_today_trading_day() and can_trade():
+                monitor = get_trading_monitor()
+                result = await monitor.start_monitoring(interval=60)
+                log.log_event("monitor_autostart", f"交易监控已启动: {result.get('message', '')}")
+            else:
+                log.log_event("monitor_autostart", "不在交易时段或非交易日，跳过自动启动监控")
+        except Exception as e:
+            log.error("monitor_autostart", f"预热后启动监控失败: {e}")
+
+    except Exception as e:
+        log.error("background_preload", f"后台预热失败: {e}")
+        _complete_warmup_status(f"预热失败: {e}")

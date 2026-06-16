@@ -32,13 +32,16 @@
           <h2>仪表盘 - {{ currentAccount?.display_name || currentAccountId }}</h2>
 
           <!-- 系统健康度 -->
-          <el-card class="health-card" :class="{ 'health-card--unhealthy': healthStatus === 'unhealthy' }">
+          <el-card class="health-card" :class="{ 'health-card--unhealthy': healthStatus === 'unhealthy', 'health-card--warmup': healthStatus === 'warmup' }">
             <template #header>
               <div class="card-header">
                 <span>系统健康度</span>
-                <el-tag :type="healthStatus === 'healthy' ? 'success' : 'danger'">
-                  {{ healthStatus === 'healthy' ? '正常' : '异常' }}
+                <el-tag :type="healthStatus === 'healthy' ? 'success' : healthStatus === 'warmup' ? 'warning' : 'danger'">
+                  {{ healthStatus === 'healthy' ? '正常' : healthStatus === 'warmup' ? '预热中' : '异常' }}
                 </el-tag>
+                <span v-if="healthStatus === 'warmup' && warmupInfo" style="color: #909399; font-size: 12px; margin-left: 8px">
+                  {{ warmupInfo.message }} ({{ warmupInfo.progress }}/{{ warmupInfo.total }})
+                </span>
               </div>
             </template>
             <el-descriptions :column="5" border>
@@ -311,6 +314,7 @@ const accounts = computed(() => accountStore.accounts)
 const currentAccount = computed(() => accountStore.currentAccount)
 
 const healthStatus = ref('healthy')
+const warmupInfo = ref(null)
 const uptimeText = ref('0天0小时0分0秒')
 const appVersion = ref('v7.0.0')
 const cpuPercent = ref(0)
@@ -552,6 +556,9 @@ const loadDashboard = async (silent = false, signal = null) => {
     sdkIssues.value = data.system_health?.issues || []
     sdkErrorTime.value = data.system_health?.monitor?.sdk_error_time || ''
 
+    // 检查预热状态（单独调用 health API）
+    checkWarmupStatus()
+
     // 服务状态（新结构）
     const monitor = data.system_health?.monitor || {}
     monitorRunning.value = monitor.running || false
@@ -688,6 +695,23 @@ const refreshHealthStatus = async () => {
   } catch { /* 静默 */ }
 }
 
+// 检查预热状态
+const checkWarmupStatus = async () => {
+  try {
+    const res = await fetch('/api/v1/health')
+    const data = await res.json()
+    if (data.status === 'warmup' && data.warmup) {
+      healthStatus.value = 'warmup'
+      warmupInfo.value = data.warmup
+      // 预热期间继续检查
+      setTimeout(checkWarmupStatus, 2000)
+    } else if (data.status === 'healthy') {
+      healthStatus.value = 'healthy'
+      warmupInfo.value = null
+    }
+  } catch { /* 静默 */ }
+}
+
 onMounted(async () => {
   abortController = new AbortController()
   await Promise.all([
@@ -760,6 +784,15 @@ onUnmounted(() => {
 
 .health-card--unhealthy :deep(.el-card__header .card-header span:first-child) {
   color: #f56c6c;
+}
+
+.health-card--warmup :deep(.el-card__header) {
+  background-color: #fdf6ec;
+  border-color: #e6a23c;
+}
+
+.health-card--warmup :deep(.el-card__header .card-header span:first-child) {
+  color: #e6a23c;
 }
 
 .stats-row {

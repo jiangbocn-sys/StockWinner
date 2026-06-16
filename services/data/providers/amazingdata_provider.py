@@ -44,7 +44,7 @@ class AmazingDataProvider(DataProvider):
                 supports_stock_list=True,
                 supports_industry=True,
                 supports_trading=True,
-                supports_realtime_snapshot=True,
+                supports_realtime_snapshot=False,  # pandas 2.x 不兼容 snapshot，禁用
             ),
             requires_config=True,
             is_built_in=True,

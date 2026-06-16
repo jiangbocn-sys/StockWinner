@@ -57,7 +57,7 @@ class SDKProxyClient:
         except Exception:
             pass
 
-    def connect_to_subprocess(self, timeout: float = 5.0) -> bool:
+    def connect_to_subprocess(self, timeout: float = 10.0) -> bool:
         """连接 SDK 子进程"""
         logger = get_logger("sdk_proxy")
         with self._lock:

@@ -45,7 +45,7 @@ class StockQuoteDispatcher:
         self._stock_last_refresh: Dict[str, float] = {}  # stock_code → last refresh time
         self._min_refresh_gap: float = 25.0  # 同一股票最小刷新间隔
         self._tick_interval: float = 10.0    # 后台循环 tick 间隔
-        self._sdk_batch_size: int = 15       # 每批 SDK 查询股票数（snapshot 30s 超时限制）
+        self._sdk_batch_size: int = 100      # 每批 SDK 查询股票数（增大批量减少调用次数）
         self._loop_id: Optional[int] = None  # 记录当前事件循环 ID
 
     def _get_lock(self) -> asyncio.Lock:
