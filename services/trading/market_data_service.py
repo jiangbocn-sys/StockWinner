@@ -73,18 +73,29 @@ class MarketDataService:
         if not connected:
             raise Exception("网关未连接")
 
+        from services.common.stock_code import normalize_stock_code
+        norm_code = normalize_stock_code(stock_code)
+
         # ① 优先从 PriceCache 读取（带 TTL 检查）
         try:
             from services.common.price_cache import get_price_cache
             cache = get_price_cache()
-            entry = cache.get_ohlcv_with_ttl(stock_code)
+            entry = cache.get_ohlcv_with_ttl(norm_code)
             if entry and entry.get('is_fresh') and entry.get('data', {}).get('close', 0) > 0:
                 return MarketData.from_ohlcv(entry['data'], stock_code)
         except Exception:
             pass
 
+        # 【优化】缓存过期时加入热点池，让 monitor 下次刷新覆盖
+        try:
+            from services.common.hot_stock_pool import get_hot_stock_pool
+            hot_pool = get_hot_stock_pool()
+            hot_pool.add(norm_code)
+        except Exception:
+            pass
+
         # ② 缓存未命中 → 并发：SDK + 备用通道，先赢者胜
-        md = await self._race_market_data(stock_code)
+        md = await self._race_market_data(norm_code)
         if md and md.current_price > 0:
             return md
 
@@ -159,6 +170,16 @@ class MarketDataService:
                 results[code] = MarketData.from_ohlcv(entry['data'], code)
             else:
                 stale_codes.add(norm)
+
+        # 【优化】缓存过期的股票加入热点池，让 monitor 下次刷新覆盖
+        if stale_codes:
+            try:
+                from services.common.hot_stock_pool import get_hot_stock_pool
+                hot_pool = get_hot_stock_pool()
+                for code in stale_codes:
+                    hot_pool.add(code)
+            except Exception:
+                pass
 
         # ② 并发 SDK + 备用通道
         if stale_codes:

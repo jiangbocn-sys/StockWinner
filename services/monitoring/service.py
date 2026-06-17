@@ -417,6 +417,20 @@ class TradingMonitor:
         except Exception:
             pass
 
+        # 【优化】热点股票池：用户近期请求的股票（缓存过期时加入）
+        try:
+            from services.common.hot_stock_pool import get_hot_stock_pool
+            hot_pool = get_hot_stock_pool()
+            hot_stocks = hot_pool.get_active_stocks()
+            for code in hot_stocks:
+                if code not in all_codes:
+                    result['watch_only'].append(code)
+            if hot_stocks:
+                logger = get_logger("monitor")
+                logger.debug(f"热点池股票 {len(hot_stocks)} 只加入刷新范围")
+        except Exception:
+            pass
+
         return result
 
     async def _run_per_account(self, account_id: str, market_data_cache: Dict[str, Any]):
