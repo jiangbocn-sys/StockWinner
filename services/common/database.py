@@ -17,7 +17,7 @@ import aiosqlite
 import asyncio
 import sqlite3
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Set
 from contextlib import asynccontextmanager, contextmanager
 import logging
 import threading
@@ -64,7 +64,10 @@ def reset_primary_loop():
 class DatabaseManager:
     """数据库管理器 — 使用连接池而非单连接，避免长时间运行后连接失效
 
-    优化 v1：使用主事件循环固定机制，避免每次操作都检测 loop_id 变化
+    多循环支持：
+    - 主循环：由 lifespan 通过 set_primary_loop() 设置
+    - 策略任务循环：通过 asyncio.run() 创建的独立循环
+    - 每个循环有独立的连接池，避免跨循环借用导致问题
     """
 
     def __init__(self, db_path: Path = DB_PATH, pool_size: int = 5):
@@ -73,7 +76,9 @@ class DatabaseManager:
         self._pool: Optional[asyncio.Queue] = None  # 延迟初始化，避免跨事件循环问题
         self._initialized = False
         self._lock: Optional[asyncio.Lock] = None
-        self._loop_id: Optional[int] = None  # 记录初始化时的事件循环 ID（仅用于诊断）
+        self._loop_id: Optional[int] = None  # 记录初始化时的事件循环 ID
+        self._pool_by_loop: Dict[int, asyncio.Queue] = {}  # 【优化】多循环连接池缓存
+        self._initialized_loops: Set[int] = set()  # 【优化】已初始化的循环 ID
 
         # 吞吐量计数器（线程安全）
         self._counter_lock = threading.Lock()
@@ -92,29 +97,38 @@ class DatabaseManager:
         self._snap_rows_written = 0
 
     def _ensure_loop_resources(self):
-        """确保在主事件循环中初始化 pool 和 lock
+        """确保在当前事件循环中初始化 pool 和 lock
 
-        优化：不再每次操作都检测 loop_id 变化，而是使用 lifespan 设置的主事件循环。
-        APScheduler 后台线程应使用 sync 连接（get_sync_connection），不访问 async pool。
+        【优化】多循环支持：
+        - 支持主循环（由 lifespan 设置）和策略任务独立循环
+        - 每个循环首次使用时创建独立连接池
+        - 已初始化的循环直接复用，不重复检测
         """
-        # 使用主事件循环（由 lifespan 设置）
-        primary_loop = get_primary_loop()
-        if primary_loop is None:
-            # 主循环未设置时，尝试获取当前运行循环（兼容旧启动流程）
-            try:
-                primary_loop = asyncio.get_running_loop()
-            except RuntimeError:
-                return  # 没有运行中的事件循环
+        try:
+            current_loop = asyncio.get_running_loop()
+            current_loop_id = id(current_loop)
+        except RuntimeError:
+            return  # 没有运行中的事件循环
 
+        # 检查是否已有此循环的连接池
+        if current_loop_id in self._pool_by_loop:
+            # 已有连接池，直接使用
+            self._pool = self._pool_by_loop[current_loop_id]
+            self._lock = self._lock or asyncio.Lock()
+            self._loop_id = current_loop_id
+            self._initialized = True
+            return
+
+        # 新循环：创建独立连接池
         if self._lock is None:
             self._lock = asyncio.Lock()
-            self._loop_id = id(primary_loop)
-            logger.debug(f"DatabaseManager Lock 已创建，绑定到 loop_id={id(primary_loop)}")
 
-        if self._pool is None:
-            self._pool = asyncio.Queue()
-            self._loop_id = id(primary_loop)
-            logger.debug(f"DatabaseManager Pool 已创建，绑定到 loop_id={id(primary_loop)}")
+        self._pool = asyncio.Queue()
+        self._pool_by_loop[current_loop_id] = self._pool
+        self._loop_id = current_loop_id
+        self._initialized = False  # 新池需要初始化（在 connect() 中执行）
+
+        logger.debug(f"DatabaseManager 为循环 {current_loop_id} 创建新连接池")
 
     async def _create_connection(self) -> aiosqlite.Connection:
         """创建并配置新连接"""
@@ -126,26 +140,34 @@ class DatabaseManager:
         return conn
 
     async def connect(self):
-        """初始化连接池"""
+        """初始化当前循环的连接池"""
         self.db_path.parent.mkdir(exist_ok=True)
         self._ensure_loop_resources()
         if self._lock is None or self._pool is None:
             return  # 事件循环未就绪
+
+        current_loop_id = self._loop_id
+        if current_loop_id in self._initialized_loops:
+            return  # 此循环已初始化
+
         async with self._lock:
-            if self._initialized:
+            if current_loop_id in self._initialized_loops:
                 return
             for _ in range(self._pool_size):
                 conn = await self._create_connection()
                 await self._pool.put(conn)
+            self._initialized_loops.add(current_loop_id)
             self._initialized = True
 
     async def close(self):
-        """关闭连接池中的所有连接"""
+        """关闭当前循环的连接池"""
         self._ensure_loop_resources()
         if self._lock is None or self._pool is None:
             return
+
+        current_loop_id = self._loop_id
         async with self._lock:
-            if not self._initialized:
+            if current_loop_id not in self._initialized_loops:
                 return
             while not self._pool.empty():
                 try:
@@ -153,12 +175,27 @@ class DatabaseManager:
                     await conn.close()
                 except Exception:
                     pass
+            self._initialized_loops.discard(current_loop_id)
+            self._pool_by_loop.pop(current_loop_id, None)
             self._initialized = False
+
+    async def close_all(self):
+        """关闭所有循环的连接池（服务关闭时调用）"""
+        for loop_id, pool in self._pool_by_loop.items():
+            while not pool.empty():
+                try:
+                    conn = pool.get_nowait()
+                    await conn.close()
+                except Exception:
+                    pass
+        self._pool_by_loop.clear()
+        self._initialized_loops.clear()
+        self._initialized = False
 
     async def _acquire(self):
         """从池中获取一个连接（自动处理事件循环切换和初始化）"""
         self._ensure_loop_resources()
-        if self._pool is None or not self._initialized:
+        if self._pool is None or self._loop_id not in self._initialized_loops:
             await self.connect()
         return await self._pool.get()
 

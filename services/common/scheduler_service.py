@@ -1752,7 +1752,13 @@ class SchedulerService:
             logger.error(f"复权因子更新失败: {e}", exc_info=True)
 
     def _execute_strategy_task_job(self, task_id: int):
-        """执行策略任务（根据任务类型选择执行方式）"""
+        """执行策略任务（根据任务类型选择执行方式）
+
+        执行模型：
+        - 内置阻塞任务（K线下载）：独立线程 + 主循环提交（超长任务）
+        - 策略任务：独立线程 + asyncio.run()（避免阻塞主循环）
+          * 数据库操作使用 sync 接口，避免跨循环 async 连接池问题
+        """
         logger.info(f"开始执行策略任务 ID={task_id}")
 
         # 先获取任务类型，决定执行方式
@@ -1768,21 +1774,21 @@ class SchedulerService:
             task_type = "strategy"
             module = None
 
-        # 内置任务（K线下载、因子计算等）是阻塞同步函数，在独立线程执行
-        # 使用 threading.RLock 的 SDKProxyClient 无跨循环问题
-        # 使用 sync sqlite3 连接池（不访问 aiosqlite pool）
+        # 内置阻塞任务（K线下载等）需要更长超时，通过主循环执行
         if task_type == "builtin" and module in ("kline_check", "monthly_factors", "weekly_kline", "industry_indices"):
-            logger.info(f"内置阻塞任务 {task_id} ({module})，在独立线程执行")
-            thread = threading.Thread(
-                target=self._run_builtin_task_threadsafe,
-                args=(task_id,),
-                daemon=True
+            logger.info(f"内置阻塞任务 {task_id} ({module})，提交到主循环（超时 15 分钟）")
+            result = self._run_in_main_loop(
+                self._execute_strategy_task(task_id, force=False),
+                timeout=900.0  # 15 分钟
             )
-            thread.start()
+            if result:
+                logger.info(f"内置任务 {task_id} 完成: {result}")
+            else:
+                logger.warning(f"内置任务 {task_id} 未执行（主循环不可用或超时）")
             return
 
         # 策略任务：在独立线程创建事件循环执行（避免阻塞主循环）
-        # 策略任务执行时间不可预知，不能阻塞主事件循环
+        # 数据库操作使用 sync 接口，避免跨循环 async 连接池问题
         thread = threading.Thread(
             target=self._run_strategy_task_threadsafe,
             args=(task_id,),
@@ -1791,16 +1797,16 @@ class SchedulerService:
         thread.start()
 
     def _run_strategy_task_threadsafe(self, task_id: int):
-        """在独立线程中运行策略任务（创建新事件循环，不阻塞主循环）
+        """在独立线程中运行策略任务（创建独立事件循环，不阻塞主循环）
 
-        策略任务是async函数，执行时间不可预知：
-        - 在子线程创建独立事件循环
-        - 使用 asyncio.run() 执行async函数
-        - 子线程的 aiosqlite 连接池是独立的，不影响主循环
+        【优化】线程隔离 + sync 数据库接口：
+        - 在子线程创建独立事件循环（asyncio.run）
+        - 不阻塞主循环，API 响应不受影响
+        - 数据库操作使用 sync 接口（get_sync_connection），避免跨循环 async 连接池问题
+        - SDK 调用已通过 asyncio.to_thread 包装，兼容任意循环
         """
         logger.info(f"策略任务 {task_id} 在独立线程执行")
         try:
-            # 在子线程创建新事件循环并运行async函数
             asyncio.run(self._execute_strategy_task(task_id, force=False))
             logger.info(f"策略任务 {task_id} 线程执行完成")
         except Exception as e:
