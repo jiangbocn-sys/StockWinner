@@ -9,6 +9,10 @@
 4. 交易前读取账户可用资金，确定可买数量
 5. 交易后更新可用资金 + 发送通知
 6. 计算并记录交易手续费
+
+优化 v1：
+- 动态 TTL：心跳失败时缩短 PriceCache TTL，触发更快刷新
+- 自动恢复：SDK 失败后缩短等待时间重试，而非等完整 interval
 """
 
 import asyncio
@@ -28,7 +32,10 @@ from services.monitoring.health_tracker import HealthTracker
 
 
 class TradingMonitor:
-    """交易监控服务 — 协调器，委托给子模块执行"""
+    """交易监控服务 — 协调器，委托给子模块执行
+
+    优化 v1：动态 TTL + 自动恢复机制
+    """
 
     def __init__(self):
         self._running = False
@@ -39,6 +46,11 @@ class TradingMonitor:
         self._watch_batch_index: int = 0  # watchlist 渐进刷新批次索引
         self._watch_batch_size: int = 100  # 每批次股票数
         self._watch_all_codes: list[str] = []  # 所有 watch_only 股票（缓存）
+
+        # 【优化】动态 TTL 和恢复控制
+        self._base_interval: int = 60  # 正常轮询间隔
+        self._recovery_interval: int = 15  # 异常恢复间隔（缩短重试）
+        self._consecutive_failures: int = 0  # 连续失败次数
 
         # 子模块
         self._executor = SignalExecutor()
@@ -106,12 +118,22 @@ class TradingMonitor:
         return {"success": True, "message": "交易监控服务已停止"}
 
     async def _run_monitoring_loop(self, account_ids: list[str], interval: int):
-        """交易监控循环"""
+        """交易监控循环
+
+        优化：
+        - 动态 TTL：成功时恢复 TTL，失败时缩短 TTL
+        - 自动恢复：连续失败时使用更短间隔重试
+        """
         from services.trading.trading_hours import can_trade, get_next_trading_window
+        from services.common.price_cache import get_price_cache
+        from services.common.system_config import get_system_config
 
         log = get_logger("monitor")
         log.log_event("monitor_loop_start", "启动交易监控服务",
                       account_ids=account_ids, interval=interval)
+
+        # 记录基础间隔
+        self._base_interval = interval
 
         while self._running:
             try:
@@ -119,10 +141,42 @@ class TradingMonitor:
                 self._last_heartbeat = time.time()
 
                 if can_trade():
-                    await self._run_monitoring_global(account_ids)
-                    # 成功完成一轮，再次更新心跳
-                    self._last_heartbeat = time.time()
-                    await asyncio.sleep(interval)
+                    success = await self._run_monitoring_global(account_ids)
+
+                    # 【优化】动态 TTL 和恢复间隔控制
+                    if success:
+                        # 成功：恢复正常状态
+                        self._last_heartbeat = time.time()
+                        self._consecutive_failures = 0
+
+                        # 恢复正常 TTL
+                        cache = get_price_cache()
+                        config = get_system_config()
+                        normal_ttl = config.get_price_cache_ttl(True)  # 交易时段 TTL
+                        if cache._ttl != normal_ttl:
+                            cache.set_ttl(normal_ttl)
+                            log.debug(f"PriceCache TTL 已恢复: {normal_ttl}s")
+
+                        await asyncio.sleep(self._base_interval)
+                    else:
+                        # 失败：缩短等待时间，快速重试
+                        self._consecutive_failures += 1
+
+                        # 缩短 PriceCache TTL（让过期数据更快失效，触发刷新）
+                        cache = get_price_cache()
+                        short_ttl = min(60, cache._ttl // 2)  # 最短 60s
+                        if cache._ttl > short_ttl:
+                            cache.set_ttl(short_ttl)
+                            log.log_event("ttl_shortened",
+                                f"监控失败，PriceCache TTL 缩短为 {short_ttl}s",
+                                failures=self._consecutive_failures)
+
+                        # 使用更短间隔重试（最多缩短到 15s）
+                        retry_interval = max(self._recovery_interval,
+                                             self._base_interval - self._consecutive_failures * 10)
+                        log.log_event("monitor_retry",
+                            f"监控失败，{retry_interval}s 后重试（连续失败 {self._consecutive_failures} 次）")
+                        await asyncio.sleep(retry_interval)
                 else:
                     next_time, reason = get_next_trading_window()
                     if next_time is None:
@@ -143,7 +197,8 @@ class TradingMonitor:
                 break
             except Exception as e:
                 log.error("monitor_loop", f"监控循环错误: {e}")
-                await asyncio.sleep(interval)
+                self._consecutive_failures += 1
+                await asyncio.sleep(self._recovery_interval)
 
         self._running = False
         # 释放 dispatcher 订阅
@@ -155,7 +210,7 @@ class TradingMonitor:
             pass
         log.log_event("monitor_loop_stop", "交易监控服务已停止")
 
-    async def _run_monitoring_global(self, account_ids: list[str]):
+    async def _run_monitoring_global(self, account_ids: list[str]) -> bool:
         """全局监控：按交易需求分优先级刷新股票
 
         优先级：
@@ -163,6 +218,10 @@ class TradingMonitor:
         - high (1): 持仓止损止盈股票
         - medium (2): 策略任务股票池
         - low (3): Watchlist 纯观察
+
+        Returns:
+            True: 监控成功（获取到有效数据）
+            False: 监控失败（超时或异常）
         """
         db = get_db_manager()
         log = get_logger("monitor")
@@ -176,7 +235,7 @@ class TradingMonitor:
             all_codes.update(codes)
 
         if not all_codes:
-            return
+            return True  # 无需监控，视为成功
 
         # 记录分类结果
         log.info("monitor",
@@ -272,18 +331,20 @@ class TradingMonitor:
             # 全局更新 PriceCache
             self._price_mgr.update_price_cache(market_data_cache)
 
+            # 价格刷盘（仅在成功时）
+            if self._price_mgr.should_flush():
+                for acct_id in account_ids:
+                    await self._price_mgr.flush_to_db(acct_id)
+
+            return True  # 监控成功
+
         except asyncio.TimeoutError:
             log.log_event("monitor_sdk_timeout", "SDK 刷新超时，跳过本轮监控")
             self._health.record_sdk_error(Exception("SDK refresh timeout"))
-            return
+            return False
         except Exception as e:
             self._health.record_sdk_error(e)
-            return
-
-        # 价格刷盘
-        if self._price_mgr.should_flush():
-            for acct_id in account_ids:
-                await self._price_mgr.flush_to_db(acct_id)
+            return False
 
     async def _classify_stocks_by_priority(self, account_ids: list[str], db) -> Dict[str, list]:
         """按交易需求分类股票

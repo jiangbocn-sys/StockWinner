@@ -7,6 +7,10 @@
 - 所有模块统一通过 get_sync_connection() / get_db_context() 获取连接
 - 禁止在各模块中直接使用 sqlite3.connect()，避免 WAL mode / busy_timeout 不一致
 - 系统维护两个数据库：stockwinner.db（业务数据）和 kline.db（行情数据）
+
+优化 v1：
+- 主事件循环固定：lifespan 启动时设置，避免每次 async 操作检测 loop_id 变化
+- APScheduler 后台线程应使用 sync 连接（get_sync_connection），不访问 async pool
 """
 
 import aiosqlite
@@ -26,9 +30,42 @@ KLINE_DB_PATH = Path(__file__).parent.parent.parent / "data" / "kline.db"
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 SPEC_DIR = PROJECT_ROOT / "spec"
 
+# ── 主事件循环固定机制 ──
+# 由 lifespan 在启动时设置，避免每次 async 操作都检测 loop_id 变化
+_primary_loop: Optional[asyncio.AbstractEventLoop] = None
+_primary_loop_lock = threading.Lock()
+
+
+def set_primary_loop(loop: Optional[asyncio.AbstractEventLoop]):
+    """设置主事件循环（由 lifespan 在启动时调用）
+
+    设置后，DatabaseManager 将使用此循环创建连接池，
+    不再每次操作都检测 loop_id 变化。
+    """
+    global _primary_loop
+    with _primary_loop_lock:
+        _primary_loop = loop
+        if loop:
+            logger.info(f"主事件循环已固定: loop_id={id(loop)}")
+
+
+def get_primary_loop() -> Optional[asyncio.AbstractEventLoop]:
+    """获取主事件循环"""
+    return _primary_loop
+
+
+def reset_primary_loop():
+    """重置主事件循环（服务关闭时调用）"""
+    global _primary_loop
+    with _primary_loop_lock:
+        _primary_loop = None
+
 
 class DatabaseManager:
-    """数据库管理器 — 使用连接池而非单连接，避免长时间运行后连接失效"""
+    """数据库管理器 — 使用连接池而非单连接，避免长时间运行后连接失效
+
+    优化 v1：使用主事件循环固定机制，避免每次操作都检测 loop_id 变化
+    """
 
     def __init__(self, db_path: Path = DB_PATH, pool_size: int = 5):
         self.db_path = db_path
@@ -36,7 +73,7 @@ class DatabaseManager:
         self._pool: Optional[asyncio.Queue] = None  # 延迟初始化，避免跨事件循环问题
         self._initialized = False
         self._lock: Optional[asyncio.Lock] = None
-        self._loop_id: Optional[int] = None  # 记录初始化时的事件循环 ID
+        self._loop_id: Optional[int] = None  # 记录初始化时的事件循环 ID（仅用于诊断）
 
         # 吞吐量计数器（线程安全）
         self._counter_lock = threading.Lock()
@@ -55,32 +92,29 @@ class DatabaseManager:
         self._snap_rows_written = 0
 
     def _ensure_loop_resources(self):
-        """确保在当前事件循环中初始化 pool 和 lock
+        """确保在主事件循环中初始化 pool 和 lock
 
-        检测到事件循环切换时（如 APScheduler 后台线程 / run_async_safe
-        创建的新循环），自动重置 pool 和 lock 以绑定到新循环。
+        优化：不再每次操作都检测 loop_id 变化，而是使用 lifespan 设置的主事件循环。
+        APScheduler 后台线程应使用 sync 连接（get_sync_connection），不访问 async pool。
         """
-        try:
-            current_loop = asyncio.get_running_loop()
-            current_loop_id = id(current_loop)
-        except RuntimeError:
-            return  # 没有运行中的事件循环
+        # 使用主事件循环（由 lifespan 设置）
+        primary_loop = get_primary_loop()
+        if primary_loop is None:
+            # 主循环未设置时，尝试获取当前运行循环（兼容旧启动流程）
+            try:
+                primary_loop = asyncio.get_running_loop()
+            except RuntimeError:
+                return  # 没有运行中的事件循环
 
-        loop_changed = self._loop_id is not None and self._loop_id != current_loop_id
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+            self._loop_id = id(primary_loop)
+            logger.debug(f"DatabaseManager Lock 已创建，绑定到 loop_id={id(primary_loop)}")
 
-        if loop_changed:
-            # 事件循环已切换，重置以在新循环中重新初始化
-            self._pool = None
-            self._lock = None
-            self._initialized = False
-            self._loop_id = current_loop_id
-
-        if self._pool is None or self._lock is None:
-            if self._lock is None:
-                self._lock = asyncio.Lock()
-            if self._pool is None:
-                self._pool = asyncio.Queue()
-                self._loop_id = current_loop_id
+        if self._pool is None:
+            self._pool = asyncio.Queue()
+            self._loop_id = id(primary_loop)
+            logger.debug(f"DatabaseManager Pool 已创建，绑定到 loop_id={id(primary_loop)}")
 
     async def _create_connection(self) -> aiosqlite.Connection:
         """创建并配置新连接"""

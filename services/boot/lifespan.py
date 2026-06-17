@@ -45,7 +45,7 @@ def _complete_warmup_status(message: str):
 def create_lifespan():
     """返回 asynccontextmanager，包含 startup/shutdown 逻辑"""
     from services._version import VERSION, set_start_time
-    from services.common.database import get_db_manager, reset_db_manager
+    from services.common.database import get_db_manager, reset_db_manager, set_primary_loop, reset_primary_loop
     from services.common.account_manager import get_account_manager, reset_account_manager
     from services.common.structured_logger import get_logger
     from services.common.timezone import get_china_time
@@ -60,6 +60,11 @@ def create_lifespan():
         set_start_time()
         log = get_logger("core")
         log.log_event("startup", f"StockWinner v{VERSION} 启动中...")
+
+        # 【优化】先设置主事件循环，确保 DatabaseManager 使用正确的循环
+        loop = asyncio.get_running_loop()
+        set_primary_loop(loop)
+        log.log_event("primary_loop_set", f"主事件循环已固定: loop_id={id(loop)}")
 
         # 初始化数据库连接
         db_manager = get_db_manager()
@@ -128,8 +133,7 @@ def create_lifespan():
         except Exception as e:
             log.error("price_cache_ttl", f"初始化 PriceCache TTL 失败: {e}")
 
-        # 设置 FastAPI 事件循环引用
-        loop = asyncio.get_running_loop()
+        # 设置 FastAPI 事件循环引用（供 scheduler 使用）
         _set_fastapi_loop(loop)
 
         # 初始化预热状态（供 health API 查询）
@@ -185,6 +189,8 @@ def create_lifespan():
 
         # 清除事件循环引用
         _set_fastapi_loop(None)
+        reset_primary_loop()
+        log.log_event("primary_loop_reset", "主事件循环引用已清除")
 
         from services.common.scheduler_service import stop_scheduler
         stop_scheduler()

@@ -8,6 +8,11 @@ GatewayDispatcher — 整合到 gateway 模块的行情调度器
 4. 结果写入 PriceCache
 5. 通过 gateway 的 _serial_lock 排队，消除多头竞争
 
+优化 v1：
+- batch_merge：同优先级订阅请求合并为单次 SDK 调用
+- parallel_batch：SDK 分批查询使用 asyncio.gather 并行执行
+- 序列化由 sdk_manager 的 RLock 保证，dispatcher 层可安全并行
+
 调用方通过 gateway 访问：
     gateway.subscribe(sub_id, codes, interval, priority)
     await gateway.refresh_now(sub_id)
@@ -150,7 +155,13 @@ class GatewayDispatcher:
             await asyncio.sleep(self._tick_interval)
 
     async def _dispatch_tick(self):
-        """单次调度 tick：按优先级分批刷新订阅"""
+        """单次调度 tick：按优先级分批刷新订阅（并行优化）
+
+        优化：
+        1. batch_merge：同优先级的多个订阅合并为一次 SDK 调用
+        2. parallel_batch：SDK 分批查询使用 asyncio.gather 并行执行
+        3. 序列化由 sdk_manager RLock 保证，dispatcher 层可安全并行
+        """
         from services.trading.trading_hours import can_trade
 
         if not can_trade():
@@ -173,30 +184,86 @@ class GatewayDispatcher:
         # 按优先级排序（priority 数值越小优先级越高）
         due_subs.sort(key=lambda s: s.priority)
 
-        # 按优先级分组刷新（先 high，再 medium，最后 low）
-        for priority_level in [1, 2, 3]:
-            # 收集该优先级的股票
-            priority_codes: Set[str] = set()
-            for sub in due_subs:
-                if sub.priority == priority_level:
-                    for code in sub.stock_codes:
-                        last = self._stock_last_refresh.get(code, 0)
-                        if now - last >= self._min_refresh_gap:
-                            priority_codes.add(code)
+        # 【优化】batch_merge：按优先级分组，同优先级合并为单次 SDK 调用
+        # 使用 asyncio.gather 并行执行不同优先级的查询（SDK 序列化在 sdk_manager 层）
+        priority_tasks = []
+        priority_groups: Dict[int, Set[str]] = {}
 
-            if not priority_codes:
+        for sub in due_subs:
+            level = sub.priority
+            if level not in priority_groups:
+                priority_groups[level] = set()
+            for code in sub.stock_codes:
+                last = self._stock_last_refresh.get(code, 0)
+                if now - last >= self._min_refresh_gap:
+                    priority_groups[level].add(code)
+
+        # 构建并行任务（优先级高的先发起请求，SDK 会按优先级排序处理）
+        for priority_level in sorted(priority_groups.keys()):
+            codes = priority_groups[priority_level]
+            if codes:
+                # 创建该优先级的查询任务（内部分批并行）
+                task = self._batch_merge_query(list(codes), priority=priority_level)
+                priority_tasks.append((priority_level, task))
+
+        # 并行执行所有优先级的查询任务
+        if priority_tasks:
+            # 使用 asyncio.gather 并行执行，SDK 序列化在底层保证
+            results = await asyncio.gather(*[t[1] for t in priority_tasks], return_exceptions=True)
+
+            # 处理结果：写入 PriceCache + 更新订阅时间戳
+            for i, (priority_level, _) in enumerate(priority_tasks):
+                result = results[i]
+                if isinstance(result, Exception):
+                    get_logger("dispatcher").error("dispatcher",
+                        f"优先级 {priority_level} 查询失败: {result}")
+                    continue
+                if result:
+                    self._write_to_price_cache(result)
+                    # 更新该优先级订阅的时间戳
+                    for sub in due_subs:
+                        if sub.priority == priority_level:
+                            sub.last_refresh_ts = time.time()
+
+    async def _batch_merge_query(self, codes: List[str], priority: int = 1) -> Dict[str, Any]:
+        """合并查询：分批并行调用 SDK，提升吞吐量
+
+        SDK 序列化在 sdk_manager 的 RLock 层处理，dispatcher 可安全并行发起多个批次。
+        通过 asyncio.gather 同时发起多个批次请求，SDK 会按优先级队列处理。
+
+        Args:
+            codes: 股票代码列表
+            priority: 优先级 (0=highest, 1=high, 2=medium, 3=low)
+        """
+        if not codes:
+            return {}
+
+        # 分批（SDK 单次上限约 200 只）
+        batch_size = self._sdk_batch_size
+        batches = [codes[i:i + batch_size] for i in range(0, len(codes), batch_size)]
+
+        if len(batches) <= 1:
+            # 单批次直接查询
+            return await self._query_sdk(codes, priority=priority)
+
+        # 【优化】多批次并行查询（SDK 序列化在底层，并行发起可减少总等待时间）
+        batch_tasks = [
+            self._query_sdk(batch, priority=priority)
+            for batch in batches
+        ]
+        batch_results = await asyncio.gather(*batch_tasks, return_exceptions=True)
+
+        # 合并所有批次结果
+        merged: Dict[str, Any] = {}
+        for result in batch_results:
+            if isinstance(result, Exception):
+                get_logger("dispatcher").warning("dispatcher",
+                    f"SDK 批次查询失败: {result}")
                 continue
-
-            # 执行 SDK 查询
-            async with self._get_lock():
-                result = await self._query_sdk(list(priority_codes), priority=priority_level)
-
             if result:
-                self._write_to_price_cache(result)
-                # 更新该优先级订阅的时间戳
-                for sub in due_subs:
-                    if sub.priority == priority_level:
-                        sub.last_refresh_ts = time.time()
+                merged.update(result)
+
+        return merged
 
     # ── SDK 查询 ──
 

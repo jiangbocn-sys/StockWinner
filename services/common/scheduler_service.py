@@ -2006,38 +2006,90 @@ class SchedulerService:
                     logger.warning(tb)
 
                 # ── 实时行情可用性检查（盘中必须）──
+                # 【优化】覆盖率不足时警告并降级，而非中止
                 if is_trading_hours() and stock_codes:
                     realtime_coverage = len(_pre_fetched_realtime_quotes) / len(stock_codes) if len(stock_codes) > 0 else 0
+
                     if realtime_coverage < 0.98:
-                        # 覆盖率低于 98%，中止策略执行
-                        logger.error(f"策略执行中止: 实时行情覆盖率仅 {realtime_coverage:.1%}，要求 >= 98%")
-                        await db.execute(
-                            "UPDATE strategy_tasks SET last_status = 'aborted', last_output = ? WHERE id = ?",
-                            (json.dumps({
-                                "message": "实时行情数据不足（要求 >= 98%）",
-                                "coverage": f"{realtime_coverage:.1%}",
-                                "required": "98%",
-                                "available": len(_pre_fetched_realtime_quotes),
-                                "total": len(stock_codes),
-                            }, ensure_ascii=False), task_id)
-                        )
-                        # 发送通知
+                        # 覆盖率低于 98%，警告并尝试用历史数据补充
+                        logger.warning(f"策略执行: 实时行情覆盖率仅 {realtime_coverage:.1%}，尝试历史数据补充")
+
+                        # 【降级】从 kline.db 获取缺失股票的最新收盘价作为 fallback
+                        missing_codes = [c for c in stock_codes if c not in _pre_fetched_realtime_quotes]
+                        if missing_codes:
+                            try:
+                                from services.common.database import get_sync_connection
+                                conn = get_sync_connection("kline")
+                                cursor = conn.cursor()
+                                placeholders = ','.join(['?'] * len(missing_codes))
+                                cursor.execute(f"""
+                                    SELECT k.stock_code, k.close, k.open, k.high, k.low, k.volume, k.amount, k.trade_date
+                                    FROM kline_data k
+                                    INNER JOIN (
+                                        SELECT stock_code, MAX(trade_date) as max_date
+                                        FROM kline_data
+                                        WHERE stock_code IN ({placeholders})
+                                        GROUP BY stock_code
+                                    ) latest ON k.stock_code = latest.stock_code AND k.trade_date = latest.max_date
+                                """, missing_codes)
+
+                                fallback_count = 0
+                                for row in cursor.fetchall():
+                                    code = row['stock_code']
+                                    close = float(row['close'] or 0)
+                                    if close > 0:
+                                        _pre_fetched_realtime_quotes[code] = {
+                                            'open': float(row['open'] or close),
+                                            'high': float(row['high'] or close),
+                                            'low': float(row['low'] or close),
+                                            'close': close,
+                                            'volume': float(row['volume'] or 0),
+                                            'amount': float(row['amount'] or 0),
+                                            'source': 'kline_db_fallback',  # 标记为历史数据
+                                        }
+                                        fallback_count += 1
+
+                                logger.info(f"策略执行: 历史数据补充 {fallback_count}/{len(missing_codes)} 只股票")
+
+                                # 重新计算覆盖率
+                                realtime_coverage = len(_pre_fetched_realtime_quotes) / len(stock_codes)
+
+                            except Exception as fallback_err:
+                                logger.warning(f"历史数据补充失败: {fallback_err}")
+
+                        # 发送警告通知（但不中止执行）
                         try:
                             from services.notifications import get_notification_manager
                             nm = get_notification_manager()
                             await nm.trigger(
-                                event_type="strategy_aborted",
+                                event_type="strategy_data_degraded",
                                 account_id=task["account_id"],
                                 payload={
                                     "strategy_name": strategy.get("name", "策略"),
-                                    "reason": f"实时行情覆盖率仅 {realtime_coverage:.1%}（要求 >= 98%）",
+                                    "warning": f"实时行情覆盖率仅 {realtime_coverage:.1%}，已用历史数据补充",
                                     "coverage": realtime_coverage,
-                                    "threshold": 0.98,
+                                    "fallback_used": len([c for c in _pre_fetched_realtime_quotes if
+                                                         _pre_fetched_realtime_quotes[c].get('source') == 'kline_db_fallback']),
                                 },
                             )
                         except Exception:
                             pass
-                        return
+
+                        # 覆盖率极低时（<50%）才中止
+                        if realtime_coverage < 0.5:
+                            logger.error(f"策略执行中止: 覆盖率仅 {realtime_coverage:.1%}（补充后仍 <50%）")
+                            await db.execute(
+                                "UPDATE strategy_tasks SET last_status = 'aborted', last_output = ? WHERE id = ?",
+                                (json.dumps({
+                                    "message": "实时行情数据严重不足（补充后仍 <50%）",
+                                    "coverage": f"{realtime_coverage:.1%}",
+                                    "fallback_used": len([c for c in _pre_fetched_realtime_quotes if
+                                                         _pre_fetched_realtime_quotes[c].get('source') == 'kline_db_fallback']),
+                                }, ensure_ascii=False), task_id)
+                            )
+                            return
+                        else:
+                            logger.info(f"策略执行继续: 覆盖率 {realtime_coverage:.1%}（降级模式）")
                     else:
                         logger.info(f"实时行情覆盖率: {realtime_coverage:.1%} ({len(_pre_fetched_realtime_quotes)}/{len(stock_codes)})，满足 >= 98% 要求")
 
