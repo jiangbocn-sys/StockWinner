@@ -2006,90 +2006,83 @@ class SchedulerService:
                     logger.warning(tb)
 
                 # ── 实时行情可用性检查（盘中必须）──
-                # 【优化】覆盖率不足时警告并降级，而非中止
+                # 【优化】覆盖率不足时主动刷新缺失股票，不使用历史数据降级
                 if is_trading_hours() and stock_codes:
                     realtime_coverage = len(_pre_fetched_realtime_quotes) / len(stock_codes) if len(stock_codes) > 0 else 0
 
                     if realtime_coverage < 0.98:
-                        # 覆盖率低于 98%，警告并尝试用历史数据补充
-                        logger.warning(f"策略执行: 实时行情覆盖率仅 {realtime_coverage:.1%}，尝试历史数据补充")
-
-                        # 【降级】从 kline.db 获取缺失股票的最新收盘价作为 fallback
+                        # 覆盖率低于 98%，主动刷新缺失股票的实时行情
                         missing_codes = [c for c in stock_codes if c not in _pre_fetched_realtime_quotes]
+                        logger.warning(f"策略执行: 实时行情覆盖率仅 {realtime_coverage:.1%}，主动刷新 {len(missing_codes)} 只缺失股票")
+
                         if missing_codes:
                             try:
-                                from services.common.database import get_sync_connection
-                                conn = get_sync_connection("kline")
-                                cursor = conn.cursor()
-                                placeholders = ','.join(['?'] * len(missing_codes))
-                                cursor.execute(f"""
-                                    SELECT k.stock_code, k.close, k.open, k.high, k.low, k.volume, k.amount, k.trade_date
-                                    FROM kline_data k
-                                    INNER JOIN (
-                                        SELECT stock_code, MAX(trade_date) as max_date
-                                        FROM kline_data
-                                        WHERE stock_code IN ({placeholders})
-                                        GROUP BY stock_code
-                                    ) latest ON k.stock_code = latest.stock_code AND k.trade_date = latest.max_date
-                                """, missing_codes)
+                                from services.trading.gateway import get_gateway
+                                gateway = await get_gateway()
 
-                                fallback_count = 0
-                                for row in cursor.fetchall():
-                                    code = row['stock_code']
-                                    close = float(row['close'] or 0)
-                                    if close > 0:
-                                        _pre_fetched_realtime_quotes[code] = {
-                                            'open': float(row['open'] or close),
-                                            'high': float(row['high'] or close),
-                                            'low': float(row['low'] or close),
-                                            'close': close,
-                                            'volume': float(row['volume'] or 0),
-                                            'amount': float(row['amount'] or 0),
-                                            'source': 'kline_db_fallback',  # 标记为历史数据
-                                        }
-                                        fallback_count += 1
+                                # 分批刷新缺失股票（每批 50 只，避免 SDK 队列拥堵）
+                                batch_size = 50
+                                refreshed_count = 0
+                                for i in range(0, len(missing_codes), batch_size):
+                                    batch = missing_codes[i:i + batch_size]
+                                    batch_data = await gateway.get_batch_market_data(batch)
+                                    for code, md in batch_data.items():
+                                        if md and md.current_price and md.current_price > 0:
+                                            _pre_fetched_realtime_quotes[code] = {
+                                                'open': getattr(md, 'open_price', md.current_price) or md.current_price,
+                                                'high': getattr(md, 'high', md.current_price) or md.current_price,
+                                                'low': getattr(md, 'low', md.current_price) or md.current_price,
+                                                'close': md.current_price,
+                                                'volume': getattr(md, 'volume', 0) or 0,
+                                                'amount': getattr(md, 'amount', 0) or 0,
+                                                'source': 'sdk_refresh',  # 标记为 SDK 刷新获取
+                                            }
+                                            refreshed_count += 1
+                                    await asyncio.sleep(0.1)  # 让其他请求有机会插队
 
-                                logger.info(f"策略执行: 历史数据补充 {fallback_count}/{len(missing_codes)} 只股票")
+                                logger.info(f"策略执行: SDK 刷新成功 {refreshed_count}/{len(missing_codes)} 只股票")
 
                                 # 重新计算覆盖率
                                 realtime_coverage = len(_pre_fetched_realtime_quotes) / len(stock_codes)
 
-                            except Exception as fallback_err:
-                                logger.warning(f"历史数据补充失败: {fallback_err}")
+                            except Exception as refresh_err:
+                                logger.error(f"策略执行: SDK 刷新失败: {refresh_err}")
 
-                        # 发送警告通知（但不中止执行）
-                        try:
-                            from services.notifications import get_notification_manager
-                            nm = get_notification_manager()
-                            await nm.trigger(
-                                event_type="strategy_data_degraded",
-                                account_id=task["account_id"],
-                                payload={
-                                    "strategy_name": strategy.get("name", "策略"),
-                                    "warning": f"实时行情覆盖率仅 {realtime_coverage:.1%}，已用历史数据补充",
-                                    "coverage": realtime_coverage,
-                                    "fallback_used": len([c for c in _pre_fetched_realtime_quotes if
-                                                         _pre_fetched_realtime_quotes[c].get('source') == 'kline_db_fallback']),
-                                },
-                            )
-                        except Exception:
-                            pass
-
-                        # 覆盖率极低时（<50%）才中止
-                        if realtime_coverage < 0.5:
-                            logger.error(f"策略执行中止: 覆盖率仅 {realtime_coverage:.1%}（补充后仍 <50%）")
+                        # 刷新后覆盖率检查：仍低于 98% 则中止（不使用历史数据降级）
+                        if realtime_coverage < 0.98:
+                            logger.error(f"策略执行中止: 实时行情覆盖率仅 {realtime_coverage:.1%}（刷新后仍不足 98%）")
                             await db.execute(
                                 "UPDATE strategy_tasks SET last_status = 'aborted', last_output = ? WHERE id = ?",
                                 (json.dumps({
-                                    "message": "实时行情数据严重不足（补充后仍 <50%）",
+                                    "message": "实时行情数据不足（刷新后仍 <98%）",
                                     "coverage": f"{realtime_coverage:.1%}",
-                                    "fallback_used": len([c for c in _pre_fetched_realtime_quotes if
-                                                         _pre_fetched_realtime_quotes[c].get('source') == 'kline_db_fallback']),
+                                    "required": "98%",
+                                    "available": len(_pre_fetched_realtime_quotes),
+                                    "total": len(stock_codes),
+                                    "refreshed": len([c for c in _pre_fetched_realtime_quotes if
+                                                     _pre_fetched_realtime_quotes[c].get('source') == 'sdk_refresh']),
                                 }, ensure_ascii=False), task_id)
                             )
+
+                            # 发送中止通知
+                            try:
+                                from services.notifications import get_notification_manager
+                                nm = get_notification_manager()
+                                await nm.trigger(
+                                    event_type="strategy_aborted",
+                                    account_id=task["account_id"],
+                                    payload={
+                                        "strategy_name": strategy.get("name", "策略"),
+                                        "reason": f"实时行情覆盖率仅 {realtime_coverage:.1%}（刷新后仍 <98%）",
+                                        "coverage": realtime_coverage,
+                                        "threshold": 0.98,
+                                    },
+                                )
+                            except Exception:
+                                pass
                             return
                         else:
-                            logger.info(f"策略执行继续: 覆盖率 {realtime_coverage:.1%}（降级模式）")
+                            logger.info(f"实时行情覆盖率恢复: {realtime_coverage:.1%}（SDK 刷新后达标）")
                     else:
                         logger.info(f"实时行情覆盖率: {realtime_coverage:.1%} ({len(_pre_fetched_realtime_quotes)}/{len(stock_codes)})，满足 >= 98% 要求")
 
