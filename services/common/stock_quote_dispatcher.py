@@ -36,6 +36,7 @@ class StockQuoteDispatcher:
     - 结果写入 PriceCache
     - 后台循环自动刷新活跃的订阅
     """
+    _snapshot_disabled: bool = True  # snapshot 已禁用（pandas 2.x 不兼容）
 
     def __init__(self):
         self._lock: Optional[asyncio.Lock] = None
@@ -195,58 +196,21 @@ class StockQuoteDispatcher:
         if not codes:
             return {}
 
-        sdk_mgr = get_sdk_manager()
-        today_int = int(get_china_time().strftime('%Y%m%d'))
-        all_snapshots: Dict[str, Any] = {}
-
-        # ① 优先尝试 snapshot
-        for i in range(0, len(codes), self._sdk_batch_size):
-            batch = codes[i:i + self._sdk_batch_size]
-            if not sdk_mgr.connect():
-                break
-            result = sdk_mgr.query_snapshot(code_list=batch, begin_date=today_int, end_date=today_int)
-
-            if result and isinstance(result, dict):
-                for date_key in result:
-                    inner = result[date_key]
-                    if isinstance(inner, dict):
-                        for code, df in inner.items():
-                            if df is not None and hasattr(df, 'empty') and not df.empty:
-                                all_snapshots[code] = df
-
-        # 更新股票最后刷新时间
-        now = time.time()
-        for code in codes:
-            self._stock_last_refresh[code] = now
-
-        # 构造 MarketData 并收集 snapshot 失败的代码
-        results = {}
-        snapshot_failed = []
-        for code in codes:
-            snap = all_snapshots.get(code)
-            if snap is None or (hasattr(snap, "empty") and snap.empty) or len(snap) == 0:
-                snapshot_failed.append(code)
-                results[code] = None
-            else:
-                row = snap.iloc[0] if hasattr(snap, "iloc") else snap
-                try:
-                    results[code] = self._build_market_data(row, code)
-                except Exception as e:
-                    get_logger("dispatcher").log_event("parse_error", f"快照数据解析失败 {code}: {e}")
-                    results[code] = None
+        # snapshot 已禁用（pandas 2.x 不兼容），直接走 kline fallback
+        # 所有代码都视为 snapshot_failed
+        snapshot_failed = codes
+        results = {code: None for code in codes}
 
         # ② snapshot 失败的代码，回退到 K 线数据
-        if snapshot_failed:
-            kline_results = await self._fallback_kline(snapshot_failed)
-            for code in snapshot_failed:
-                if code in kline_results:
-                    results[code] = kline_results[code]
+        kline_results = await self._fallback_kline(snapshot_failed)
+        for code in snapshot_failed:
+            if code in kline_results:
+                results[code] = kline_results[code]
 
         valid_count = sum(1 for v in results.values() if v is not None)
         get_logger("dispatcher").info("dispatcher",
-            f"SDK 行情: requested={len(codes)}, snapshot_valid={len(codes)-len(snapshot_failed)}, "
-            f"kline_fallback={sum(1 for c in snapshot_failed if c in results and results[c] is not None)}, "
-            f"total_valid={valid_count}")
+            f"SDK 行情: requested={len(codes)}, snapshot_disabled=True, "
+            f"kline_fallback={valid_count}, total_valid={valid_count}")
         return results
 
     async def _fallback_kline(self, codes: List[str]) -> Dict[str, Any]:
