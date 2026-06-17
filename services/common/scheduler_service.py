@@ -2134,12 +2134,25 @@ class SchedulerService:
                     context["positions"] = [dict(p) for p in positions]
 
                 engine = get_strategy_engine()
+
+                # 清空股票池（策略执行前，根据 clear_pool 配置）
+                output_group_id = task.get("target_group_id") or task.get("group_id")
+                clear_pool = task.get("clear_pool", 1)  # 默认清空
+                if output_group_id and clear_pool == 1:
+                    try:
+                        await db.execute(
+                            "DELETE FROM watchlist WHERE group_id = ? AND source_type = 'screening'",
+                            (output_group_id,)
+                        )
+                        logger.info(f"策略 '{strategy['name']}' 执行前清空股票池 group_id={output_group_id}")
+                    except Exception as e:
+                        logger.warning(f"清空股票池失败: {e}")
+
                 signals = engine.execute_strategy(strategy, context)
                 logger.info(f"策略 '{strategy['name']}' 返回 {len(signals)} 个信号")
 
                 # 写入 watchlist（signal_action: trade=直接交易, watch=继续观察）
                 signal_action = task.get("signal_action", "trade") or "trade"
-                output_group_id = task.get("target_group_id") or task["group_id"]
                 source_group_id = task.get("group_id")  # 股票池来源分组
                 result = await engine.write_signals_to_watchlist(
                     signals, task["account_id"], task["strategy_id"], output_group_id,
