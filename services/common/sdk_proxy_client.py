@@ -187,17 +187,35 @@ class SDKProxyClient:
         return _IPCBaseData(self)
 
     def get_calendar(self):
-        """获取交易日历"""
-        return self._call_ipc("get_calendar", {}, timeout=10.0)
+        """获取交易日历（带耗时日志）"""
+        import time
+        start = time.monotonic()
+        try:
+            result = self._call_ipc("get_calendar", {}, timeout=10.0)
+            elapsed_ms = round((time.monotonic() - start) * 1000, 1)
+            latest = max(result) if result else 0
+            print(f"[SDKProxy] get_calendar: 耗时={elapsed_ms}ms, 大小={len(result) if result else 0}, 最新={latest}")
+            return result
+        except Exception as e:
+            elapsed_ms = round((time.monotonic() - start) * 1000, 1)
+            print(f"[SDKProxy] get_calendar 失败: 耗时={elapsed_ms}ms, 错误={e}")
+            raise
 
     def refresh_calendar(self):
         """刷新交易日历（清除 SDK 缓存，重新获取最新数据）
 
         用于日历过期时强制更新（如 SDK 启动时日历不含当天）。
         """
+        import time
+        start = time.monotonic()
         try:
-            return self._call_ipc("refresh_calendar", {}, timeout=10.0)
-        except Exception:
+            result = self._call_ipc("refresh_calendar", {}, timeout=10.0)
+            elapsed_ms = round((time.monotonic() - start) * 1000, 1)
+            print(f"[SDKProxy] refresh_calendar: 耗时={elapsed_ms}ms, result={result}")
+            return result
+        except Exception as e:
+            elapsed_ms = round((time.monotonic() - start) * 1000, 1)
+            print(f"[SDKProxy] refresh_calendar 失败: 耗时={elapsed_ms}ms, 错误={e}")
             return False
 
     def get_market_data(self):

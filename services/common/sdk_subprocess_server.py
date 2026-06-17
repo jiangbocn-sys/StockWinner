@@ -126,9 +126,23 @@ def get_base_data():
 
 
 def get_calendar():
+    """获取交易日历（带耗时日志）"""
     global _calendar
+    import time
+    start = time.monotonic()
+
     if _calendar is None:
-        _calendar = get_base_data().get_calendar()
+        bd = get_base_data()
+        cal = bd.get_calendar()
+        elapsed_ms = round((time.monotonic() - start) * 1000, 1)
+        latest = max(cal) if cal else 0
+        print(f"[SDKSubprocess] get_calendar 首次调用: 耗时={elapsed_ms}ms, 大小={len(cal)}, 最新={latest}")
+        _calendar = cal
+    else:
+        elapsed_ms = round((time.monotonic() - start) * 1000, 1)
+        latest = max(_calendar) if _calendar else 0
+        print(f"[SDKSubprocess] get_calendar 缓存命中: 耗时={elapsed_ms}ms, 大小={len(_calendar)}, 最新={latest}")
+
     return _calendar
 
 

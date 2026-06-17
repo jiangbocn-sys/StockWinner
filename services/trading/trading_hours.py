@@ -157,6 +157,8 @@ def is_today_trading_day(dt: datetime = None) -> bool:
     2. 如果日历不含当天且今天还没刷新过，尝试刷新 SDK 日历缓存
     3. 再次获取日历判断
     4. 同一天只刷新一次
+
+    日志跟踪：记录缓存状态、调用耗时、刷新结果，用于问题排查
     """
     global _trading_calendar_cache, _trading_calendar_date, _calendar_refresh_date
 
@@ -165,35 +167,76 @@ def is_today_trading_day(dt: datetime = None) -> bool:
     today = int(dt.strftime('%Y%m%d'))
     today_date = dt.strftime('%Y%m%d')
 
+    # 日志跟踪：入口状态
+    cache_status = "valid" if _trading_calendar_cache is not None and _trading_calendar_date == today_date else "expired"
+    print(f"[TradingHours] is_today_trading_day 入口: today={today}, cache_status={cache_status}, refresh_date={_calendar_refresh_date}")
+
     try:
         from services.common.sdk_manager import get_sdk_manager
+        import time
+
         # 缓存 24 小时有效（同一天内复用）
         if _trading_calendar_cache is not None and _trading_calendar_date == today_date:
-            return today in _trading_calendar_cache
+            result = today in _trading_calendar_cache
+            print(f"[TradingHours] 缓存命中: today={today} in cache={result}, cache_size={len(_trading_calendar_cache)}")
+            return result
 
         sdk_mgr = get_sdk_manager()
-        if sdk_mgr.is_connected():
+        sdk_connected = sdk_mgr.is_connected()
+        print(f"[TradingHours] SDK 连接状态: {sdk_connected}")
+
+        if sdk_connected:
             # 第一次获取日历
+            start_time = time.monotonic()
             calendar = sdk_mgr.get_calendar()
+            first_call_ms = round((time.monotonic() - start_time) * 1000, 1)
+            latest_date = max(calendar) if calendar else 0
+            print(f"[TradingHours] 第一次 get_calendar: 耗时={first_call_ms}ms, 日历大小={len(calendar)}, 最新日期={latest_date}, 含今天={today in calendar}")
 
             # 检查日历是否包含今天
             if today not in calendar:
                 # 日历不含今天，检查今天是否已经尝试刷新过
                 if _calendar_refresh_date != today_date:
-                    # 尝试刷新 SDK 日历缓存
+                    print(f"[TradingHours] 日历不含今天，执行 refresh_calendar")
+                    start_time = time.monotonic()
                     sdk_mgr.refresh_calendar()
+                    refresh_ms = round((time.monotonic() - start_time) * 1000, 1)
+                    print(f"[TradingHours] refresh_calendar 完成: 耗时={refresh_ms}ms")
                     _calendar_refresh_date = today_date
+
                     # 重新获取日历
+                    start_time = time.monotonic()
                     calendar = sdk_mgr.get_calendar()
+                    second_call_ms = round((time.monotonic() - start_time) * 1000, 1)
+                    latest_date = max(calendar) if calendar else 0
+                    print(f"[TradingHours] 第二次 get_calendar: 耗时={second_call_ms}ms, 日历大小={len(calendar)}, 最新日期={latest_date}, 含今天={today in calendar}")
+                else:
+                    print(f"[TradingHours] 今天已刷新过日历，跳过再次刷新")
 
             _trading_calendar_cache = calendar
             _trading_calendar_date = today_date
-            return today in _trading_calendar_cache
+
+            # 如果日历不含今天，但今天是工作日，降级为交易日
+            # SDK 日历可能延迟更新（服务端数据同步问题）
+            if today in calendar:
+                print(f"[TradingHours] 判断结果: True (日历包含今天)")
+                return True
+            elif dt.weekday() < 5:
+                print(f"[TradingHours] 判断结果: True (降级-工作日 weekday={dt.weekday()})")
+                return True
+            else:
+                print(f"[TradingHours] 判断结果: False (非交易日且非工作日)")
+                return False
         # SDK 未连接 → 降级
+        print(f"[TradingHours] SDK 未连接，降级为工作日判断")
     except Exception as e:
         print(f"[TradingHours] 获取交易日历失败，降级为工作日判断: {e}")
+        import traceback
+        print(f"[TradingHours] 异常堆栈: {traceback.format_exc()}")
 
-    return dt.weekday() < 5  # 降级：周一到周五
+    result = dt.weekday() < 5  # 降级：周一到周五
+    print(f"[TradingHours] 最终降级结果: {result} (weekday={dt.weekday()})")
+    return result
 
 
 def can_trade(dt: datetime = None) -> bool:

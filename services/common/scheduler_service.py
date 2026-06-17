@@ -1418,13 +1418,31 @@ class SchedulerService:
             logger.error(f"监控自动启动异常: {e}")
 
     async def _do_monitor_auto_start(self):
-        """检查并自动启动交易监控"""
+        """检查并自动启动交易监控
+
+        日志跟踪：记录交易日判断全过程，用于排查日历更新问题
+        """
+        import time
         from services.trading.trading_hours import is_today_trading_day, can_trade
         from services.monitoring.service import get_trading_monitor
 
-        if not is_today_trading_day():
+        logger.info("=" * 50)
+        logger.info("执行交易监控自动启动任务 (09:25)")
+        logger.info("=" * 50)
+
+        # 记录交易日判断过程
+        start_time = time.monotonic()
+        trading_day = is_today_trading_day()
+        elapsed_ms = round((time.monotonic() - start_time) * 1000, 1)
+        logger.info(f"交易日判断完成: is_trading_day={trading_day}, 耗时={elapsed_ms}ms")
+
+        if not trading_day:
             logger.info("今天非交易日，跳过交易监控自动启动")
             return
+
+        # 检查交易时段
+        can_trade_result = can_trade()
+        logger.info(f"交易时段判断: can_trade={can_trade_result}")
 
         monitor = get_trading_monitor()
         if monitor._running:
