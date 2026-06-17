@@ -188,7 +188,16 @@ def is_today_trading_day(dt: datetime = None) -> bool:
 
             _trading_calendar_cache = calendar
             _trading_calendar_date = today_date
-            return today in _trading_calendar_cache
+
+            # 如果日历不含今天，但今天是工作日，降级为交易日
+            # SDK 日历可能延迟更新（服务端数据同步问题）
+            if today in calendar:
+                return True
+            elif dt.weekday() < 5:
+                print(f"[TradingHours] SDK 日历不含今天 {today}，降级为工作日判断（weekday={dt.weekday()}）")
+                return True
+            else:
+                return False
         # SDK 未连接 → 降级
     except Exception as e:
         print(f"[TradingHours] 获取交易日历失败，降级为工作日判断: {e}")
