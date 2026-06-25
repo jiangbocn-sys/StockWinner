@@ -42,11 +42,12 @@ class ChannelConfig:
 class ChannelRouter:
     """通道路由器 — 管理数据源选择和自动降级
 
-    失败通道冷却机制：通道失败后 10 分钟内不再重试，避免每次请求都浪费资源。
+    失败通道冷却机制：通道失败后短时间内不再重试，避免每次请求都浪费资源。
+    下午策略密集时段（14:00-15:00），3分钟冷却可在下一个任务前恢复。
     使用统计：内存累积，每 10-15 分钟随机时间批量写入数据库。
     """
 
-    FAILED_PROVIDER_COOLDOWN = 600  # 失败通道冷却 10 分钟
+    FAILED_PROVIDER_COOLDOWN = 180  # 失败通道冷却 3 分钟（适配策略密集时段）
 
     def __init__(self):
         self._providers: Dict[str, DataProvider] = {}  # provider_id -> instance

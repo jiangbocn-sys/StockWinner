@@ -149,6 +149,20 @@ _trading_calendar_date = None
 _calendar_refresh_date = None  # 记录刷新日期，同一天不重复刷新
 
 
+def clear_calendar_cache():
+    """清除交易日历缓存（供外部定时任务调用）
+
+    清除三处缓存：
+    1. _trading_calendar_cache: 日历数据
+    2. _trading_calendar_date: 缓存日期
+    3. _calendar_refresh_date: 刷新日期标记
+    """
+    global _trading_calendar_cache, _trading_calendar_date, _calendar_refresh_date
+    _trading_calendar_cache = None
+    _trading_calendar_date = None
+    _calendar_refresh_date = None
+
+
 def is_today_trading_day(dt: datetime = None) -> bool:
     """判断今天是否为交易日（SDK 日历 + 24h 缓存 + 自动刷新）
 

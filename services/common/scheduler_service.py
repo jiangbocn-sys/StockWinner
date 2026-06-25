@@ -119,6 +119,9 @@ class SchedulerService:
             # 注册 scheduler 心跳检查（每 30 分钟），用于诊断 daemon 线程是否存活
             self._register_heartbeat_job()
 
+            # 注册交易日历刷新任务（09:10 盘前）
+            self._register_calendar_refresh_job()
+
             # 记录 daemon 线程状态，用于诊断 scheduler 静默失效
             import threading
             thread_names = [t.name for t in threading.enumerate()]
@@ -1106,6 +1109,20 @@ class SchedulerService:
         except Exception as e:
             logger.error(f"注册心跳任务失败: {e}")
 
+    def _register_calendar_refresh_job(self):
+        """注册交易日历刷新任务 — 09:10 盘前刷新"""
+        try:
+            self._scheduler.add_job(
+                self._calendar_refresh_job,
+                CronTrigger.from_crontab("10 9 * * mon-fri", timezone=CHINA_TZ),
+                id="calendar_refresh",
+                name="系统任务: 刷新交易日历",
+                replace_existing=True,
+            )
+            logger.info("  注册日历刷新任务: calendar_refresh (cron=10 9 * * mon-fri)")
+        except Exception as e:
+            logger.error(f"注册日历刷新任务失败: {e}")
+
     def _register_price_cache_fallback_job(self):
         """注册 price_cache 心跳兜底任务（每 5 分钟），仅在监控循环挂掉时刷新"""
         try:
@@ -1225,6 +1242,33 @@ class SchedulerService:
 
         except Exception as e:
             logger.debug(f"用户缓存新鲜度检查失败: {e}")
+
+    def _calendar_refresh_job(self):
+        """09:10 刷新交易日历
+
+        盘前强制刷新，确保开盘时日历已包含当天交易日。
+        清除两处缓存：
+        1. SDK子进程的日历缓存（通过IPC调用refresh_calendar）
+        2. trading_hours.py的本地缓存变量
+        """
+        from services.common.sdk_manager import get_sdk_manager
+        from services.trading.trading_hours import clear_calendar_cache
+
+        logger.info("执行交易日历刷新任务")
+
+        try:
+            # 清除SDK子进程的日历缓存
+            sdk_mgr = get_sdk_manager()
+            if sdk_mgr.is_connected():
+                sdk_mgr.refresh_calendar()
+                logger.info("SDK交易日历缓存已清除")
+
+            # 清除trading_hours.py的本地缓存
+            clear_calendar_cache()
+            logger.log_event("calendar_refresh_done", "本地交易日历缓存已清除，开盘后将重新获取")
+
+        except Exception as e:
+            logger.error(f"交易日历刷新失败: {e}")
 
     def _heartbeat_job(self):
         """Scheduler 心跳检查，每 30 分钟执行一次
@@ -1969,31 +2013,40 @@ class SchedulerService:
                         logger.info(f"预取实时行情: {cached_count}/{len(stock_codes)} 只来自 PriceCache"
                                     + (f"，{len(missing_codes)} 只缺失" if missing_codes else ""))
 
-                        # ② 对缺失股票主动获取实时行情（确保 100% 覆盖）
+                        # ② 对缺失股票主动获取实时行情（使用多数据源 fallback）
                         if missing_codes:
                             logger.info(f"主动获取 {len(missing_codes)} 只缺失股票的实时行情...")
                             try:
-                                from services.trading.gateway import get_gateway
-                                gateway = await get_gateway()
+                                from services.data.channel.router import get_channel_router
+                                from services.data.channel.config_manager import ChannelType
+                                router = get_channel_router()
+
                                 # 分批获取（避免单次请求过大）
                                 batch_size = 50
                                 for i in range(0, len(missing_codes), batch_size):
                                     batch = missing_codes[i:i + batch_size]
-                                    batch_data = await gateway.get_batch_market_data(batch)
-                                    for code, md in batch_data.items():
-                                        if md and md.current_price and md.current_price > 0:
-                                            _pre_fetched_realtime_quotes[code] = {
-                                                'open': getattr(md, 'open_price', md.current_price) or md.current_price,
-                                                'high': getattr(md, 'high', md.current_price) or md.current_price,
-                                                'low': getattr(md, 'low', md.current_price) or md.current_price,
-                                                'close': md.current_price,
-                                                'volume': getattr(md, 'volume', 0) or 0,
-                                                'amount': getattr(md, 'amount', 0) or 0,
-                                            }
-                                    await asyncio.sleep(0.1)  # 避免阻塞 SDK 队列
+                                    try:
+                                        batch_data = await router.execute(
+                                            ChannelType.TRADING,
+                                            "get_batch_market_data",
+                                            stock_codes=batch
+                                        )
+                                        for code, md in batch_data.items():
+                                            if md and md.get("current_price", 0) > 0:
+                                                _pre_fetched_realtime_quotes[code] = {
+                                                    'open': md.get("open", md["current_price"]) or md["current_price"],
+                                                    'high': md.get("high", md["current_price"]) or md["current_price"],
+                                                    'low': md.get("low", md["current_price"]) or md["current_price"],
+                                                    'close': md["current_price"],
+                                                    'volume': md.get("volume", 0) or 0,
+                                                    'amount': md.get("amount", 0) or 0,
+                                                }
+                                    except Exception as batch_err:
+                                        logger.warning(f"批次 {i//batch_size + 1} 获取失败: {batch_err}")
+                                    await asyncio.sleep(0.1)  # 避免阻塞
 
                                 fetched_count = len([c for c in missing_codes if c in _pre_fetched_realtime_quotes])
-                                logger.info(f"主动获取完成: {fetched_count}/{len(missing_codes)} 只成功")
+                                logger.info(f"主动获取完成: {fetched_count}/{len(missing_codes)} 只成功（多数据源 fallback）")
                             except Exception as fetch_err:
                                 logger.warning(f"主动获取实时行情失败: {fetch_err}")
 

@@ -179,70 +179,23 @@
     </el-main>
 
     <!-- K 线图弹窗 -->
-    <el-dialog v-model="klineVisible" :title="klineDialogTitle" width="85%" top="5vh">
-      <div class="kline-nav">
-        <el-button size="small" @click="prevStock" :disabled="!hasPrevStock">
-          <el-icon><ArrowLeft /></el-icon> 上一只
-        </el-button>
-        <span class="kline-nav-text">{{ klineNavText }}</span>
-        <el-button size="small" @click="nextStock" :disabled="!hasNextStock">
-          下一只 <el-icon><ArrowRight /></el-icon>
-        </el-button>
-      </div>
-      <div class="kline-controls" style="margin-bottom: 12px; display: flex; align-items: center; gap: 16px; flex-wrap: wrap">
-        <el-radio-group v-model="klinePeriod" size="small" @change="reloadKline">
-          <el-radio-button label="day">日线</el-radio-button>
-          <el-radio-button label="week">周线</el-radio-button>
-          <el-radio-button label="month">月线</el-radio-button>
-        </el-radio-group>
-        <el-radio-group v-model="klineAdjust" size="small" @change="reloadKline">
-          <el-radio-button label="none">不复权</el-radio-button>
-          <el-radio-button label="forward">前复权</el-radio-button>
-        </el-radio-group>
-        <!-- 技术指标选择器 -->
-        <el-dropdown trigger="click" @command="toggleIndicator" style="margin-left: 8px">
-          <el-button size="small">
-            <el-icon><Setting /></el-icon> 技术指标
-            <el-icon class="el-icon--right"><ArrowDown /></el-icon>
-          </el-button>
-          <template #dropdown>
-            <el-dropdown-menu>
-              <el-dropdown-item :class="{ 'is-active': selectedIndicators.includes('ma5') }" command="ma5">
-                MA5 均线 <el-tag v-if="selectedIndicators.includes('ma5')" size="small" type="success">已选</el-tag>
-              </el-dropdown-item>
-              <el-dropdown-item :class="{ 'is-active': selectedIndicators.includes('ma10') }" command="ma10">
-                MA10 均线 <el-tag v-if="selectedIndicators.includes('ma10')" size="small" type="success">已选</el-tag>
-              </el-dropdown-item>
-              <el-dropdown-item :class="{ 'is-active': selectedIndicators.includes('ma20') }" command="ma20">
-                MA20 均线 <el-tag v-if="selectedIndicators.includes('ma20')" size="small" type="success">已选</el-tag>
-              </el-dropdown-item>
-              <el-dropdown-item :class="{ 'is-active': selectedIndicators.includes('ma60') }" command="ma60">
-                MA60 均线 <el-tag v-if="selectedIndicators.includes('ma60')" size="small" type="success">已选</el-tag>
-              </el-dropdown-item>
-              <el-dropdown-item divided :class="{ 'is-active': selectedIndicators.includes('boll') }" command="boll">
-                布林带 (BOLL) <el-tag v-if="selectedIndicators.includes('boll')" size="small" type="success">已选</el-tag>
-              </el-dropdown-item>
-              <el-dropdown-item :class="{ 'is-active': selectedIndicators.includes('ema12') }" command="ema12">
-                EMA12 <el-tag v-if="selectedIndicators.includes('ema12')" size="small" type="success">已选</el-tag>
-              </el-dropdown-item>
-              <el-dropdown-item :class="{ 'is-active': selectedIndicators.includes('ema26') }" command="ema26">
-                EMA26 <el-tag v-if="selectedIndicators.includes('ema26')" size="small" type="success">已选</el-tag>
-              </el-dropdown-item>
-            </el-dropdown-menu>
-          </template>
-        </el-dropdown>
-        <el-button size="small" @click="loadMoreKline" :disabled="klinePeriod === 'month' || klineLoadingMore" v-if="klinePeriod !== 'month'">
-          <el-icon><Download /></el-icon> 加载更多
-        </el-button>
-        <span v-if="klinePeriod === 'month'" style="color: #909399; font-size: 12px">月线已显示全部数据</span>
-      </div>
-      <KlineChart ref="klineChartRef" :data="klineData" height="550px"
-        :stockCode="klineStockInfo.code"
-        :accountId="currentAccountId"
-        :enableDrillDown="true"
-        :indicators="klineIndicators"
-        :indicatorConfig="klineIndicatorConfig" />
-    </el-dialog>
+    <KlineDialog
+      v-model:visible="klineVisible"
+      :stockInfo="klineStockInfo"
+      :klineData="klineData"
+      :accountId="currentAccountId"
+      :hasPrevStock="hasPrevStock"
+      :hasNextStock="hasNextStock"
+      :navText="klineNavText"
+      :loadingMore="klineLoadingMore"
+      :indicators="klineIndicators"
+      @prev-stock="prevStock"
+      @next-stock="nextStock"
+      @reload-kline="handleReloadKline"
+      @load-more="loadMoreKline"
+      @indicator-change="handleIndicatorChange"
+      ref="klineDialogRef"
+    />
   </div>
 </template>
 
@@ -251,7 +204,7 @@ import { ref, onMounted, computed } from 'vue'
 import { Refresh, Download, ArrowLeft, ArrowRight, Setting, ArrowDown } from '@element-plus/icons-vue'
 import { useAccountStore } from '../stores/account'
 import NavBar from '../components/NavBar.vue'
-import KlineChart from '../components/KlineChart.vue'
+import KlineDialog from '../components/KlineDialog.vue'
 import { exportTable as doExport } from '@/utils/exportHelper'
 import * as echarts from 'echarts'
 
@@ -446,7 +399,7 @@ const renderEquityChart = (curve) => {
 // K 线图弹窗
 // ============================================================
 const klineVisible = ref(false)
-const klineChartRef = ref(null)
+const klineDialogRef = ref(null)
 const klineStockInfo = ref({ code: '', name: '', sw_level1: '', sw_level2: '', sw_level3: '' })
 const klineStockIndex = ref(-1)
 const klineData = ref([])
@@ -458,38 +411,19 @@ const klineLoadingMore = ref(false)
 // 技术指标叠加功能
 const selectedIndicators = ref([])
 const klineIndicators = ref({})
-const klineIndicatorConfig = computed(() => {
-  const config = []
-  const indicatorColors = {
-    ma5: '#FF6B6B',
-    ma10: '#4ECDC4',
-    ma20: '#FFD93D',
-    ma60: '#96CEB4',
-    boll_upper: '#FF8C00',
-    boll_middle: '#FF1493',
-    boll_lower: '#9370DB',
-    ema12: '#00CED1',
-    ema26: '#8B4513',
-  }
-  for (const key of selectedIndicators.value) {
-    if (key === 'boll') {
-      config.push({ key: 'boll_upper', name: 'BOLL上轨', color: indicatorColors.boll_upper, width: 1 })
-      config.push({ key: 'boll_middle', name: 'BOLL中轨', color: indicatorColors.boll_middle, width: 1 })
-      config.push({ key: 'boll_lower', name: 'BOLL下轨', color: indicatorColors.boll_lower, width: 1 })
-    } else {
-      const name = key.toUpperCase()
-      config.push({ key, name, color: indicatorColors[key] || '#999', width: 1 })
-    }
-  }
-  return config
-})
 
-const klineDialogTitle = computed(() => {
-  const { name, code, sw_level1, sw_level2, sw_level3 } = klineStockInfo.value
-  const industryParts = [sw_level1, sw_level2, sw_level3].filter(Boolean)
-  const industryStr = industryParts.length > 0 ? ` [${industryParts.join(' - ')}]` : ''
-  return `${name} (${code})${industryStr} K线走势`
-})
+// 处理 K 线重新加载（周期/复权变化）
+const handleReloadKline = async ({ period, adjust }) => {
+  klinePeriod.value = period
+  klineAdjust.value = adjust
+  await reloadKline()
+}
+
+// 处理指标变化
+const handleIndicatorChange = (indicators) => {
+  selectedIndicators.value = indicators
+  loadIndicatorData()
+}
 
 const hasPrevStock = computed(() => klineStockIndex.value > 0)
 const hasNextStock = computed(() => klineStockIndex.value >= 0 && klineStockIndex.value < selections.value.length - 1)
@@ -599,16 +533,6 @@ const nextStock = async () => {
   klineStockIndex.value = idx
   klineIndicators.value = {}
   await loadKlineData(row.stock_code, row.stock_name)
-}
-
-const toggleIndicator = (key) => {
-  const idx = selectedIndicators.value.indexOf(key)
-  if (idx >= 0) {
-    selectedIndicators.value.splice(idx, 1)
-  } else {
-    selectedIndicators.value.push(key)
-  }
-  loadIndicatorData()
 }
 
 const loadIndicatorData = async () => {
